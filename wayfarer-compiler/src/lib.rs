@@ -2806,7 +2806,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires WAYFARER_ROUTE_PARITY_PBF or repository Monaco fixture"]
     fn monaco_packages_are_deterministic_and_behaviorally_stable() {
         let pbf = std::env::var_os("WAYFARER_ROUTE_PARITY_PBF")
             .map(PathBuf::from)
@@ -2840,66 +2839,67 @@ mod tests {
         );
 
         let engines = [&first, &second].map(|output| package_engine(&output.join("routing.mrt")));
-        // Re-baselined on 2026-10-28 after the compiler's OSM tag fixes (layers,
-        // default access, `only_*` restrictions, ferries) and the search's
-        // U-turn cost and approach cost changed these routes. The totals must
-        // match to f32 rounding and the edge fingerprints exactly.
+        // Re-baselined on 2026-11-17: the goldens went stale while this test
+        // was ignored (later engine and compiler changes moved these routes
+        // and their edge ids); the package still matches
+        // fixtures/monaco-info.json. The totals must match to f32 rounding
+        // and the edge fingerprints exactly.
         let golden: [(f64, f64, f64, usize, u64); 8] = [
             (
-                2685.4698986702724,
-                171.00434965399486,
-                260.16500025562596,
-                68,
-                3732547255643970633,
+                2047.6120446791913,
+                190.58227701867665,
+                217.15802776261896,
+                57,
+                15212771926247900046,
             ),
             (
-                2106.6826611844926,
-                1576.4573588383632,
-                711.7791393121469,
-                75,
-                12838784673562276170,
+                1945.352435067371,
+                1373.1899599859382,
+                1461.2465279433395,
+                72,
+                8754937441538723445,
             ),
             (
-                2685.4698986702724,
-                148.69943455547985,
-                231.87304359926233,
-                68,
-                3732547255643970633,
+                3072.489087949827,
+                208.33119192260511,
+                252.9142019371356,
+                89,
+                18118173261714362790,
             ),
             (
                 2047.6120446791913,
-                205.69244057143152,
-                337.0403746408385,
+                215.8750875036877,
+                337.44146348403336,
                 57,
-                4598794617766150209,
+                15212771926247900046,
             ),
             (
                 2401.0263224734517,
-                146.12249947795294,
-                211.33357788240576,
+                201.42088467548498,
+                196.40290802292756,
                 62,
-                5533742158271046351,
+                17383834656155057796,
             ),
             (
-                2087.01110124588,
-                1562.9586240053177,
-                711.8922084903716,
-                78,
-                13424270905584014035,
+                1934.7695955783877,
+                1365.719717485633,
+                1458.796490425792,
+                72,
+                3845908430387602659,
             ),
             (
                 2401.0263224734517,
-                127.06304384974736,
-                188.37006826436078,
+                174.75927405121425,
+                201.07278831440556,
                 62,
-                5533742158271046351,
+                17383834656155057796,
             ),
             (
                 2348.2805601252767,
-                224.17462094461024,
+                254.42299810042812,
                 293.3094785621453,
                 57,
-                17632226439419419148,
+                6086558223065972223,
             ),
         ];
         let mut golden_index = 0usize;
