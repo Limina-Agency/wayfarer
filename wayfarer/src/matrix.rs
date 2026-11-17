@@ -742,11 +742,22 @@ impl RoutingEngine {
 /// region, so a row costs about the same whatever its targets, while a cell
 /// costs more the farther apart its points are. Measured on Malopolskie
 /// (`examples/analysis_parity.rs`, process CPU, 10 source rows): on foot in
-/// Krakow, pairwise wins at 8 targets and rows from 16; driving, rows win
-/// from about 50 targets across the region but pairwise still wins 2-3x at
-/// 100 targets in Krakow.
+/// Krakow, pairwise wins at 8 targets and rows from 16.
+///
+/// Driving, a strict pass's cells also slow down as the matrix grows: every
+/// endpoint's destination-only pocket is unblocked for every cell, and each
+/// unblocked edge is a discount gate weakening the landmark bounds. Measured
+/// 2026-11-17 (square matrices of random road points, 16 threads, visited
+/// edges, rows with unreachable targets skipped): across Malopolskie rows
+/// and pairwise visit about as much at 50 points (305M and 292M) and rows a
+/// quarter as much at 64 (384M and 1,486M; 23 s and 62 s) and 80 (33 s and
+/// 110 s); on the Krakow centre package rows win from 10 points (0.24 s and
+/// 4.3 s at 50, 0.47 s and 26 s at 100). Rows and pairwise cells have the
+/// same paths there; their costs, distances and durations differ only in
+/// the last bits (the two halves of a bidirectional search add up in
+/// another order).
 const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT: usize = 12;
-const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 100;
+const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 50;
 
 /// The pairwise cut-off for `profile`; `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS`
 /// overrides it for every profile (for benchmarking).
