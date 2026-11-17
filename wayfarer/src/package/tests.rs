@@ -3916,6 +3916,7 @@ fn landmark_bounds_are_consistent() {
                     g.landmark_to,
                     g.landmark_scale,
                     g.landmark_count,
+                    g.landmark_count,
                     g.node_count,
                     column,
                     targets,
@@ -4012,6 +4013,7 @@ fn discount_gate_bounds_are_consistent() {
                     g.landmark_to,
                     landmarks.scales,
                     g.landmark_count,
+                    landmarks.active,
                     g.node_count,
                     landmarks.column,
                     &targets,
@@ -6067,7 +6069,7 @@ fn profile_landmark_bounds_are_consistent_and_admissible() {
             let landmarks = column.landmarks.expect("landmarks");
             assert_eq!(
                 landmarks.count,
-                landmarks::ACTIVE_LANDMARKS.min(g.landmark_count)
+                columns::PROFILE_LANDMARK_COUNT.min(g.landmark_count)
             );
             let mut checked = 0;
             for (targets, reversed) in nodes
@@ -6079,6 +6081,7 @@ fn profile_landmark_bounds_are_consistent_and_admissible() {
                     landmarks.to,
                     landmarks.scales,
                     landmarks.count,
+                    landmarks.active,
                     g.node_count,
                     landmarks.column,
                     targets,

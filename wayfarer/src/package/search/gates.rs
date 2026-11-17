@@ -197,6 +197,7 @@ impl<'g> GatedAlt<'g> {
             landmarks.to,
             landmarks.scales,
             landmarks.count,
+            landmarks.active,
             landmarks.column,
             &clusters,
             seeds,
