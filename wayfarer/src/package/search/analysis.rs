@@ -73,6 +73,7 @@ impl<'g> TargetPotential<'g> {
                     landmarks.to,
                     landmarks.scales,
                     landmarks.count,
+                    landmarks.active,
                     graph.node_count,
                     landmarks.column,
                     chunk,

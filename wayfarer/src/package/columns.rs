@@ -35,6 +35,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use super::landmarks::active_landmarks;
 use super::profile_landmarks::ProfileLandmarks;
 use super::{RoutingPackage, SearchGraph, chord_m, profile_bit, road_type_from_rank};
 use crate::costing::{
@@ -59,8 +60,9 @@ const LANDMARK_SCALE_MARGIN: f64 = 1.0 - 1e-6;
 const OWN_LANDMARKS_BELOW_SCALE: f64 = 0.9;
 
 /// Landmarks measured for a derived metric: the first of the stored column's
-/// (they are kept in maxCover order), as many as a query uses.
-const PROFILE_LANDMARK_COUNT: usize = super::landmarks::ACTIVE_LANDMARKS;
+/// (they are kept in maxCover order). Measuring them is per-request work, so
+/// fewer than the package stores.
+pub(crate) const PROFILE_LANDMARK_COUNT: usize = 6;
 
 /// Borrowed view of one cost column, as the searches read it.
 #[derive(Clone, Copy)]
@@ -91,6 +93,9 @@ pub(crate) struct LandmarkColumn<'c> {
     pub to: LandmarkTable<'c>,
     /// Landmarks per row.
     pub count: usize,
+    /// Landmarks a query bounds with: all of them for vehicles, fewer for
+    /// walkers (see `landmarks::active_landmarks`).
+    pub active: usize,
 }
 
 impl<'c> CostColumn<'c> {
@@ -123,6 +128,8 @@ pub(crate) struct DerivedColumn {
     duration: Vec<f32>,
     landmark_column: Option<usize>,
     landmark_scales: Vec<f32>,
+    /// Whether the column's profile walks (see [`LandmarkColumn::active`]).
+    walking: bool,
     /// Landmarks of the column's own metric, replacing the stored column's.
     own_landmarks: Option<Arc<ProfileLandmarks>>,
     heuristic_cost_per_m: f64,
@@ -221,6 +228,8 @@ pub(crate) enum ColumnHandle {
         column: usize,
         heuristic_cost_per_m: f64,
         junction: Option<JunctionDelay>,
+        /// Whether the profile walks (see [`LandmarkColumn::active`]).
+        walking: bool,
     },
     Derived(Arc<DerivedColumn>),
 }
@@ -232,6 +241,7 @@ impl ColumnHandle {
                 column,
                 heuristic_cost_per_m,
                 junction,
+                walking,
             } => {
                 let range = column * view.edge_count..(column + 1) * view.edge_count;
                 CostColumn {
@@ -244,6 +254,7 @@ impl ColumnHandle {
                         from: view.landmark_from,
                         to: view.landmark_to,
                         count: view.landmark_count,
+                        active: active_landmarks(*walking, view.landmark_count),
                     }),
                     heuristic_cost_per_m: *heuristic_cost_per_m,
                     junction: *junction,
@@ -267,6 +278,7 @@ impl ColumnHandle {
                         from,
                         to,
                         count,
+                        active: active_landmarks(derived.walking, count),
                     }
                 }),
                 heuristic_cost_per_m: derived.heuristic_cost_per_m,
@@ -438,6 +450,12 @@ fn canonical(profile: MobilityProfile) -> MobilityProfile {
     }
 }
 
+/// Whether `profile` walks: its queries bound with fewer landmarks (see
+/// [`LandmarkColumn::active`]).
+fn walking(profile: MobilityProfile) -> bool {
+    landmark_profile(profile) == MobilityProfile::OnFoot
+}
+
 /// The stored column whose landmarks a derived column of `profile` borrows.
 fn landmark_profile(profile: MobilityProfile) -> MobilityProfile {
     match canonical(profile) {
@@ -493,6 +511,7 @@ impl RoutingPackage {
                 column,
                 heuristic_cost_per_m: self.file().heuristic_cost_per_m(profile),
                 junction: JunctionDelay::for_profile(profile),
+                walking: walking(profile),
             };
         }
         if let Some(column) = self.derived_columns.get(&key) {
@@ -856,6 +875,7 @@ pub(super) fn derive_column(
         duration,
         landmark_column: landmark_scale.and(landmark_column),
         landmark_scales,
+        walking: walking(key.profile),
         own_landmarks: None,
         heuristic_cost_per_m,
         junction: JunctionDelay::for_profile(key.profile),
