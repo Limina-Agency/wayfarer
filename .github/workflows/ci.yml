@@ -26,3 +26,69 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  check-windows:
+    # The workspace tests, the C library's compile calls and the Monaco
+    # package on Windows: packages must be the same bytes there.
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+      - run: cargo test --workspace
+      - run: cargo test -p wayfarer-ffi --features compiler --test compile
+      - run: cargo build --release -p wayfarer-cli
+      - name: Monaco package matches fixtures/monaco-info.json
+        run: |
+          wayfarer=target/release/wayfarer.exe
+          "$wayfarer" compile fixtures/monaco.osm.pbf -o "$RUNNER_TEMP/monaco.mrt" \
+            --country MC --graph-id monaco >/dev/null
+          "$wayfarer" verify "$RUNNER_TEMP/monaco.mrt" >/dev/null
+          # Normalised as scripts/check.sh does, compared in Python so the
+          # line endings Windows prints don't matter.
+          "$wayfarer" info "$RUNNER_TEMP/monaco.mrt" | python -c '
+          import json, sys
+          info = json.dumps(json.load(sys.stdin.buffer), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+          with open("fixtures/monaco-info.json", encoding="utf-8", newline="") as f:
+              expected = f.read().replace("\r\n", "\n")
+          if info != expected:
+              sys.stdout.reconfigure(newline="\n")
+              print(info, end="")
+              sys.exit("error: the Monaco package differs from fixtures/monaco-info.json")
+          '
+          "$wayfarer" route "$RUNNER_TEMP/monaco.mrt" --from 43.7397,7.4275 \
+            --to 43.7290,7.4160 >/dev/null
+
+  i686:
+    # A 32-bit target: packages are the same bytes on every platform, and a
+    # 32-bit engine must open them (usize is 32 bits there).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      TARGET: i686-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - run: rustup toolchain install && rustup target add "$TARGET"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: i686
+      - run: cargo test -p wayfarer-package -p wayfarer --target "$TARGET"
+      - run: cargo build --release -p wayfarer-cli --target "$TARGET"
+      - name: Monaco package matches fixtures/monaco-info.json
+        run: |
+          wayfarer="target/$TARGET/release/wayfarer"
+          "$wayfarer" compile fixtures/monaco.osm.pbf -o "$RUNNER_TEMP/monaco.mrt" \
+            --country MC --graph-id monaco >/dev/null
+          "$wayfarer" verify "$RUNNER_TEMP/monaco.mrt" >/dev/null
+          "$wayfarer" info "$RUNNER_TEMP/monaco.mrt" | python3 -c '
+          import json, sys
+          print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True, ensure_ascii=False))
+          ' >"$RUNNER_TEMP/info.json"
+          diff -u fixtures/monaco-info.json "$RUNNER_TEMP/info.json"
+          "$wayfarer" route "$RUNNER_TEMP/monaco.mrt" --from 43.7397,7.4275 \
+            --to 43.7290,7.4160 >/dev/null
