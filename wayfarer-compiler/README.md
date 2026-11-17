@@ -82,12 +82,16 @@ worker process can be started):
   directory inside `scratch_dir` (default: the output's directory), removed
   whatever the outcome; on cancel and on error the `.tmp` file and any
   directory the compile created are removed too.
-- **Replacing an open package on Windows.** Linux and macOS let the rename
-  replace a package an engine has open (the engine keeps reading the old
-  one). Windows doesn't allow replacing a memory-mapped file, in any
-  process: the compile fails with access denied and the old package stays
-  intact. An app that recompiles in the field should write to a new path
-  and then switch its engine over.
+- **Replacing an open package.** Linux and macOS let the rename replace a
+  package an engine has open (the engine keeps reading the old one).
+  Windows doesn't allow deleting a memory-mapped file, so there the open
+  package is renamed aside to `<output>.replaced-<unique>` first (Wayfarer
+  opens packages with delete sharing, which allows it), the new one takes
+  its place, and the old file is deleted once no engine has it open: right
+  away if it can be, otherwise by the next compile to the same `output`.
+  For a moment between the two renames `output` is missing. A process that
+  opened the package without delete sharing, outside Wayfarer, still makes
+  the compile fail with access denied, leaving the old package intact.
 - **Threads.** `threads: Some(n)` runs the compile on its own rayon pool of
   `n` threads (never the global pool) with `n` ingest decode workers plus a
   reader thread. `None` runs on the current pool: call `compile` inside your

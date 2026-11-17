@@ -49,6 +49,44 @@ wayfarer_string_free(text);
 wayfarer_close(package);
 ```
 
+On Windows, with MSVC (from a Developer Command Prompt), link the DLL's
+import library, or the static library with `/MD`:
+
+```bat
+cargo build --release -p wayfarer-ffi
+rem Against the DLL (wayfarer_ffi.dll next to route.exe at run time):
+cl wayfarer-ffi\examples\route.c /Iwayfarer-ffi\include target\release\wayfarer_ffi.dll.lib
+rem Static:
+cl /MD wayfarer-ffi\examples\route.c /Iwayfarer-ffi\include target\release\wayfarer_ffi.lib ^
+   ws2_32.lib userenv.lib ntdll.lib bcrypt.lib advapi32.lib
+route.exe routing.mrt 43.7397 7.4275 43.7290 7.4160
+```
+
+The static library needs `/MD` (or `/MDd`), not `cl`'s default `/MT`: Rust's
+MSVC targets build against the DLL C runtime, and so does the bundled zstd C
+code, so with `/MT` the link fails with unresolved `__imp_clock`,
+`__imp__wassert` and `__imp_qsort_s`. A host that has to use `/MT` builds the
+library with `RUSTFLAGS="-C target-feature=+crt-static"`. The system
+libraries a static link needs are printed by
+`cargo rustc --release -p wayfarer-ffi --crate-type staticlib -- --print native-static-libs`.
+
+**Paths are UTF-8, also on Windows.** A Windows C program gets `argv` and
+the Win32 "A" functions' strings in the ANSI code page, which can't spell
+every path, and `wayfarer_open` then fails with "path is not UTF-8". Take
+the arguments from `wmain` and convert them with
+`WideCharToMultiByte(CP_UTF8, ...)`, as the examples do (with MinGW, link
+with `-municode`), or pass a `wchar_t` path to `wayfarer_open_w` or
+`wayfarer_verify_w` (Windows only).
+
+**Replacing a package that is open.** A compile, or any other package write
+through Wayfarer, writes `<path>.tmp` and moves it over the old file: an
+open handle keeps reading the old package and the next `wayfarer_open` gets
+the new one. On Windows a memory-mapped file can't be deleted, so the open
+package is renamed aside to `<path>.replaced-<unique>` and deleted once no
+handle has it open (at the latest by the next replacement). A host that
+downloads packages itself should do the same, or write each version to a new
+path and open that.
+
 Every string the library returns is freed with `wayfarer_string_free`,
 and a handle is closed only after every call on it has returned.
 `wayfarer_versions` returns the library, ABI, readable package formats

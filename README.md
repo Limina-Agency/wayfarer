@@ -64,8 +64,11 @@ overlap 0.97.
 - **One region per package**, compiled whole: no incremental updates, no
   traffic data and no departure-time routing (conditional restrictions and
   overlay time windows are evaluated at one time per request).
-- **Windows can't replace an open package.** Compile to a new path and switch
-  the engine over (Linux and macOS replace it in place).
+- **Replacing an open package on Windows leaves a file for a while.** The
+  open package is renamed aside to `<name>.replaced-<unique>` and deleted
+  once nothing has it open, at the latest by the next replacement of the same
+  path (Linux and macOS replace it in place). A process that opened the
+  package without delete sharing, outside Wayfarer, still blocks it.
 
 ## Crates
 
