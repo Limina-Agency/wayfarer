@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The CI checks, run locally: formatting, clippy, tests, then the Monaco package
-# compiled, verified and described with the release `wayfarer` binary, a route and
+# The CI checks, run locally: formatting, clippy, rustdoc warnings, tests, then
+# the Monaco package compiled, verified and described with the release
+# `wayfarer` binary, a route and
 # cancelled routes through the C ABI from the C examples, and the Kraków centre
 # regression gate.
 #
@@ -37,6 +38,9 @@ cargo fmt --all --check
 step "clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p wayfarer-ffi --features compiler --all-targets -- -D warnings
+
+step "rustdoc"
+RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --all-features
 
 step "tests"
 cargo test --workspace

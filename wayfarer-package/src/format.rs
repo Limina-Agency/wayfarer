@@ -1765,13 +1765,13 @@ impl InEdgeBuffer {
 /// The edges into a node, each with its source, in ascending edge order
 /// ([`Sections::in_edges`]).
 pub enum InEdges {
-    /// At most [`IN_EDGES_INLINE`] in-edges.
+    /// At most `IN_EDGES_INLINE` (8) in-edges.
     Inline {
         items: [(u32, u32); IN_EDGES_INLINE],
         at: usize,
         len: usize,
     },
-    /// Derived, for a node with more than [`IN_EDGES_INLINE`] in-edges.
+    /// Derived, for a node with more than `IN_EDGES_INLINE` (8) in-edges.
     Spilled(std::vec::IntoIter<(u32, u32)>),
 }
 

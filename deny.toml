@@ -1,0 +1,47 @@
+# cargo deny check (CI's `deny` job): advisories, licenses, duplicate or
+# banned crates, and where crates come from.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories fail the check; unmaintained crates only when a direct
+# dependency is unmaintained.
+unmaintained = "workspace"
+ignore = [
+    # chrono is unmaintained (no fixed release). The engine uses only its
+    # date arithmetic for OSM conditional restrictions (no clock, no time
+    # zones); moving to jiff or time is its own change.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; replacement tracked separately" },
+    # bincode 1.3.3 is a test-only dependency, frozen on purpose: the
+    # reference the package codec is checked against (wayfarer_package::codec).
+    { id = "RUSTSEC-2025-0141", reason = "test-only reference codec, frozen at 1.3.3" },
+]
+
+[licenses]
+# Keep in step with about.toml's `accepted` list (the release archives'
+# third-party notices).
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
