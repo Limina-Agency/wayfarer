@@ -134,9 +134,10 @@ Version 0.x: the library API may change between minor releases; the
 - The package layout is versioned (`ROUTING_PACKAGE_FORMAT_VERSION`, 1 today);
   see the routing package format crate for which formats an engine opens.
 - Packages record the costing model they were baked with
-  (`COSTING_MODEL_VERSION`, 1 today). An engine opens only packages of its own
-  model, so a compiler and an engine have to come from the same costing model
-  release.
+  (`COSTING_MODEL_VERSION`, 1 today). An engine opens packages of its own
+  model and of older ones, re-costing an older model's package from its
+  stored costing inputs (slower until it is recompiled); a package of a newer
+  model than the engine's fails to open as too new.
 - Output is deterministic: a compiler of one release writes the same bytes for
   the same input on every platform, in debug and release builds and at any
   thread count (trigonometry comes from the pure-Rust `libm` crate, not the

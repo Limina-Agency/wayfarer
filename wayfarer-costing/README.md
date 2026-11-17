@@ -44,9 +44,10 @@ Version 0.x: the API may change between minor releases.
 
 `COSTING_MODEL_VERSION` (1 today) is bumped whenever a change here changes any
 cost or duration the compiler stores. A package records the model it was baked
-with and the engine opens only packages of its own model, so such a change has
-to ship the compiler and the engine together, and existing packages must be
-recompiled. Turn costs and junction delays (`junction`: the time lost turning,
+with; an engine re-costs a package of an older model from its stored costing
+inputs (slower until it is recompiled) and refuses a newer one, so such a
+change ships the compiler and the engine together, and existing packages
+should be recompiled. Turn costs and junction delays (`junction`: the time lost turning,
 yielding and waiting at signals or signs, added to durations) are not stored:
 the engine evaluates them at query time from stored inputs and landmark bounds
 ignore them, so a change that only raises them needs no bump.
