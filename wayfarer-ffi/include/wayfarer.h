@@ -35,12 +35,13 @@
  * Replacing a package. Packages are written to "<path>.tmp" and moved over
  *   the old file, so a package can be recompiled or downloaded onto the path
  *   of one that is open: the open handle keeps reading the old package, and
- *   the next wayfarer_open gets the new one. On Windows an open package is
- *   memory mapped and can't be deleted, so the old file is renamed aside to
- *   "<path>.replaced-<unique>" and deleted once no handle has it open, at
- *   the latest by the next replacement of the same path. A host that writes
- *   packages itself does the same, or writes each version to a new path and
- *   opens that.
+ *   the next wayfarer_open gets the new one. Where Windows can't rename
+ *   with POSIX semantics (FAT32, exFAT, some network shares), a rename over
+ *   an open, memory-mapped package fails, so there the old file is renamed
+ *   aside to "<path>.replaced-<unique>" and deleted once no handle has it
+ *   open, at the latest by the next replacement of the same path. A host
+ *   that writes packages itself does the same, or writes each version to a
+ *   new path and opens that.
  *
  * Thread safety.
  *   - Every function may be called from any thread.

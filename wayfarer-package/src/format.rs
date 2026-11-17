@@ -852,10 +852,12 @@ impl PackageFile {
     /// Moves a finished package from `temp` onto `path`, replacing the file
     /// there even while it is open.
     ///
-    /// A rename does that on Linux and macOS: an engine that has the old file
-    /// open keeps reading it until it closes. On Windows a file that is memory
-    /// mapped can't be deleted, so a rename over an open package fails with
-    /// "Access is denied". There the open package is renamed aside instead to
+    /// A rename does that on Linux, macOS, and Windows on NTFS and ReFS
+    /// (std renames with POSIX semantics there): an engine that has the old
+    /// file open keeps reading it until it closes. Where Windows can't rename
+    /// with POSIX semantics (FAT32, exFAT, some network shares), a rename over
+    /// a memory-mapped package fails with "Access is denied". There the open
+    /// package is renamed aside instead to
     /// `<name>.replaced-<unique>` (allowed: packages are opened with delete
     /// sharing, see [`Self::open`]), the new one takes its place, and the old
     /// one is deleted as soon as nothing has it open: at once if it can be,

@@ -81,11 +81,12 @@ with `-municode`), or pass a `wchar_t` path to `wayfarer_open_w` or
 **Replacing a package that is open.** A compile, or any other package write
 through Wayfarer, writes `<path>.tmp` and moves it over the old file: an
 open handle keeps reading the old package and the next `wayfarer_open` gets
-the new one. On Windows a memory-mapped file can't be deleted, so the open
-package is renamed aside to `<path>.replaced-<unique>` and deleted once no
-handle has it open (at the latest by the next replacement). A host that
-downloads packages itself should do the same, or write each version to a new
-path and open that.
+the new one. Where Windows can't rename with POSIX semantics (FAT32,
+exFAT, some network shares), a rename over an open, memory-mapped package
+fails, so there the open package is renamed aside to
+`<path>.replaced-<unique>` and deleted once no handle has it open (at the
+latest by the next replacement). A host that downloads packages itself
+should do the same, or write each version to a new path and open that.
 
 Every string the library returns is freed with `wayfarer_string_free`,
 and a handle is closed only after every call on it has returned.

@@ -82,16 +82,17 @@ worker process can be started):
   directory inside `scratch_dir` (default: the output's directory), removed
   whatever the outcome; on cancel and on error the `.tmp` file and any
   directory the compile created are removed too.
-- **Replacing an open package.** Linux and macOS let the rename replace a
-  package an engine has open (the engine keeps reading the old one).
-  Windows doesn't allow deleting a memory-mapped file, so there the open
-  package is renamed aside to `<output>.replaced-<unique>` first (Wayfarer
-  opens packages with delete sharing, which allows it), the new one takes
-  its place, and the old file is deleted once no engine has it open: right
-  away if it can be, otherwise by the next compile to the same `output`.
-  For a moment between the two renames `output` is missing. A process that
-  opened the package without delete sharing, outside Wayfarer, still makes
-  the compile fail with access denied, leaving the old package intact.
+- **Replacing an open package.** The rename replaces a package an engine
+  has open (the engine keeps reading the old one) on Linux, macOS, and
+  Windows on NTFS and ReFS (Wayfarer opens packages with delete sharing).
+  Where Windows can't rename with POSIX semantics (FAT32, exFAT, some
+  network shares), the rename over a memory-mapped file fails, so there the
+  open package is renamed aside to `<output>.replaced-<unique>` first, the
+  new one takes its place, and the old file is deleted once no engine has
+  it open: right away if it can be, otherwise by the next compile to the
+  same `output`. For a moment between the two renames `output` is missing.
+  A process that opened the package without delete sharing, outside
+  Wayfarer, still makes the compile fail, leaving the old package intact.
 - **Threads.** `threads: Some(n)` runs the compile on its own rayon pool of
   `n` threads (never the global pool) with `n` ingest decode workers plus a
   reader thread. `None` runs on the current pool: call `compile` inside your

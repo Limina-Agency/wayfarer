@@ -7,12 +7,14 @@ costing model and the C ABI version a release reads or writes.
 
 ## Unreleased
 
-- **A package that is open can be replaced on Windows.** A compile onto the
-  path of a package an engine has open failed there with "Access is denied",
-  because Windows can't delete a memory-mapped file. The open package is now
-  renamed aside to `<name>.replaced-<unique>`, the new one takes its place,
-  and the old file is deleted once nothing has it open (at the latest by the
-  next replacement of the same path). Linux and macOS are unchanged.
+- **A package that is open can be replaced on any Windows file system.** On
+  NTFS and ReFS the rename already replaced a package an engine had open, as
+  on Linux and macOS. Where Windows can't rename with POSIX semantics
+  (FAT32, exFAT, some network shares), the rename over the open,
+  memory-mapped package fails with "Access is denied". There the open
+  package is now renamed aside to `<name>.replaced-<unique>`, the new one
+  takes its place, and the old file is deleted once nothing has it open (at
+  the latest by the next replacement of the same path).
   `PackageFile::move_into_place` does this for hosts that write packages.
 - **C ABI: `wayfarer_open_w` and `wayfarer_verify_w` (Windows only)** take
   a `wchar_t` path, for hosts holding UTF-16 paths. Additive; the C ABI
