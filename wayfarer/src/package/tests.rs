@@ -1299,6 +1299,70 @@ fn destination_only_pockets_match_the_reference() {
     }
 }
 
+/// The grid with its 2x2 north-west corner ringed by destination-only ways:
+/// a drive between the corner and the rest needs the relaxed pass.
+fn grid_with_private_ring() -> RoadGraph {
+    grid_graph_with(Vec::new(), |way, from, to| {
+        way.is_destination_only = matches!(
+            (from, to),
+            ((0, 1), (0, 2)) | ((1, 1), (1, 2)) | ((1, 0), (2, 0)) | ((1, 1), (2, 1))
+        );
+    })
+}
+
+/// A matrix's relaxed pass searches only the cells the strict pass could not
+/// connect (in rows, only their sources), and every cell is the one the old
+/// relaxed re-run of the whole matrix gave.
+#[test]
+fn the_relaxed_matrix_pass_searches_only_retried_cells() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_with_private_ring(), &dir.path().join("grid.mrt"));
+    let (_, compact) = engines(&reader);
+    // Source 0 is inside the ring (on the corner's top edge), the other
+    // points outside it.
+    let sources = grid_points();
+    let targets = grid_points()[1..].to_vec();
+    let run = |mode, full| {
+        test_mode::set(Some(mode));
+        test_mode::set_full_relaxed_pass(full);
+        let result = matrix(
+            &compact,
+            sources.clone(),
+            targets.clone(),
+            MobilityProfile::Wheeled,
+        );
+        test_mode::set_full_relaxed_pass(false);
+        test_mode::set(None);
+        result
+    };
+    for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+        let only = run(mode, false);
+        let full = run(mode, true);
+        assert_eq!(only.cells, full.cells, "{mode:?}");
+        // The corner reaches every target across the ring.
+        for cell in &only.cells {
+            assert_eq!(
+                cell.status,
+                crate::RouteMatrixCellStatus::Reachable,
+                "{mode:?} {cell:?}"
+            );
+        }
+        let strict = sources.len();
+        assert_eq!(full.source_expansion_count, 2 * strict, "{mode:?}");
+        match mode {
+            MatrixMode::Buckets => assert_eq!(only.source_expansion_count, 2 * strict),
+            _ => {
+                assert_eq!(only.source_expansion_count, strict + 1, "{mode:?}");
+                assert!(
+                    only.visited_edge_count < full.visited_edge_count,
+                    "{mode:?}"
+                );
+            }
+        }
+    }
+}
+
 /// A drive between the block's two sides goes around it (row 2 is the
 /// primary road through it); emergency vehicles, and a SAR request whose
 /// `legal_access` names `private`, go straight on.

@@ -116,6 +116,11 @@ impl RoutingEngine {
         let strict = self
             .package()
             .confines_destination_only(&request.options, request.profile);
+        // Tests compare with re-running the whole matrix relaxed.
+        #[cfg(test)]
+        let only_retried = !test_mode::full_relaxed_pass();
+        #[cfg(not(test))]
+        let only_retried = true;
         let outcome = self.package().in_matrix_pool(|| {
             let mut outcome = self.matrix_cells(
                 &request,
@@ -123,13 +128,16 @@ impl RoutingEngine {
                 &target_candidates,
                 &mut cells,
                 !strict,
+                None,
             );
             // Cells that cannot connect without crossing a destination-only
-            // road get the relaxed search, as routes do.
+            // road get the relaxed search, as routes do. Only those cells are
+            // searched again (see `matrix_cells`' `retry`).
             if let Ok((expansions, visited, settled)) = &mut outcome
                 && strict
                 && cells.iter().any(retries_relaxed)
             {
+                let retry = cells.iter().map(retries_relaxed).collect::<Vec<_>>();
                 let mut relaxed = cells.clone();
                 match self.matrix_cells(
                     &request,
@@ -137,6 +145,7 @@ impl RoutingEngine {
                     &target_candidates,
                     &mut relaxed,
                     true,
+                    only_retried.then_some(retry.as_slice()),
                 ) {
                     Ok((more_expansions, more_visited, more_settled)) => {
                         *expansions += more_expansions;
@@ -188,6 +197,19 @@ impl RoutingEngine {
     /// `package::columns`). The error, for every searchable cell, is
     /// `GraphNotReady` without a package and `MissingEdgeMetadata` for a
     /// candidate edge the package does not hold.
+    ///
+    /// `retry` (row-major, one flag per cell) limits a relaxed pass to the
+    /// cells the strict pass could not connect; the other cells keep whatever
+    /// `cells` held. The relaxed query does not depend on the endpoints (no
+    /// pockets are unblocked): pairwise searches only the flagged cells,
+    /// which are independent. Rows search only the sources with a flagged
+    /// cell and, without a visited-edge budget (which applies to a whole
+    /// row), only towards their flagged targets: each target's path is exact
+    /// whatever the others, though between paths of exactly equal cost a
+    /// differently focused expansion could label another first (none did in
+    /// the Krakow and Malopolskie matrices measured). Buckets size every
+    /// backward search from all the sources and search every row. The mode
+    /// is chosen from the whole matrix either way.
     fn matrix_cells(
         &self,
         request: &RouteMatrixRequest,
@@ -195,7 +217,19 @@ impl RoutingEngine {
         target_candidates: &[&[CorrelatedLocation]],
         cells: &mut [RouteMatrixCell],
         allow_destination_only: bool,
+        retry: Option<&[bool]>,
     ) -> Result<(usize, usize, usize), RouteError> {
+        debug_assert!(retry.is_none() || allow_destination_only);
+        let target_count = target_candidates.len();
+        let retries = |source: usize, target: usize| {
+            retry.is_none_or(|retry| retry[source * target_count + target])
+        };
+        let source_retries =
+            |source: usize| retry.is_none_or(|_| (0..target_count).any(|t| retries(source, t)));
+        // A relaxed row also searches only towards its retried targets, unless
+        // a visited-edge budget makes the row's outcome depend on all of them.
+        let retried_targets_only =
+            retry.is_some() && request.options.max_visited_edge_count.is_none();
         let access = self.route_graph_view();
         let graph = access.routing_package();
         let overlay = request
@@ -366,7 +400,6 @@ impl RoutingEngine {
             cost: path.cost,
         };
 
-        let target_count = target_candidates.len();
         let searchable_targets = targets.iter().filter(|points| !points.is_empty()).count();
         // A cell across two weak components has no path: it is not searched
         // (an unreachable target would otherwise keep a row's expansion going
@@ -500,18 +533,21 @@ impl RoutingEngine {
                         .filter(|target| !targets[*target].is_empty())
                         .map(move |target| (source, target))
                 })
-                .filter(|(source, target)| connected[*source][*target])
+                .filter(|(source, target)| connected[*source][*target] && retries(*source, *target))
                 .collect::<Vec<_>>();
             let cells = search_cells(&pairs);
             let mut rows = sources
                 .iter()
-                .map(|origins| {
-                    (!origins.is_empty() && searchable_targets > 0).then(|| MatrixRowCells {
-                        paths: vec![None; target_count],
-                        budget_exceeded: vec![false; target_count],
-                        visited_edge_count: 0,
-                        settled_edge_count: 0,
-                    })
+                .enumerate()
+                .map(|(source, origins)| {
+                    (!origins.is_empty() && searchable_targets > 0 && source_retries(source)).then(
+                        || MatrixRowCells {
+                            paths: vec![None; target_count],
+                            budget_exceeded: vec![false; target_count],
+                            visited_edge_count: 0,
+                            settled_edge_count: 0,
+                        },
+                    )
                 })
                 .collect::<Vec<_>>();
             for ((source, target), (path, visited, settled, budget_exceeded)) in
@@ -532,7 +568,7 @@ impl RoutingEngine {
                 .enumerate()
                 .zip(&connected)
                 .map(|((source, origins), connected)| {
-                    if origins.is_empty() || candidates.is_empty() {
+                    if origins.is_empty() || candidates.is_empty() || !source_retries(source) {
                         return None;
                     }
                     let mut state = graph.take_state();
@@ -583,7 +619,11 @@ impl RoutingEngine {
                         None => {
                             let candidates = candidates
                                 .iter()
-                                .filter(|candidate| connected[candidate.target])
+                                .filter(|candidate| {
+                                    connected[candidate.target]
+                                        && (!retried_targets_only
+                                            || retries(source, candidate.target))
+                                })
                                 .copied()
                                 .collect::<Vec<_>>();
                             let row = matrix_row(
@@ -778,6 +818,16 @@ pub(crate) mod test_mode {
 
     thread_local! {
         static MODE: Cell<Option<MatrixMode>> = const { Cell::new(None) };
+        static FULL_RELAXED_PASS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Makes the relaxed pass search every cell again, as it used to.
+    pub(crate) fn set_full_relaxed_pass(full: bool) {
+        FULL_RELAXED_PASS.with(|cell| cell.set(full));
+    }
+
+    pub(crate) fn full_relaxed_pass() -> bool {
+        FULL_RELAXED_PASS.with(Cell::get)
     }
 
     pub(crate) fn set(mode: Option<MatrixMode>) {
