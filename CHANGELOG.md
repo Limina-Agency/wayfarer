@@ -5,6 +5,19 @@ engine, service and C ABI crates) and `wayfarer-compiler-v*` (the compiler, the
 `wayfarer` binary and their crates). Each entry names the package format, the
 costing model and the C ABI version a release reads or writes.
 
+## Unreleased
+
+- **Vehicle matrices are faster.** A strict matrix (destination-only roads
+  confined) re-ran the whole matrix relaxed whenever one cell needed it; it
+  now searches only the retried cells (pairwise) or the retried sources
+  towards their retried targets (rows). Rows leave out targets their source
+  cannot reach instead of flooding the region for them, and vehicle
+  matrices share row expansions from 51 targets (was 101). Malopolskie
+  100x100 drops from minutes to seconds; see the pull request for the
+  table. Cells take the same paths and statuses as before; matrices of 51
+  to 100 targets, now rows, differ from pairwise in the last bits of their
+  costs, distances and durations only.
+
 ## 0.1.3 (2026-11-17)
 
 Both lines. Package format 1, costing model 1, C ABI version 1, as 0.1.0.
