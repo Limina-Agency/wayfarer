@@ -962,7 +962,10 @@ impl PackageFile {
                 c.edge_count,
             )
             || !sorted_pairs_ok(self.slice(Section::NodeRoundaboutExits), c.node_count)
-            || !sorted_pairs_ok(self.slice(Section::ComponentSizes), usize::MAX)
+            // Component ids are arbitrary `u32`s (`NONE_U32` included), so
+            // only their order is checked; a `usize::MAX` bound would reject
+            // `NONE_U32` on 32-bit targets.
+            || !sorted_keys_ok(self.slice(Section::ComponentSizes))
             || !sorted_pairs_ok(self.slice(Section::ModeMaskExceptions), c.edge_count)
             || !sorted_pairs_ok(self.slice(Section::TierExceptions), c.edge_count)
             || u32::try_from(meta[3]).is_err()
@@ -986,12 +989,17 @@ pub fn sorted_exceptions_ok(edges: &[u32], values: &[u32], edge_count: usize) ->
 
 /// (key, value) pairs sorted by an in-range key.
 pub fn sorted_pairs_ok(pairs: &[u32], key_count: usize) -> bool {
-    pairs.len().is_multiple_of(2)
+    sorted_keys_ok(pairs)
         && pairs
             .as_chunks::<2>()
             .0
             .iter()
             .all(|pair| (pair[0] as usize) < key_count)
+}
+
+/// (key, value) pairs strictly sorted by key; any `u32` key.
+pub fn sorted_keys_ok(pairs: &[u32]) -> bool {
+    pairs.len().is_multiple_of(2)
         && pairs
             .as_chunks::<2>()
             .0
@@ -1700,4 +1708,20 @@ fn edge_accessible(
             ))
             .is_some()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_keys_may_be_none_on_every_target() {
+        // The compiler writes `NONE_U32` as the component of unassigned nodes.
+        let pairs = [0, 7, 3, 2, NONE_U32, NONE_U32];
+        assert!(sorted_keys_ok(&pairs));
+        assert!(!sorted_keys_ok(&[3, 1, 3, 2]));
+        assert!(!sorted_keys_ok(&[3, 1, 2]));
+        assert!(sorted_pairs_ok(&[0, 1, 4, 1], 5));
+        assert!(!sorted_pairs_ok(&[0, 1, 5, 1], 5));
+    }
 }
