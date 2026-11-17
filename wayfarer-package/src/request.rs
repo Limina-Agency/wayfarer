@@ -984,14 +984,16 @@ pub fn sorted_exceptions_ok(edges: &[u32], values: &[u32], edge_count: usize) ->
             .all(|value| *value == NONE_U32 || (*value as usize) < edge_count)
 }
 
-/// (key, value) pairs sorted by an in-range key.
+/// (key, value) pairs sorted by an in-range key. A `key_count` of
+/// `usize::MAX` accepts every key: on 32-bit targets `u32::MAX as usize`
+/// equals it, so `<` alone would reject a `u32::MAX` key there.
 pub fn sorted_pairs_ok(pairs: &[u32], key_count: usize) -> bool {
     pairs.len().is_multiple_of(2)
         && pairs
             .as_chunks::<2>()
             .0
             .iter()
-            .all(|pair| (pair[0] as usize) < key_count)
+            .all(|pair| key_count == usize::MAX || (pair[0] as usize) < key_count)
         && pairs
             .as_chunks::<2>()
             .0
@@ -1700,4 +1702,25 @@ fn edge_accessible(
             ))
             .is_some()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sorted_pairs_ok;
+
+    #[test]
+    fn sorted_pairs_ok_accepts_every_key_without_a_bound() {
+        // `ComponentSizes` is checked with `usize::MAX`; a `u32::MAX` key must
+        // pass on 32-bit targets too, where it equals `usize::MAX`.
+        assert!(sorted_pairs_ok(&[0, 7, u32::MAX, 3], usize::MAX));
+    }
+
+    #[test]
+    fn sorted_pairs_ok_checks_bounds_order_and_pairing() {
+        assert!(sorted_pairs_ok(&[1, 0, 4, 0], 5));
+        assert!(!sorted_pairs_ok(&[1, 0, 5, 0], 5));
+        assert!(!sorted_pairs_ok(&[4, 0, 1, 0], 5));
+        assert!(!sorted_pairs_ok(&[1, 0, 1, 0], 5));
+        assert!(!sorted_pairs_ok(&[1, 0, 2], 5));
+    }
 }
