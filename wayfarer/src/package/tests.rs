@@ -1363,6 +1363,42 @@ fn the_relaxed_matrix_pass_searches_only_retried_cells() {
     }
 }
 
+/// A target no source can reach in a strict pass (ringed by destination-only
+/// ways) leaves the strict rows instead of making each flood the grid; every
+/// cell is the one the flooding rows gave.
+#[test]
+fn matrix_rows_skip_targets_their_sources_cannot_reach() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_with_private_ring(), &dir.path().join("grid.mrt"));
+    let (_, compact) = engines(&reader);
+    // Target 0 is inside the ring, the sources outside it.
+    let sources = grid_points()[1..].to_vec();
+    let targets = grid_points();
+    let run = |keep| {
+        test_mode::set(Some(MatrixMode::Rows));
+        test_mode::set_keep_unreachable_targets(keep);
+        let result = matrix(
+            &compact,
+            sources.clone(),
+            targets.clone(),
+            MobilityProfile::Wheeled,
+        );
+        test_mode::set_keep_unreachable_targets(false);
+        test_mode::set(None);
+        result
+    };
+    let (skipped, kept) = (run(false), run(true));
+    assert_eq!(skipped.cells, kept.cells);
+    assert!(
+        skipped
+            .cells
+            .iter()
+            .all(|cell| cell.status == crate::RouteMatrixCellStatus::Reachable)
+    );
+    assert!(skipped.visited_edge_count < kept.visited_edge_count);
+}
+
 /// A drive between the block's two sides goes around it (row 2 is the
 /// primary road through it); emergency vehicles, and a SAR request whose
 /// `legal_access` names `private`, go straight on.

@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
 use crate::package::destination::relax_split_costs;
-use crate::package::profile_bit;
 use crate::package::search::analysis::{
     AnalysisPath, AnalysisPoint, AnalysisQuery, MatrixTargetCandidate, matrix_cell, matrix_row,
     overlay_split_costs, override_bounds, request_cost_overrides, request_duration_overrides,
@@ -18,6 +17,7 @@ use crate::package::search::patch::{
     PatchCosts, PatchCounters, PatchGraph, PatchOutcome, PatchPath, PatchQuery, analysis_overlay,
     matrix_row as patch_row, run as run_patch,
 };
+use crate::package::{SearchGraph, profile_bit};
 use crate::search::RoutingEngine;
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, MobilityProfile, RouteError, RouteMatrixCell,
@@ -563,6 +563,37 @@ impl RoutingEngine {
             rows
         } else {
             // Many targets: one shared expansion per source row, in parallel.
+            // A row runs until its last target is final, so one target no
+            // source can reach (in a strict pass, one ringed by
+            // destination-only roads) floods the whole component from every
+            // source. Targets whose few reaching edges are known leave the
+            // rows of the sources outside them (their cells find no path, as
+            // the flood did). A visited-edge budget applies to a whole row,
+            // so with one the rows keep every target.
+            #[cfg(test)]
+            let prune = !test_mode::keep_unreachable_targets();
+            #[cfg(not(test))]
+            let prune = true;
+            let reaching = if prune
+                && patch.is_none()
+                && request.options.max_visited_edge_count.is_none()
+            {
+                target_edges
+                    .par_iter()
+                    .map(|edges| {
+                        reaching_edges(view, edges, |edge| query.edge_cost(view, edge).is_finite())
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![None; target_count]
+            };
+            let may_reach = |source: usize, target: usize| {
+                reaching[target].as_ref().is_none_or(|reaching| {
+                    source_edges[source]
+                        .iter()
+                        .any(|edge| reaching.contains(edge))
+                })
+            };
             sources
                 .par_iter()
                 .enumerate()
@@ -623,6 +654,7 @@ impl RoutingEngine {
                                     connected[candidate.target]
                                         && (!retried_targets_only
                                             || retries(source, candidate.target))
+                                        && may_reach(source, candidate.target)
                                 })
                                 .copied()
                                 .collect::<Vec<_>>();
@@ -819,6 +851,7 @@ pub(crate) mod test_mode {
     thread_local! {
         static MODE: Cell<Option<MatrixMode>> = const { Cell::new(None) };
         static FULL_RELAXED_PASS: Cell<bool> = const { Cell::new(false) };
+        static KEEP_UNREACHABLE_TARGETS: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Makes the relaxed pass search every cell again, as it used to.
@@ -828,6 +861,15 @@ pub(crate) mod test_mode {
 
     pub(crate) fn full_relaxed_pass() -> bool {
         FULL_RELAXED_PASS.with(Cell::get)
+    }
+
+    /// Keeps targets no source can reach in every row, as rows used to.
+    pub(crate) fn set_keep_unreachable_targets(keep: bool) {
+        KEEP_UNREACHABLE_TARGETS.with(|cell| cell.set(keep));
+    }
+
+    pub(crate) fn keep_unreachable_targets() -> bool {
+        KEEP_UNREACHABLE_TARGETS.with(Cell::get)
     }
 
     pub(crate) fn set(mode: Option<MatrixMode>) {
@@ -916,6 +958,35 @@ pub(crate) fn apply_matrix_error(cell: &mut RouteMatrixCell, error: &RouteError)
     cell.cost = None;
     cell.edge_ids.clear();
     cell.failure_reason = Some(route_error_code(error));
+}
+
+/// Reaching sets larger than this are not collected: the target is taken to
+/// be reachable from everywhere.
+const MATRIX_REACHING_EDGES_LIMIT: usize = 16_384;
+
+/// Every edge from which a path over edges that are `usable` can reach one of
+/// `target_edges` (which are included), or `None` when there are more than
+/// [`MATRIX_REACHING_EDGES_LIMIT`]. Turn restrictions and turn costs are
+/// ignored, so a search from an edge outside the set cannot reach the
+/// targets.
+fn reaching_edges(
+    graph: SearchGraph<'_>,
+    target_edges: &[u32],
+    usable: impl Fn(u32) -> bool,
+) -> Option<FxHashSet<u32>> {
+    let mut reaching = target_edges.iter().copied().collect::<FxHashSet<_>>();
+    let mut pending = target_edges.to_vec();
+    while let Some(edge) = pending.pop() {
+        for (previous, _) in graph.in_edges(graph.edge_source(edge as usize) as usize) {
+            if usable(previous) && reaching.insert(previous) {
+                if reaching.len() > MATRIX_REACHING_EDGES_LIMIT {
+                    return None;
+                }
+                pending.push(previous);
+            }
+        }
+    }
+    Some(reaching)
 }
 
 /// `[source][target]`: whether the cell's candidates may share a weak
