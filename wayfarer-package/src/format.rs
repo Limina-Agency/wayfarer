@@ -834,9 +834,15 @@ impl PackageFile {
     fn validate(&self) -> Result<(), RoutingPackageError> {
         let invalid = |message: &str| Err(RoutingPackageError::Invalid(message.to_string()));
         let c = self.counts;
-        let expect = |section: Section, elements: usize| {
-            self.sections[section as usize].1 == elements * SECTION_ELEMENT_BYTES[section as usize]
+        // Counts come straight from the header: every size derived from them
+        // is checked arithmetic, and one that overflows matches no section.
+        let expect = |section: Section, elements: Option<usize>| {
+            elements
+                .and_then(|elements| elements.checked_mul(SECTION_ELEMENT_BYTES[section as usize]))
+                == Some(self.sections[section as usize].1)
         };
+        let mul = |a: usize, b: usize| a.checked_mul(b);
+        let plus_one = |a: usize| a.checked_add(1);
         let stored_nodes = if self.layout.node_e7_derived {
             0
         } else {
@@ -854,52 +860,55 @@ impl PackageFile {
             .len()
             .saturating_sub(1);
         let fixed = [
-            (Section::NodeFirstOut, c.node_count + 1),
-            (Section::NodeXyzFixed, c.node_count * 3),
-            (Section::NodeLatE7, stored_nodes),
-            (Section::NodeLngE7, stored_nodes),
-            (Section::EdgeTarget, c.edge_count),
-            (Section::EdgeId, c.edge_count),
-            (Section::EdgeLength, c.edge_count),
-            (Section::EdgeSharedInfo, c.edge_count),
-            (Section::EdgeHeadingStart, c.edge_count),
-            (Section::EdgeFlags, c.edge_count),
-            (Section::EdgeRoadRank, c.edge_count),
-            (Section::EdgeCost, c.edge_count * c.column_count),
-            (Section::EdgeDuration, c.edge_count * c.column_count),
-            (Section::SharedInfoWay, c.shared_info_count),
-            (Section::SharedInfoName, token_rows),
-            (Section::SharedInfoRef, token_rows),
-            (Section::SharedInfoRouteRefStart, token_rows + 1),
-            (Section::SimpleFrom, c.simple_restriction_count),
-            (Section::SimpleTo, c.simple_restriction_count),
-            (Section::SimpleVia, c.simple_restriction_count),
-            (Section::SimpleMask, c.simple_restriction_count),
-            (Section::ComplexTo, c.complex_restriction_count),
-            (Section::ComplexMask, c.complex_restriction_count),
-            (Section::ComplexPrefixStart, c.complex_restriction_count + 1),
-            (Section::EdgeTwin, c.edge_count),
-            (Section::EdgeProfileAccess, c.edge_count),
-            (Section::LandmarkNode, c.column_count * c.landmark_count),
+            (Section::NodeFirstOut, plus_one(c.node_count)),
+            (Section::NodeXyzFixed, mul(c.node_count, 3)),
+            (Section::NodeLatE7, Some(stored_nodes)),
+            (Section::NodeLngE7, Some(stored_nodes)),
+            (Section::EdgeTarget, Some(c.edge_count)),
+            (Section::EdgeId, Some(c.edge_count)),
+            (Section::EdgeLength, Some(c.edge_count)),
+            (Section::EdgeSharedInfo, Some(c.edge_count)),
+            (Section::EdgeHeadingStart, Some(c.edge_count)),
+            (Section::EdgeFlags, Some(c.edge_count)),
+            (Section::EdgeRoadRank, Some(c.edge_count)),
+            (Section::EdgeCost, mul(c.edge_count, c.column_count)),
+            (Section::EdgeDuration, mul(c.edge_count, c.column_count)),
+            (Section::SharedInfoWay, Some(c.shared_info_count)),
+            (Section::SharedInfoName, Some(token_rows)),
+            (Section::SharedInfoRef, Some(token_rows)),
+            (Section::SharedInfoRouteRefStart, plus_one(token_rows)),
+            (Section::SimpleFrom, Some(c.simple_restriction_count)),
+            (Section::SimpleTo, Some(c.simple_restriction_count)),
+            (Section::SimpleVia, Some(c.simple_restriction_count)),
+            (Section::SimpleMask, Some(c.simple_restriction_count)),
+            (Section::ComplexTo, Some(c.complex_restriction_count)),
+            (Section::ComplexMask, Some(c.complex_restriction_count)),
+            (
+                Section::ComplexPrefixStart,
+                plus_one(c.complex_restriction_count),
+            ),
+            (Section::EdgeTwin, Some(c.edge_count)),
+            (Section::EdgeProfileAccess, Some(c.edge_count)),
+            (Section::LandmarkNode, mul(c.column_count, c.landmark_count)),
             (
                 Section::LandmarkScale,
-                c.column_count * c.landmark_count * 2,
+                mul(c.column_count, c.landmark_count).and_then(|n| mul(n, 2)),
             ),
-            (Section::LandmarkFrom, landmark_rows * c.landmark_count),
-            (Section::LandmarkTo, landmark_rows * c.landmark_count),
-            (Section::ComplexFirst, c.complex_restriction_count),
-            (Section::ComplexByFirst, c.complex_restriction_count),
+            (Section::LandmarkFrom, mul(landmark_rows, c.landmark_count)),
+            (Section::LandmarkTo, mul(landmark_rows, c.landmark_count)),
+            (Section::ComplexFirst, Some(c.complex_restriction_count)),
+            (Section::ComplexByFirst, Some(c.complex_restriction_count)),
             (
                 Section::ShapeStart,
-                c.shared_info_count.div_ceil(SHAPE_START_STRIDE) + 1,
+                plus_one(c.shared_info_count.div_ceil(SHAPE_START_STRIDE)),
             ),
-            (Section::SharedInfoCostFlags, cost_rows),
-            (Section::SharedInfoCostClasses, cost_rows),
-            (Section::SharedInfoSpeeds, cost_rows * 3),
-            (Section::EdgeInferredSpeed, c.edge_count),
-            (Section::SharedInfoCostTuple, c.shared_info_count),
-            (Section::SharedInfoLegalReason, c.shared_info_count),
-            (Section::EdgeJunction, c.edge_count),
+            (Section::SharedInfoCostFlags, Some(cost_rows)),
+            (Section::SharedInfoCostClasses, Some(cost_rows)),
+            (Section::SharedInfoSpeeds, mul(cost_rows, 3)),
+            (Section::EdgeInferredSpeed, Some(c.edge_count)),
+            (Section::SharedInfoCostTuple, Some(c.shared_info_count)),
+            (Section::SharedInfoLegalReason, Some(c.shared_info_count)),
+            (Section::EdgeJunction, Some(c.edge_count)),
         ];
         if fixed
             .iter()
@@ -1200,7 +1209,8 @@ impl PackageFile {
         let tail = c.node_count % 64;
         let chain = self.slice::<u64>(Section::PieceChain);
         let tree = self.slice::<u64>(Section::PieceTree);
-        if chain.len() != tree.len() || (!chain.is_empty() && chain.len() != c.column_count * words)
+        if chain.len() != tree.len()
+            || (!chain.is_empty() && Some(chain.len()) != c.column_count.checked_mul(words))
         {
             return Err(invalid());
         }
@@ -1224,7 +1234,9 @@ impl PackageFile {
         let tail = c.node_count % 64;
         // Bits and ranks of one kind: the number of (column, node)s set.
         let counted = |present: &[u64], rank: &[u32]| {
-            if present.len() != c.column_count * words || rank.len() != present.len() {
+            if Some(present.len()) != c.column_count.checked_mul(words)
+                || rank.len() != present.len()
+            {
                 return Err(invalid());
             }
             let mut count = 0usize;
@@ -1541,15 +1553,19 @@ pub fn parse_header(
             "header or section table does not match the root checksum",
         ));
     }
-    let count = |slot: usize| read_u64(HEADER_COUNTS + slot * 8) as usize;
+    // `as usize` would truncate on 32-bit targets.
+    let count = |slot: usize| {
+        usize::try_from(read_u64(HEADER_COUNTS + slot * 8))
+            .map_err(|_| invalid("header count exceeds this target's address space"))
+    };
     let counts = PackageCounts {
-        node_count: count(0),
-        edge_count: count(1),
-        shared_info_count: count(2),
-        simple_restriction_count: count(3),
-        complex_restriction_count: count(4),
-        column_count: count(5),
-        landmark_count: count(6),
+        node_count: count(0)?,
+        edge_count: count(1)?,
+        shared_info_count: count(2)?,
+        simple_restriction_count: count(3)?,
+        complex_restriction_count: count(4)?,
+        column_count: count(5)?,
+        landmark_count: count(6)?,
     };
     let layout = PackageLayout {
         node_e7_derived: read_u32(HEADER_LAYOUT_FLAGS) & LAYOUT_NODE_E7_DERIVED != 0,
@@ -1567,8 +1583,12 @@ pub fn parse_header(
     let mut previous_end = table_end;
     for (index, section) in sections.iter_mut().enumerate() {
         let entry = &table[index * TABLE_ENTRY_BYTES..(index + 1) * TABLE_ENTRY_BYTES];
-        let offset = u64::from_le_bytes(entry[0..8].try_into().unwrap()) as usize;
-        let len = u64::from_le_bytes(entry[8..16].try_into().unwrap()) as usize;
+        let read = |at: usize| {
+            usize::try_from(u64::from_le_bytes(entry[at..at + 8].try_into().unwrap())).ok()
+        };
+        let (Some(offset), Some(len)) = (read(0), read(8)) else {
+            return Err(invalid("section out of bounds or misaligned"));
+        };
         // Sections are laid out in table order, each after the previous one.
         if !offset.is_multiple_of(SECTION_ALIGN)
             || offset < previous_end
