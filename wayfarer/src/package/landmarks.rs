@@ -19,6 +19,21 @@ use wayfarer_package::format::{LANDMARK_INFINITY, LandmarkRow, LandmarkTable};
 /// Landmarks used per query (best bound at the origin).
 pub(crate) const ACTIVE_LANDMARKS: usize = 6;
 
+thread_local! {
+    /// PERF-2 spike: landmarks used per query on this thread (the `alt16`
+    /// arm sets every stored landmark for vehicle searches).
+    static ACTIVE: std::cell::Cell<usize> = const { std::cell::Cell::new(ACTIVE_LANDMARKS) };
+}
+
+/// Sets the active landmark count of this thread's next bounds.
+pub(crate) fn set_active_landmarks(count: usize) {
+    ACTIVE.with(|cell| cell.set(count));
+}
+
+fn active_landmarks() -> usize {
+    ACTIVE.with(std::cell::Cell::get)
+}
+
 /// Per-query ALT bound towards a set of target nodes: the minimum over
 /// targets of the best landmark bound for that target. (Aggregating targets
 /// per landmark first lets one awkward candidate - e.g. on the far carriageway
@@ -120,7 +135,7 @@ impl<'g> AltBound<'g> {
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         let chosen = scored
             .into_iter()
-            .take(ACTIVE_LANDMARKS)
+            .take(active_landmarks())
             .map(|(_, index)| index)
             .collect::<Vec<_>>();
         Some(Self::with_landmarks(
@@ -327,7 +342,7 @@ impl<'g> GroupBound<'g> {
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         let chosen = scored
             .into_iter()
-            .take(ACTIVE_LANDMARKS)
+            .take(active_landmarks())
             .map(|(_, index)| index)
             .collect();
         Some(Self::with_landmarks(

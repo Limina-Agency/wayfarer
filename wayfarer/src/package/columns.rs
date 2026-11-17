@@ -78,6 +78,10 @@ pub(crate) struct CostColumn<'c> {
     /// The profile's junction delay model; `None` for walking profiles (see
     /// `SearchGraph::junction_delay`).
     pub junction: Option<JunctionDelay>,
+    /// PERF-2 spike: the stored column whose CCH metric bounds this column,
+    /// and the factor to scale it by (every edge this column can use is
+    /// usable there and costs at least `factor` times as much).
+    pub potential: Option<(usize, f64)>,
 }
 
 /// A landmark column: its tables (the package's, or a derived metric's over
@@ -133,6 +137,8 @@ pub(crate) struct DerivedColumn {
     pub build_ms: f64,
     /// The piece kinds the route search walks with (see [`ColumnMarks`]).
     marks: Option<ColumnMarks>,
+    /// PERF-2 spike: see [`CostColumn::potential`].
+    potential: Option<(usize, f64)>,
 }
 
 /// The piece kinds valid for a derived column: those of the stored column
@@ -247,6 +253,7 @@ impl ColumnHandle {
                     }),
                     heuristic_cost_per_m: *heuristic_cost_per_m,
                     junction: *junction,
+                    potential: Some((*column, 1.0)),
                 }
             }
             Self::Derived(derived) => CostColumn {
@@ -271,6 +278,7 @@ impl ColumnHandle {
                 }),
                 heuristic_cost_per_m: derived.heuristic_cost_per_m,
                 junction: derived.junction,
+                potential: derived.potential,
             },
         }
     }
@@ -852,7 +860,33 @@ pub(super) fn derive_column(
                 .collect()
         })
         .unwrap_or_default();
+    // PERF-2 spike: the stored column itself (not the landmark metric) as
+    // the CCH potential's base: valid when every usable edge is usable there.
+    let potential = landmark_column.zip(base).and_then(|(column, base)| {
+        let (ratio, subset) = cost
+            .par_iter()
+            .zip(base)
+            .map(|(cost, base)| {
+                if !cost.is_finite() {
+                    (f64::INFINITY, true)
+                } else if !base.is_finite() {
+                    (f64::INFINITY, false)
+                } else if *base > 0.0 {
+                    (f64::from(*cost) / f64::from(*base), true)
+                } else {
+                    (f64::INFINITY, true)
+                }
+            })
+            .reduce(|| (f64::INFINITY, true), |a, b| (a.0.min(b.0), a.1 && b.1));
+        let factor = if ratio.is_finite() {
+            ratio * LANDMARK_SCALE_MARGIN
+        } else {
+            1.0
+        };
+        (subset && factor > 0.0).then_some((column, factor))
+    });
     DerivedColumn {
+        potential,
         duration,
         landmark_column: landmark_scale.and(landmark_column),
         landmark_scales,

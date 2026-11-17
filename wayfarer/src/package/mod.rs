@@ -24,6 +24,7 @@
 //! the sections themselves. [`RoutingPackage::verify`] re-hashes every
 //! section (an install-time check for packages shipped over poor links).
 
+pub(crate) mod cch;
 pub(crate) mod columns;
 pub(crate) mod destination;
 pub(crate) mod landmarks;
@@ -120,6 +121,8 @@ pub struct RoutingPackage {
     recost: bool,
     /// Per profile slot, grouped on first use (see `destination`).
     destination_pockets: [OnceLock<destination::DestinationPockets>; PROFILE_SLOTS],
+    /// PERF-2 spike: CCH order, topology and metrics, built on first use.
+    cch: cch::CchCache,
 }
 
 impl std::fmt::Debug for RoutingPackage {
@@ -247,6 +250,7 @@ impl RoutingPackage {
             matrix_pool: OnceLock::new(),
             recost: model < wayfarer_costing::COSTING_MODEL_VERSION,
             destination_pockets: Default::default(),
+            cch: cch::CchCache::default(),
         })
     }
 
@@ -279,12 +283,50 @@ impl RoutingPackage {
         bytes
     }
 
+    /// PERF-2 spike: builds the CCH topology and the metric of every stored
+    /// column now (they are otherwise built on the first route that uses
+    /// them) and returns their statistics with the per-column customization
+    /// times (parallel, then single-threaded).
+    #[doc(hidden)]
+    pub fn perf2_prepare_cch(&self) -> (cch::CchBuildStats, Vec<(usize, f64, f64)>) {
+        let view = self.file.view();
+        let topology = self.cch.topology(&view).clone();
+        let columns = view.edge_cost.len() / view.edge_count.max(1);
+        let mut times = Vec::new();
+        for column in 0..columns {
+            let metric = self.cch.metric(&view, column);
+            let range = column * view.edge_count..(column + 1) * view.edge_count;
+            let single = topology.customize(&view.edge_cost[range], false);
+            times.push((column, metric.customize_ms, single.customize_ms));
+        }
+        (topology.stats.clone(), times)
+    }
+
+    /// PERF-2 spike: checks CCH distances against plain node-level Dijkstra
+    /// on stored column `column` from `samples` pseudo-random nodes (each to
+    /// every node it settles): (pairs compared, mismatches, worst relative
+    /// error).
+    #[doc(hidden)]
+    pub fn perf2_check_cch(&self, column: usize, samples: usize) -> (usize, usize, f64) {
+        let view = self.file.view();
+        cch::check_exactness(&view, &self.cch, column, samples)
+    }
+
+    /// PERF-2 spike: PHAST one-to-all sweep time on stored column `column`
+    /// (ms per source) and mismatches against Dijkstra for the first source.
+    #[doc(hidden)]
+    pub fn perf2_phast(&self, column: usize, sources: usize) -> (f64, usize) {
+        let view = self.file.view();
+        cch::phast_timing(&view, &self.cch, column, sources)
+    }
+
     /// The sections, with the complex-restriction automata the searches build.
     pub(crate) fn view(&self) -> SearchGraph<'_> {
         SearchGraph {
             sections: self.file.view(),
             complex_automata: &self.complex_automata,
             transitions: None,
+            cch: &self.cch,
         }
     }
 
@@ -337,6 +379,8 @@ pub(crate) struct SearchGraph<'g> {
     /// R4 barriers), which [`SearchGraph::turn_cost`] adds; `None` outside a
     /// request (landmarks, map matching).
     pub(crate) transitions: Option<crate::transitions::Transitions>,
+    /// PERF-2 spike: the package's CCH structures.
+    pub(crate) cch: &'g cch::CchCache,
 }
 
 impl<'g> Deref for SearchGraph<'g> {

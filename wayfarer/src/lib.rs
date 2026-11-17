@@ -90,6 +90,26 @@ mod types;
 /// part of the supported API: they change without notice.
 #[doc(hidden)]
 pub mod internals {
+    /// PERF-2 spike hooks (potential and alternatives arms, counters).
+    #[doc(hidden)]
+    pub mod perf2 {
+        pub use crate::package::cch::CchBuildStats;
+
+        /// `alt6`, `alt16` or `cch`; false for an unknown name.
+        pub fn set_potential(name: &str) -> bool {
+            crate::debug::set_potential(name)
+        }
+
+        /// `penalty`, or `+`-joined `budget<k>`, `bound`, `recustom`.
+        pub fn set_alternatives(value: &str) -> bool {
+            crate::debug::set_alternatives(value)
+        }
+
+        /// (name, value) of the spike's counters since the last call.
+        pub fn take_counters() -> Vec<(&'static str, u64)> {
+            crate::package::cch::counters::take()
+        }
+    }
     pub use crate::correlator::{
         CandidateSearch, Correlator, EXPANDED_CORRELATION_DISTANCES_M,
         EXPANDED_CORRELATION_MIN_COMPONENT_SIZE,

@@ -436,6 +436,9 @@ impl RoutingEngine {
                 + approach_cost(destination, &correlated.destinations)
         };
         let primary_total = total(primary.cost, &primary.origin, &primary.destination);
+        // PERF-2 spike arms (`WAYFARER_ALTERNATIVES`).
+        let mode = crate::debug::alternatives_mode();
+        let primary_visited = primary.diagnostics.visited_edge_count;
 
         for attempt in 0..policy.requested_alternative_count.saturating_mul(3).max(1) {
             primary.diagnostics.alternative_attempt_count += 1;
@@ -461,10 +464,30 @@ impl RoutingEngine {
                 *multiplier *= 5.0 + attempt as f64;
             }
 
-            let Ok(mut candidate) =
-                self.search_correlated(&alternative_request, correlated, Instant::now())
-            else {
+            if let Some(factor) = mode.budget_factor {
+                let cap = (primary_visited * factor as usize).max(20_000);
+                let current = alternative_request
+                    .options
+                    .max_visited_edge_count
+                    .unwrap_or(usize::MAX);
+                alternative_request.options.max_visited_edge_count = Some(cap.min(current));
+            }
+            crate::debug::set_cost_bound(
+                mode.cost_bound
+                    .then(|| policy.max_cost_ratio * primary_total),
+            );
+            crate::debug::set_recustomize(mode.recustomize);
+            let searched = self.search_correlated(&alternative_request, correlated, Instant::now());
+            let bound_hit = crate::debug::cost_bound_hit();
+            crate::debug::set_cost_bound(None);
+            crate::debug::set_recustomize(false);
+            let Ok(mut candidate) = searched else {
                 primary.diagnostics.rejected_alternative_search_failed_count += 1;
+                if bound_hit {
+                    // No path within the cost bound for this window: try the
+                    // next one.
+                    continue;
+                }
                 break;
             };
             if candidate.edge_ids == primary.edge_ids

@@ -732,4 +732,12 @@ fn main() {
         "package visited edges: {package_visited} over {} cases ({package_ok} routed)",
         cases.len()
     );
+    // PERF-2 spike: which bound the package searches used.
+    println!(
+        "perf2 counters: {:?}",
+        wayfarer::internals::perf2::take_counters()
+            .into_iter()
+            .filter(|(_, value)| *value > 0)
+            .collect::<Vec<_>>()
+    );
 }

@@ -18,6 +18,7 @@ use std::collections::BinaryHeap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use wayfarer_package::format::{ColumnPieceKinds, PieceKind};
 
+use super::cch::{self, CchMetric, CchPotential, CchTopology, PotentialScratch};
 use super::columns::{CostColumn, LandmarkColumn};
 use super::landmarks::AltBound;
 use super::restrictions::{ComplexAutomata, ROOT};
@@ -40,6 +41,12 @@ pub(crate) mod patch;
 /// Per-node (forward, backward) potential bounds, NaN until computed, and the
 /// nodes whose bounds were set, borrowed by the bidirectional search.
 type NodeBoundsCache = std::cell::RefCell<(Vec<(f64, f64)>, Vec<u32>)>;
+
+/// PERF-2 spike: the CCH potentials' scratch, forward and backward.
+type PotentialScratches = (
+    std::cell::RefCell<PotentialScratch>,
+    std::cell::RefCell<PotentialScratch>,
+);
 
 const NO_LABEL: u32 = u32::MAX;
 const SEED_TRAVERSED_FRACTION_EPSILON: f64 = 1e-9;
@@ -275,6 +282,30 @@ pub(crate) struct SearchState {
     /// Per-edge isochrone reach slot, allocated on first use and reset
     /// through `touched` (every reached edge is labelled).
     edge_aux: Vec<u32>,
+    /// PERF-2 spike: CCH potential scratch (forward, backward), allocated on
+    /// first use.
+    cch_scratch: (PotentialScratch, PotentialScratch),
+    /// PERF-2 spike: a working copy of a column's CCH metric (column, metric)
+    /// that re-customized searches change in place and restore through
+    /// `cch_undo`; node stamps of the partial customization.
+    cch_work: Option<(usize, CchMetric)>,
+    cch_undo: Vec<(u32, f32, f32)>,
+    cch_stamp: Vec<u32>,
+    cch_epoch: u32,
+}
+
+/// PERF-2 spike: the CCH metric a search bounds with.
+enum CchMetricRef {
+    Shared(std::sync::Arc<CchMetric>),
+    /// The state's working copy, re-customized for this search.
+    Work(CchMetric),
+}
+
+struct CchSetup {
+    topology: std::sync::Arc<CchTopology>,
+    metric: CchMetricRef,
+    factor: f64,
+    column: usize,
 }
 
 /// Backward label on edge `edge`: cost from entering `edge` at its source to
@@ -318,6 +349,11 @@ impl SearchState {
             analysis_labels: Vec::new(),
             analysis_label_states: FxHashMap::default(),
             edge_aux: Vec::new(),
+            cch_scratch: Default::default(),
+            cch_work: None,
+            cch_undo: Vec::new(),
+            cch_stamp: Vec::new(),
+            cch_epoch: 0,
         }
     }
 
@@ -1182,21 +1218,123 @@ impl<'q> Run<'_, '_, 'q> {
             std::mem::take(&mut self.state.node_bounds),
             std::mem::take(&mut self.state.node_bounds_touched),
         ));
-        let outcome = self.bidirectional_body(&cache);
+        let (forward, backward) = std::mem::take(&mut self.state.cch_scratch);
+        let scratch = (
+            std::cell::RefCell::new(forward),
+            std::cell::RefCell::new(backward),
+        );
+        let setup = (crate::debug::potential() == crate::debug::Potential::Cch)
+            .then(|| self.cch_setup())
+            .flatten();
+        let outcome = self.bidirectional_body(&cache, &scratch, setup.as_ref());
+        if let Some(CchSetup {
+            metric: CchMetricRef::Work(mut metric),
+            column,
+            ..
+        }) = setup
+        {
+            CchTopology::revert(&mut metric, &mut self.state.cch_undo);
+            self.state.cch_work = Some((column, metric));
+        }
+        self.state.cch_scratch = (scratch.0.into_inner(), scratch.1.into_inner());
         let (values, touched) = cache.into_inner();
         self.state.node_bounds = values;
         self.state.node_bounds_touched = touched;
         outcome
     }
 
-    fn bidirectional_body(&mut self, cache: &NodeBoundsCache) -> SearchOutcome {
+    fn bidirectional_body(
+        &mut self,
+        cache: &NodeBoundsCache,
+        scratch: &PotentialScratches,
+        setup: Option<&CchSetup>,
+    ) -> SearchOutcome {
         self.walk = self.walk_setup();
-        let outcome = self.bidirectional_search(cache);
+        let outcome = self.bidirectional_search(cache, scratch, setup);
         walks::record(self.counters.walked_edge_count);
         outcome
     }
 
-    fn bidirectional_search(&mut self, cache: &NodeBoundsCache) -> SearchOutcome {
+    /// PERF-2 spike: the CCH topology and metric that bound this query, with
+    /// the factor scaling the metric to the query's costs, when the query
+    /// allows them: landmarks usable (every override at most raises the
+    /// column), a column whose usable edges are all usable in a stored column
+    /// at no less than `factor` times its cost, and every override at least
+    /// `factor` times that stored cost. With `debug::recustomize()` the
+    /// state's working copy of the metric is re-customized in place with the
+    /// query's overrides (the penalised edges of an alternative attempt);
+    /// `execute_bidirectional` restores it after the search.
+    fn cch_setup(&mut self) -> Option<CchSetup> {
+        use cch::counters;
+        if self.q.landmarks().is_none() {
+            counters::bump(&counters::FALLBACK_NO_LANDMARKS);
+            return None;
+        }
+        let Some((column, factor)) = self.q.column.potential else {
+            counters::bump(&counters::FALLBACK_COLUMN);
+            return None;
+        };
+        let g = self.g;
+        let stored = &g.edge_cost[column * g.edge_count..(column + 1) * g.edge_count];
+        let below = self.q.cost_overrides.iter().any(|(edge, cost)| {
+            let base = f64::from(stored[*edge as usize]);
+            cost.is_finite() && !(base.is_finite() && f64::from(*cost) >= factor * base)
+        });
+        if below {
+            counters::bump(&counters::FALLBACK_GATES);
+            return None;
+        }
+        let topology = g.cch.topology(&g).clone();
+        let base = g.cch.metric(&g, column);
+        counters::bump(&counters::CCH);
+        if !(crate::debug::recustomize() && !self.q.cost_overrides.is_empty()) {
+            return Some(CchSetup {
+                topology,
+                metric: CchMetricRef::Shared(base),
+                factor,
+                column,
+            });
+        }
+        // Overrides above the stored cost replace it; the factor (at most 1
+        // here) still covers the edges left at the stored cost.
+        let raised = self
+            .q
+            .cost_overrides
+            .iter()
+            .filter(|(edge, cost)| **cost > stored[**edge as usize])
+            .map(|(edge, cost)| (*edge, *cost))
+            .collect::<FxHashMap<_, _>>();
+        let started = std::time::Instant::now();
+        let mut work = match self.state.cch_work.take() {
+            Some((at, metric)) if at == column => metric,
+            _ => (*base).clone(),
+        };
+        let state = &mut *self.state;
+        let relaxed = topology.recustomize_in_place(
+            &mut work,
+            stored,
+            &raised,
+            &mut state.cch_undo,
+            &mut state.cch_stamp,
+            &mut state.cch_epoch,
+        );
+        counters::bump(&counters::CCH_RECUSTOMIZED);
+        counters::add(&counters::RECUSTOMIZE_NS, started.elapsed().as_nanos() as u64);
+        counters::add(&counters::RECUSTOMIZE_NODES, relaxed as u64);
+        Some(CchSetup {
+            topology,
+            metric: CchMetricRef::Work(work),
+            factor: factor.min(1.0),
+            column,
+        })
+    }
+
+    fn bidirectional_search(
+        &mut self,
+        cache: &NodeBoundsCache,
+        scratch: &PotentialScratches,
+        setup: Option<&CchSetup>,
+    ) -> SearchOutcome {
         let g = self.g;
         let origins = self.q.origin_edges;
         let destinations = self.destinations();
@@ -1246,16 +1384,51 @@ impl<'q> Run<'_, '_, 'q> {
             )?;
             gates::GatedAlt::new(landmarks, vec![base], seeds, reversed, self.q.gates)
         };
-        let forward_alt = landmarks(&target_nodes, &origin_nodes, false);
-        let backward_alt = landmarks(&origin_nodes, &target_nodes, true);
+        // PERF-2 spike: every stored landmark for vehicles with `alt16`.
+        super::landmarks::set_active_landmarks(
+            if crate::debug::potential() == crate::debug::Potential::Alt16
+                && self.q.profile_bit != super::profile_bit(crate::types::MobilityProfile::OnFoot)
+            {
+                usize::MAX
+            } else {
+                super::landmarks::ACTIVE_LANDMARKS
+            },
+        );
+        // PERF-2 spike: CCH potentials in place of ALT where they apply.
+        let cch = setup.map(|setup| {
+            let metric = match &setup.metric {
+                CchMetricRef::Shared(metric) => metric.as_ref(),
+                CchMetricRef::Work(metric) => metric,
+            };
+            let targets = target_nodes.iter().map(|node| (*node, 0.0)).collect::<Vec<_>>();
+            let sources = origin_nodes.iter().map(|node| (*node, 0.0)).collect::<Vec<_>>();
+            (
+                CchPotential::new(&setup.topology, metric, &targets, false, setup.factor, &scratch.0),
+                CchPotential::new(&setup.topology, metric, &sources, true, setup.factor, &scratch.1),
+            )
+        });
+        let (forward_alt, backward_alt) = if cch.is_some() {
+            (None, None)
+        } else {
+            (
+                landmarks(&target_nodes, &origin_nodes, false),
+                landmarks(&origin_nodes, &target_nodes, true),
+            )
+        };
         let forward_h = |node: u32| {
             let geometric = k * (chord_m(g.xyz(node), d_center) - d_radius).max(0.0);
+            if let Some((forward, _)) = &cch {
+                return forward.get(node).max(geometric);
+            }
             forward_alt
                 .as_ref()
                 .map_or(geometric, |alt| alt.bound(node).max(geometric))
         };
         let backward_h = |node: u32| {
             let geometric = k * (chord_m(g.xyz(node), o_center) - o_radius).max(0.0);
+            if let Some((_, backward)) = &cch {
+                return backward.get(node).max(geometric);
+            }
             backward_alt
                 .as_ref()
                 .map_or(geometric, |alt| alt.bound(node).max(geometric))
@@ -1356,6 +1529,7 @@ impl<'q> Run<'_, '_, 'q> {
         }
 
         let mut best: Option<Meeting> = None;
+        let cost_bound = crate::debug::cost_bound();
         let debug = crate::debug::trace();
         let (mut forward_settled, mut backward_settled, mut first_meet) = (0usize, 0usize, None);
         loop {
@@ -1380,6 +1554,16 @@ impl<'q> Run<'_, '_, 'q> {
             // Ties are searched too, so the tie-break sees them all.
             if stop > bound + tie_window(bound) {
                 break;
+            }
+            // PERF-2 spike: an alternative attempt bounded by cost
+            // (`AlternativesMode::cost_bound`) gives up once no path within
+            // the bound is left.
+            if let Some(limit) = cost_bound
+                && stop > limit + tie_window(limit)
+                && bound > limit
+            {
+                crate::debug::note_cost_bound_hit();
+                return self.exhausted(None, stop);
             }
             // Balance by frontier size: key order is a poor guide when one
             // side starts with a large seed offset (e.g. a long, slow origin
