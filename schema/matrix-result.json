@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RouteMatrixResult",
+  "type": "object",
+  "properties": {
+    "cells": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteMatrixCell"
+      }
+    },
+    "settledNodeCount": {
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    },
+    "sourceCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "sourceExpansionCount": {
+      "description": "Source rows searched.",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    },
+    "targetCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "visitedEdgeCount": {
+      "description": "Out-edges examined, summed over every search of the request (see\n`RouteOptions::max_visited_edge_count` for what one search is).",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "sourceCount",
+    "targetCount",
+    "cells",
+    "sourceExpansionCount",
+    "visitedEdgeCount",
+    "settledNodeCount"
+  ],
+  "$defs": {
+    "RouteMatrixCell": {
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "distanceM": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "durationS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "edgeIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "failureReason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sourceIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/RouteMatrixCellStatus"
+        },
+        "targetIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sourceIndex",
+        "targetIndex",
+        "status",
+        "distanceM",
+        "durationS",
+        "cost",
+        "edgeIds",
+        "failureReason"
+      ]
+    },
+    "RouteMatrixCellStatus": {
+      "type": "string",
+      "enum": [
+        "reachable",
+        "unreachable",
+        "no_candidate",
+        "failed"
+      ]
+    }
+  }
+}

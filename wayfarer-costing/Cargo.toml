@@ -1,0 +1,24 @@
+[package]
+name = "wayfarer-costing"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "The edge-cost model that routing packages are built and queried with"
+readme = "README.md"
+keywords = ["routing", "openstreetmap", "osm", "navigation", "costing"]
+categories = ["science::geo", "algorithms"]
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars = { workspace = true, optional = true }
+wayfarer-package = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+
+[features]
+# JSON Schema derives for the request and result types (`schemars`).
+schema = ["dep:schemars", "wayfarer-package/schema"]

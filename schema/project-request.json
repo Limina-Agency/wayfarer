@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectRequest",
+  "description": "Geometry to project onto package edges ([`RoutingEngine::project`]), as a\nroute's overlays are.",
+  "type": "object",
+  "properties": {
+    "geometryKind": {
+      "$ref": "#/$defs/RouteOverlayGeometryKind"
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GeoPoint"
+      }
+    },
+    "projectionDistanceM": {
+      "description": "Edges within this distance of the geometry are covered (inside a\npolygon, every edge is).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "geometryKind",
+    "points",
+    "projectionDistanceM"
+  ],
+  "$defs": {
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "RouteOverlayGeometryKind": {
+      "description": "The shape of an overlay's geometry.",
+      "type": "string",
+      "enum": [
+        "point",
+        "line",
+        "polygon"
+      ]
+    }
+  }
+}

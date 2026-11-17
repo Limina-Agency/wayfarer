@@ -1,0 +1,16 @@
+{"format": "wayfarer-overlay-set", "formatVersion": 1, "setId": "seed", "version": 4,
+ "createdAtMs": 1762128000000, "author": "fuzz-seed",
+ "package": {"graphId": "monaco", "datasetHash": "0000", "formatVersion": 1},
+ "items": [
+  {"itemId": "a", "version": 1, "kind": "block", "profiles": ["wheeled"],
+   "geometry": {"kind": "line", "points": [[43.7350, 7.4200], [43.7352, 7.4215]], "projectionDistanceM": 20}},
+  {"itemId": "b", "version": 2, "kind": "discount", "costMultiplier": 0.5,
+   "geometry": {"kind": "polygon", "points": [[43.736, 7.420], [43.737, 7.420], [43.737, 7.422], [43.736, 7.422]], "projectionDistanceM": 10}},
+  {"itemId": "c", "version": 3, "kind": "open", "speedKph": 20, "validFromMs": 0, "validToMs": null,
+   "edges": [{"edgeId": 1, "startFraction": 0.0, "endFraction": 1.0}]},
+  {"itemId": "d", "version": 4, "kind": "slow", "costMultiplier": 3.0,
+   "geometry": {"kind": "point", "points": [[43.7340, 7.4190]], "projectionDistanceM": 15}},
+  {"itemId": "e", "version": 1, "kind": "warn", "note": "debris", "provenance": "radio",
+   "geometry": {"kind": "point", "points": [[43.7330, 7.4180]], "projectionDistanceM": 15}},
+  {"itemId": "f", "version": 2, "deleted": true}
+ ]}

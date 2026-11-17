@@ -1,0 +1,46 @@
+[package]
+name = "wayfarer-compiler"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Compiles OSM PBF extracts into offline routing packages (routing.mrt)"
+readme = "README.md"
+keywords = ["routing", "openstreetmap", "osm", "compiler", "offline"]
+categories = ["science::geo"]
+
+[lints]
+workspace = true
+
+[features]
+# JSON Schema derives for the compile request, progress and result.
+schema = ["dep:schemars", "wayfarer-package/schema"]
+# Emits phase events on stderr for the regional research harness and installs
+# a counting global allocator; off in app builds (the `wayfarer` binary
+# forwards it).
+benchmark-profiling = []
+# Reads WAYFARER_DEBUG (build sub-phase timings and section stats on
+# stderr); off in app builds.
+debug-env = []
+
+[dependencies]
+schemars = { workspace = true, optional = true }
+petgraph = { workspace = true }
+rustc-hash = "2"
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+wayfarer-line-network = { workspace = true }
+wayfarer-road-graph = { workspace = true }
+wayfarer-costing = { workspace = true }
+wayfarer-package = { workspace = true }
+osm-pbf-ingest = { workspace = true }
+
+[dev-dependencies]
+# Path only (no version), so publishing drops it: wayfarer depends on
+# this crate, and a versioned dev-dependency would need it published first.
+wayfarer = { path = "../wayfarer", features = ["reference"] }
+tempfile = "3"

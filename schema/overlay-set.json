@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RouteOverlaySet",
+  "type": "object",
+  "properties": {
+    "author": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "contentHash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "createdAtMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64",
+      "default": null
+    },
+    "format": {
+      "type": "string"
+    },
+    "formatVersion": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "items": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RouteOverlaySetItem"
+      }
+    },
+    "package": {
+      "description": "The package the items' `edges` are bound to.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteOverlaySetPackage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "setId": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "format",
+    "formatVersion",
+    "setId",
+    "version"
+  ],
+  "$defs": {
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "RouteOverlayGeometryKind": {
+      "description": "The shape of an overlay's geometry.",
+      "type": "string",
+      "enum": [
+        "point",
+        "line",
+        "polygon"
+      ]
+    },
+    "RouteOverlaySetEdge": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      },
+      "required": [
+        "edgeId"
+      ]
+    },
+    "RouteOverlaySetGeometry": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/RouteOverlayGeometryKind"
+        },
+        "points": {
+          "description": "`[lat, lng]` pairs.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "projectionDistanceM": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "kind",
+        "points"
+      ]
+    },
+    "RouteOverlaySetItem": {
+      "type": "object",
+      "properties": {
+        "author": {
+          "description": "Who wrote the item; a merge fills it from the item's set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "costMultiplier": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "edges": {
+          "description": "Edge ids of the bound package (`RouteOverlaySet::package`).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteOverlaySetEdge"
+          }
+        },
+        "geometry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOverlaySetGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "Absent only on a tombstone.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOverlaySetItemKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profiles": {
+          "description": "The profiles the item applies to; empty: every profile.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MobilityProfile"
+          }
+        },
+        "provenance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "speedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "validFromMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "validToMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "itemId",
+        "version"
+      ]
+    },
+    "RouteOverlaySetItemKind": {
+      "description": "What an item does.",
+      "oneOf": [
+        {
+          "description": "No-go.",
+          "type": "string",
+          "const": "block"
+        },
+        {
+          "description": "Slow-go: a cost multiplier above 1.",
+          "type": "string",
+          "const": "slow"
+        },
+        {
+          "description": "A hazard warning.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Cheaper: a multiplier in (0, 1) or a speed override.",
+          "type": "string",
+          "const": "discount"
+        },
+        {
+          "description": "Usable for the listed profiles whatever their legal access.",
+          "type": "string",
+          "const": "open"
+        }
+      ]
+    },
+    "RouteOverlaySetPackage": {
+      "type": "object",
+      "properties": {
+        "datasetHash": {
+          "type": "string"
+        },
+        "formatVersion": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "graphId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "datasetHash"
+      ]
+    }
+  }
+}

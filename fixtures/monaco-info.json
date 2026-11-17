@@ -1,0 +1,27 @@
+{
+  "byteLen": 995392,
+  "costingModelVersion": 1,
+  "countryCode": "MC",
+  "datasetHash": "0ec999cd93bfbd4c0ed88478eeb8ab81e7dfe8a5667225653bd309449e756732",
+  "edgeCount": 8550,
+  "formatVersion": 1,
+  "graphId": "monaco",
+  "landmarkCount": 16,
+  "nodeCount": 3184,
+  "profileColumnCount": 2,
+  "quality": {
+    "reasons": [
+      "19 small weak components were detected",
+      "3 turn restrictions were not resolved",
+      "32 road graph enhancement warning examples were recorded",
+      "980 one-way shared segments require asymmetric routing checks",
+      "repaired 7 same-plane road crossings"
+    ],
+    "status": "warning"
+  },
+  "readableFormats": [
+    1,
+    1
+  ],
+  "sharedInfoCount": 4307
+}

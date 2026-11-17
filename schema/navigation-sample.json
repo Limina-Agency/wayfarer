@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NavigationPositionSample",
+  "type": "object",
+  "properties": {
+    "accuracyMeters": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "headingDegrees": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "position": {
+      "$ref": "#/$defs/GeoPoint"
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sampledAtMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "speedMetersPerSecond": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    }
+  },
+  "required": [
+    "position"
+  ],
+  "$defs": {
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    }
+  }
+}

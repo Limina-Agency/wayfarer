@@ -1,0 +1,90 @@
+name: Release
+
+# `wayfarer-compiler-v*` attaches `wayfarer` binaries; `wayfarer-v*` attaches the C
+# library in two builds (routing only, and with the compiler) and its header.
+# Each archive carries the JSON Schemas (schema/), LICENSE, NOTICE, README and
+# THIRD_PARTY_LICENSES.txt.
+
+on:
+  push:
+    tags: ["wayfarer-compiler-v*", "wayfarer-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # No macOS archives: macOS users build from source or `cargo install`.
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu }
+          - { os: blacksmith-4vcpu-ubuntu-2404-arm, target: aarch64-unknown-linux-gnu }
+          - { os: blacksmith-4vcpu-windows-2025, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain rust-toolchain.toml pins, plus this build's target.
+      - run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      # Third-party notices (about.toml, about.hbs) for each archive, from the
+      # crates its binary links.
+      - run: cargo install cargo-about --version 0.9.3 --locked --features cli
+      - name: Build the wayfarer binary
+        if: startsWith(github.ref_name, 'wayfarer-compiler-v')
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p wayfarer-cli
+          out="wayfarer-${GITHUB_REF_NAME#wayfarer-compiler-}-${{ matrix.target }}"
+          mkdir "$out"
+          cp target/${{ matrix.target }}/release/wayfarer target/${{ matrix.target }}/release/wayfarer.exe \
+            "$out/" 2>/dev/null || true
+          "$out"/wayfarer compile fixtures/monaco.osm.pbf -o monaco.mrt \
+            --country MC --graph-id monaco > "$out/monaco-fixture.json"
+          # Packages are the same bytes on every platform: this build must write
+          # the Monaco package that scripts/check.sh recorded.
+          hash() { grep -o '"datasetHash": *"[0-9a-f]*"' "$1" | grep -o '[0-9a-f]\{64\}'; }
+          if [ "$(hash "$out/monaco-fixture.json")" != "$(hash fixtures/monaco-info.json)" ]; then
+            echo "error: the Monaco package differs from fixtures/monaco-info.json on ${{ matrix.target }}" >&2
+            exit 1
+          fi
+          cp -r schema "$out/schema"
+          cp LICENSE NOTICE README.md "$out/"
+          cargo about generate --fail -m wayfarer-cli/Cargo.toml about.hbs \
+            -o "$out/THIRD_PARTY_LICENSES.txt"
+          tar czf "$out.tar.gz" "$out"
+      - name: Build the C libraries
+        if: startsWith(github.ref_name, 'wayfarer-v')
+        # Two builds of one library: routing only, and with the compiler
+        # (the wayfarer_compile_* calls; it links the compiler and
+        # OSM ingest). Same header; an app links one of them.
+        run: |
+          version="${GITHUB_REF_NAME#wayfarer-}"
+          for variant in routing compiler; do
+            if [ "$variant" = compiler ]; then
+              features="--features compiler"
+              out="wayfarer-ffi-compiler-$version-${{ matrix.target }}"
+            else
+              features=""
+              out="wayfarer-ffi-$version-${{ matrix.target }}"
+            fi
+            cargo build --release --target ${{ matrix.target }} -p wayfarer-ffi $features
+            mkdir -p "$out/lib" "$out/include"
+            for lib in libwayfarer_ffi.a libwayfarer_ffi.so libwayfarer_ffi.dylib \
+              wayfarer_ffi.lib wayfarer_ffi.dll wayfarer_ffi.dll.lib; do
+              [ -f "target/${{ matrix.target }}/release/$lib" ] && cp "target/${{ matrix.target }}/release/$lib" "$out/lib/"
+            done
+            cp wayfarer-ffi/include/wayfarer.h "$out/include/"
+            cp -r schema "$out/schema"
+            cp wayfarer-ffi/examples/route.c LICENSE NOTICE README.md "$out/"
+            cargo about generate --fail -m wayfarer-ffi/Cargo.toml $features about.hbs \
+              -o "$out/THIRD_PARTY_LICENSES.txt"
+            tar czf "$out.tar.gz" "$out"
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"

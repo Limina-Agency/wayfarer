@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SnapRequest",
+  "description": "A point to snap onto the roads `profile` may use ([`RoutingEngine::snap`]).",
+  "type": "object",
+  "properties": {
+    "candidateLimit": {
+      "description": "The most candidates to return (default: the routing default).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "maxDistanceM": {
+      "description": "How far from `point` candidates may lie (default: 75 m, as for a\nroute's locations).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "options": {
+      "description": "Heading, side, layer and road-class preferences, as for a route's\nlocations.",
+      "$ref": "#/$defs/RouteEndpointOptions",
+      "default": {
+        "avoidPrivateAccess": false,
+        "avoidServiceRoads": false,
+        "avoidedRoadClasses": [],
+        "headingDeg": null,
+        "headingToleranceDeg": null,
+        "minComponentSize": null,
+        "minInboundReachEdgeCount": null,
+        "minOutboundReachEdgeCount": null,
+        "preferAnyRouteRef": false,
+        "preferredLayer": null,
+        "preferredLevel": null,
+        "preferredRoadClasses": [],
+        "preferredRouteRefs": [],
+        "preferredSide": "either",
+        "requireLayerMatch": false,
+        "requireLevelMatch": false
+      }
+    },
+    "point": {
+      "$ref": "#/$defs/GeoPoint"
+    },
+    "profile": {
+      "$ref": "#/$defs/MobilityProfile"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "point",
+    "profile"
+  ],
+  "$defs": {
+    "CorrelationRoadClassPreference": {
+      "type": "string",
+      "enum": [
+        "motorway",
+        "primary",
+        "secondary",
+        "tertiary",
+        "residential",
+        "track",
+        "path",
+        "other"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "PreferredRoadSide": {
+      "type": "string",
+      "enum": [
+        "left",
+        "right",
+        "either"
+      ]
+    },
+    "RouteEndpointOptions": {
+      "type": "object",
+      "properties": {
+        "avoidPrivateAccess": {
+          "type": "boolean",
+          "default": false
+        },
+        "avoidServiceRoads": {
+          "type": "boolean",
+          "default": false
+        },
+        "avoidedRoadClasses": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CorrelationRoadClassPreference"
+          }
+        },
+        "headingDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headingToleranceDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "minComponentSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "minInboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "minOutboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "preferAnyRouteRef": {
+          "type": "boolean",
+          "default": false
+        },
+        "preferredLayer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "preferredLevel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "preferredRoadClasses": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CorrelationRoadClassPreference"
+          }
+        },
+        "preferredRouteRefs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "preferredSide": {
+          "$ref": "#/$defs/PreferredRoadSide",
+          "default": "either"
+        },
+        "requireLayerMatch": {
+          "type": "boolean",
+          "default": false
+        },
+        "requireLevelMatch": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  }
+}

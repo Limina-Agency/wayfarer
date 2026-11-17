@@ -1,0 +1,44 @@
+[package]
+name = "wayfarer-cli"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "The wayfarer command line: compile OSM PBF extracts into offline routing packages, inspect them and route on them"
+readme = "README.md"
+keywords = ["routing", "openstreetmap", "osm", "offline", "cli"]
+categories = ["science::geo", "command-line-utilities"]
+
+[[bin]]
+name = "wayfarer"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = ["mimalloc"]
+# The binary's allocator: mimalloc returns freed pages to the system between
+# the compile's phases.
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+# Phase events and a counting allocator for benchmark harnesses (replaces
+# mimalloc); see wayfarer-compiler.
+benchmark-profiling = ["wayfarer-compiler/benchmark-profiling"]
+# Reads WAYFARER_DEBUG; see wayfarer-compiler.
+debug-env = ["wayfarer-compiler/debug-env"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+# SIGINT and SIGTERM cancel a compile, so it removes its scratch on the way out.
+ctrlc = { version = "3.4", features = ["termination"] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+# mimalloc's options (`mi_option_set`), to purge freed pages at once in a compile.
+libmimalloc-sys = { version = "0.1", default-features = false, optional = true, features = ["extended"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+wayfarer-compiler = { workspace = true }
+wayfarer = { workspace = true }
+wayfarer-package = { workspace = true }
+wayfarer-service = { workspace = true }

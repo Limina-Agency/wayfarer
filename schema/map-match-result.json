@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MapMatchResult",
+  "type": "object",
+  "properties": {
+    "alternatives": {
+      "description": "Other endings of the match (another candidate of its last matched\nsample) with a different edge sequence, cheapest first.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MapMatchAlternative"
+      }
+    },
+    "matchedEdgeIds": {
+      "description": "The sub-paths' edge ids, concatenated (connected within each\nsub-path, not across breaks).",
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      }
+    },
+    "matchedSampleCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "rejectedSampleCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "rejectedSamples": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RejectedTraceSample"
+      }
+    },
+    "sampleCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MatchedTraceSample"
+      }
+    },
+    "subPaths": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MapMatchSubPath"
+      }
+    },
+    "totalCost": {
+      "description": "The match's negative log-likelihood (emissions, transitions, skipped\noutliers and breaks).",
+      "type": "number",
+      "format": "double"
+    }
+  },
+  "required": [
+    "sampleCount",
+    "matchedSampleCount",
+    "rejectedSampleCount",
+    "matchedEdgeIds",
+    "samples",
+    "alternatives",
+    "rejectedSamples",
+    "totalCost",
+    "subPaths"
+  ],
+  "$defs": {
+    "CorrelationScoreBreakdown": {
+      "type": "object",
+      "properties": {
+        "accessScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "candidateTypeScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "componentScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "layerScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "levelScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "reachScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "roadClassScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "sideScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "totalScore": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "distanceScore",
+        "headingScore",
+        "roadClassScore",
+        "accessScore",
+        "componentScore",
+        "reachScore",
+        "sideScore",
+        "layerScore",
+        "levelScore",
+        "candidateTypeScore",
+        "totalScore"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "MapMatchAlternative": {
+      "type": "object",
+      "properties": {
+        "costDelta": {
+          "type": "number",
+          "format": "double"
+        },
+        "matchedEdgeIds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "matchedSampleCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "rank": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "totalCost": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "rank",
+        "matchedSampleCount",
+        "matchedEdgeIds",
+        "totalCost",
+        "costDelta"
+      ]
+    },
+    "MapMatchSubPath": {
+      "description": "One connected stretch of the match, between trace breaks.",
+      "type": "object",
+      "properties": {
+        "breakReason": {
+          "description": "Why the trace broke before this sub-path: `time_gap`,\n`distance_jump` or `no_transition` (none for the first).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "distanceMeters": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeIds": {
+          "description": "Traversed directed edges in order, from the first matched sample's\nedge to the last's; consecutive edges connect.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "firstSampleIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "geometry": {
+          "description": "The path's geometry from the first matched position to the last.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "lastSampleIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "matchedSampleCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "firstSampleIndex",
+        "lastSampleIndex",
+        "matchedSampleCount",
+        "edgeIds",
+        "geometry",
+        "distanceMeters"
+      ]
+    },
+    "MatchedTraceSample": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "`1 - distance / search radius`, as the correlator reports it.",
+          "type": "number",
+          "format": "double"
+        },
+        "distanceMeters": {
+          "type": "number",
+          "format": "double"
+        },
+        "fractionAlongEdge": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "headingDeltaDegrees": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "matchedEdgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rawPosition": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "sampleIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "score": {
+          "description": "The sample's emission likelihood: 1 on the road along its heading,\n`score_breakdown.distance_score * score_breakdown.heading_score`.",
+          "type": "number",
+          "format": "double"
+        },
+        "scoreBreakdown": {
+          "description": "The emission's factors: `distance_score` (Gaussian in distance) and\n`heading_score` (1 without a usable heading); `total_score` is their\nproduct and the correlator's other terms are 0.",
+          "$ref": "#/$defs/CorrelationScoreBreakdown",
+          "default": {
+            "accessScore": 0.0,
+            "candidateTypeScore": 0.0,
+            "componentScore": 0.0,
+            "distanceScore": 0.0,
+            "headingScore": 0.0,
+            "layerScore": 0.0,
+            "levelScore": 0.0,
+            "reachScore": 0.0,
+            "roadClassScore": 0.0,
+            "sideScore": 0.0,
+            "totalScore": 0.0
+          }
+        },
+        "snappedPosition": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "subPathIndex": {
+          "description": "Index of the sample's sub-path in `MapMatchResult::sub_paths`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sampleIndex",
+        "rawPosition",
+        "matchedEdgeId",
+        "snappedPosition",
+        "distanceMeters",
+        "confidence",
+        "score",
+        "scoreBreakdown",
+        "subPathIndex",
+        "fractionAlongEdge"
+      ]
+    },
+    "RejectedTraceSample": {
+      "type": "object",
+      "properties": {
+        "candidateLimit": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "maxCorrelationDistanceMeters": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rawPosition": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "reason": {
+          "description": "`no_candidates` (no accessible edge within the radius) or `outlier`\n(skipped by the match).",
+          "type": "string"
+        },
+        "sampleIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sampleIndex",
+        "rawPosition",
+        "reason",
+        "maxCorrelationDistanceMeters",
+        "candidateLimit"
+      ]
+    }
+  }
+}

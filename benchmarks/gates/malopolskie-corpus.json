@@ -1,0 +1,808 @@
+[
+ {
+  "label": "krakow-local-core",
+  "bucket": "local",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.945,
+   50.0647
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-kazimierz-podgorze-local",
+  "bucket": "local",
+  "origin": [
+   19.9449,
+   50.0516
+  ],
+  "destination": [
+   19.9512,
+   50.0469
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "tarnow-centrum-local",
+  "bucket": "local",
+  "origin": [
+   20.9858,
+   50.0121
+  ],
+  "destination": [
+   20.9973,
+   50.0172
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-sacz-centrum-local",
+  "bucket": "local",
+  "origin": [
+   20.7153,
+   49.6175
+  ],
+  "destination": [
+   20.7050199,
+   49.6226044
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "zakopane-centrum-local",
+  "bucket": "local",
+  "origin": [
+   19.9496,
+   49.2992
+  ],
+  "destination": [
+   19.9571,
+   49.2915
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "oswiecim-centrum-local",
+  "bucket": "local",
+  "origin": [
+   19.2025859,
+   50.0332107
+  ],
+  "destination": [
+   19.1976529,
+   50.0387919
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-city-west-east",
+  "bucket": "city",
+  "origin": [
+   19.8607452,
+   50.0659563
+  ],
+  "destination": [
+   20.02,
+   50.067
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-city-north-south",
+  "bucket": "city",
+  "origin": [
+   19.9323,
+   50.0969
+  ],
+  "destination": [
+   19.9493,
+   50.0136
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-city-huta-bronowice",
+  "bucket": "city",
+  "origin": [
+   20.0378,
+   50.072
+  ],
+  "destination": [
+   19.879,
+   50.0811
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-city-skawina-approach",
+  "bucket": "city",
+  "origin": [
+   19.8174,
+   50.0413
+  ],
+  "destination": [
+   19.8287,
+   49.9757
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "tarnow-city-west-east",
+  "bucket": "city",
+  "origin": [
+   20.9858,
+   50.0121
+  ],
+  "destination": [
+   21.0392,
+   50.0117
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-sacz-city-north-south",
+  "bucket": "city",
+  "origin": [
+   20.704,
+   49.6408
+  ],
+  "destination": [
+   20.7069,
+   49.5915
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-wieliczka-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   20.0648,
+   49.9874
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-bochnia-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   20.4303,
+   49.9691
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-myslenice-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.9384,
+   49.8345
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-olkusz-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.5603,
+   50.2794
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-miechow-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   20.0279,
+   50.356
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-wadowice-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.4929,
+   49.8834
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-chrzanow-regional",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.402,
+   50.1355
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "bochnia-brzesko-regional",
+  "bucket": "regional",
+  "origin": [
+   20.4303,
+   49.9691
+  ],
+  "destination": [
+   20.6061,
+   49.9699
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "brzesko-tarnow-regional",
+  "bucket": "regional",
+  "origin": [
+   20.6061,
+   49.9699
+  ],
+  "destination": [
+   20.9858,
+   50.0121
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "tarnow-gorlice-regional",
+  "bucket": "regional",
+  "origin": [
+   20.9858,
+   50.0121
+  ],
+  "destination": [
+   21.159,
+   49.6557
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-sacz-krynica-regional",
+  "bucket": "regional",
+  "origin": [
+   20.7153,
+   49.6175
+  ],
+  "destination": [
+   20.959,
+   49.4211
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-sacz-limanowa-regional",
+  "bucket": "regional",
+  "origin": [
+   20.7153,
+   49.6175
+  ],
+  "destination": [
+   20.422,
+   49.7056
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-targ-zakopane-regional",
+  "bucket": "regional",
+  "origin": [
+   20.0321,
+   49.4775
+  ],
+  "destination": [
+   19.9496,
+   49.2992
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "oswiecim-chrzanow-regional",
+  "bucket": "regional",
+  "origin": [
+   19.2104,
+   50.0344
+  ],
+  "destination": [
+   19.402,
+   50.1355
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "wadowice-andrychow-regional",
+  "bucket": "regional",
+  "origin": [
+   19.4929,
+   49.8834
+  ],
+  "destination": [
+   19.3383,
+   49.8542
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "tarnow-nowy-sacz-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   20.9858,
+   50.0121
+  ],
+  "destination": [
+   20.7153,
+   49.6175
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-tarnow-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   20.9858,
+   50.0121
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-zakopane-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.9496,
+   49.2992
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "oswiecim-nowy-sacz-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   19.2104,
+   50.0344
+  ],
+  "destination": [
+   20.7153,
+   49.6175
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "miechow-krynica-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   20.0279,
+   50.356
+  ],
+  "destination": [
+   20.959,
+   49.4211
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "edge-case-northwest-to-southeast",
+  "bucket": "long_regional",
+  "origin": [
+   19.5603,
+   50.2794
+  ],
+  "destination": [
+   20.959,
+   49.4211
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "edge-case-mountain-approach",
+  "bucket": "regional",
+  "origin": [
+   20.0321,
+   49.4775
+  ],
+  "destination": [
+   19.9571,
+   49.2915
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-local-core-on-foot",
+  "bucket": "local",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   19.945,
+   50.0647
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "krakow-kazimierz-podgorze-local-on-foot",
+  "bucket": "local",
+  "origin": [
+   19.9449,
+   50.0516
+  ],
+  "destination": [
+   19.9512,
+   50.0469
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "tarnow-centrum-local-on-foot",
+  "bucket": "local",
+  "origin": [
+   20.9858,
+   50.0121
+  ],
+  "destination": [
+   20.9973,
+   50.0172
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "nowy-sacz-centrum-local-on-foot",
+  "bucket": "local",
+  "origin": [
+   20.7153,
+   49.6175
+  ],
+  "destination": [
+   20.7050199,
+   49.6226044
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "zakopane-centrum-local-on-foot",
+  "bucket": "local",
+  "origin": [
+   19.9496,
+   49.2992
+  ],
+  "destination": [
+   19.9571,
+   49.2915
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "oswiecim-centrum-local-on-foot",
+  "bucket": "local",
+  "origin": [
+   19.2025859,
+   50.0332107
+  ],
+  "destination": [
+   19.1976529,
+   50.0387919
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "krakow-city-west-east-on-foot",
+  "bucket": "city",
+  "origin": [
+   19.8607452,
+   50.0659563
+  ],
+  "destination": [
+   20.02,
+   50.067
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "krakow-city-north-south-on-foot",
+  "bucket": "city",
+  "origin": [
+   19.9323,
+   50.0969
+  ],
+  "destination": [
+   19.9493,
+   50.0136
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "krakow-city-huta-bronowice-on-foot",
+  "bucket": "city",
+  "origin": [
+   20.0378,
+   50.072
+  ],
+  "destination": [
+   19.879,
+   50.0811
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "krakow-city-skawina-approach-on-foot",
+  "bucket": "city",
+  "origin": [
+   19.8174,
+   50.0413
+  ],
+  "destination": [
+   19.8287,
+   49.9757
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "tarnow-city-west-east-on-foot",
+  "bucket": "city",
+  "origin": [
+   20.9858,
+   50.0121
+  ],
+  "destination": [
+   21.0392,
+   50.0117
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "nowy-sacz-city-north-south-on-foot",
+  "bucket": "city",
+  "origin": [
+   20.704,
+   49.6408
+  ],
+  "destination": [
+   20.7069,
+   49.5915
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "wieliczka-bochnia-regional",
+  "bucket": "regional",
+  "origin": [
+   20.0648,
+   49.9874
+  ],
+  "destination": [
+   20.4303,
+   49.9691
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "bochnia-wieliczka-regional",
+  "bucket": "regional",
+  "origin": [
+   20.4303,
+   49.9691
+  ],
+  "destination": [
+   20.0648,
+   49.9874
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "gorlice-krynica-regional",
+  "bucket": "regional",
+  "origin": [
+   21.159,
+   49.6557
+  ],
+  "destination": [
+   20.959,
+   49.4211
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "dabrowa-tarnowska-tarnow-regional",
+  "bucket": "regional",
+  "origin": [
+   20.986,
+   50.175
+  ],
+  "destination": [
+   20.9858,
+   50.0121
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "sucha-beskidzka-zakopane-regional",
+  "bucket": "regional",
+  "origin": [
+   19.588,
+   49.74
+  ],
+  "destination": [
+   19.9496,
+   49.2992
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "olkusz-oswiecim-regional",
+  "bucket": "regional",
+  "origin": [
+   19.5603,
+   50.2794
+  ],
+  "destination": [
+   19.2104,
+   50.0344
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "limanowa-myslenice-regional",
+  "bucket": "regional",
+  "origin": [
+   20.422,
+   49.7056
+  ],
+  "destination": [
+   19.9384,
+   49.8345
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-targ-nowy-sacz-regional",
+  "bucket": "regional",
+  "origin": [
+   20.0321,
+   49.4775
+  ],
+  "destination": [
+   20.7153,
+   49.6175
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "zakopane-krakow-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   19.9496,
+   49.2992
+  ],
+  "destination": [
+   19.9373,
+   50.0617
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "nowy-sacz-tarnow-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   20.7153,
+   49.6175
+  ],
+  "destination": [
+   20.9858,
+   50.0121
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "chrzanow-dabrowa-tarnowska-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   19.402,
+   50.1355
+  ],
+  "destination": [
+   20.986,
+   50.175
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "wadowice-gorlice-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   19.4929,
+   49.8834
+  ],
+  "destination": [
+   21.159,
+   49.6557
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "miechow-zakopane-long-regional",
+  "bucket": "long_regional",
+  "origin": [
+   20.0279,
+   50.356
+  ],
+  "destination": [
+   19.9496,
+   49.2992
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "krakow-wieliczka-regional-on-foot",
+  "bucket": "regional",
+  "origin": [
+   19.9373,
+   50.0617
+  ],
+  "destination": [
+   20.0648,
+   49.9874
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "bochnia-brzesko-regional-on-foot",
+  "bucket": "regional",
+  "origin": [
+   20.4303,
+   49.9691
+  ],
+  "destination": [
+   20.6061,
+   49.9699
+  ],
+  "profile": "on_foot"
+ },
+ {
+  "label": "nowy-targ-zakopane-regional-on-foot",
+  "bucket": "regional",
+  "origin": [
+   20.0321,
+   49.4775
+  ],
+  "destination": [
+   19.9496,
+   49.2992
+  ],
+  "profile": "on_foot"
+ }
+]

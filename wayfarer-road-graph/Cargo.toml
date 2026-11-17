@@ -1,0 +1,38 @@
+[package]
+name = "wayfarer-road-graph"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Road graph for routing: built from OSM ways, enhanced and quality-checked"
+readme = "README.md"
+keywords = ["routing", "openstreetmap", "osm", "graph", "navigation"]
+categories = ["science::geo", "data-structures"]
+
+
+[lints]
+workspace = true
+[dependencies]
+blake3 = { workspace = true, optional = true }
+geo.workspace = true
+wayfarer-package = { workspace = true }
+petgraph = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+zstd = { workspace = true, optional = true }
+
+[features]
+# Road graph snapshot files (`.mrg`: `serialize_road_graph`,
+# `persist_road_graph_file` and friends), zstd-compressed with a BLAKE3
+# checksum. The reference oracle and test fixtures use them; the route compiler
+# does not, so it builds without zstd or BLAKE3.
+snapshot = ["dep:blake3", "dep:zstd"]
+
+[dev-dependencies]
+# Path only (no version), so publishing drops it: turns `snapshot` on for this
+# crate's own tests.
+wayfarer-road-graph = { path = ".", features = ["snapshot"] }
+tempfile = "3"

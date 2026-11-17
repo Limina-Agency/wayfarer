@@ -1,0 +1,368 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CompileResult",
+  "description": "The package a compile wrote.",
+  "type": "object",
+  "properties": {
+    "byteLen": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "costingModelVersion": {
+      "description": "The costing model the package's costs were baked with.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "country": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "datasetHash": {
+      "description": "The package's root checksum.",
+      "type": "string"
+    },
+    "edgeCount": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "formatVersion": {
+      "description": "The package layout version (`ROUTING_PACKAGE_FORMAT_VERSION`).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "graphId": {
+      "type": "string"
+    },
+    "nodeCount": {
+      "description": "Nodes and directed edges in the package.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "package": {
+      "description": "The package's path (the request's `output`).",
+      "type": "string"
+    },
+    "report": {
+      "description": "What the package build stored (restrictions, shapes, landmarks, ...)\nand its timings.",
+      "$ref": "#/$defs/PackageBuildReport"
+    }
+  },
+  "required": [
+    "package",
+    "byteLen",
+    "datasetHash",
+    "formatVersion",
+    "costingModelVersion",
+    "graphId",
+    "country",
+    "nodeCount",
+    "edgeCount",
+    "report"
+  ],
+  "$defs": {
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "PackageBuildReport": {
+      "description": "What the package build made: counts of what it stored and its timings.",
+      "type": "object",
+      "properties": {
+        "assembleMs": {
+          "type": "integer",
+          "format": "uint128",
+          "default": 0,
+          "minimum": 0
+        },
+        "barrierNodeCount": {
+          "description": "Barrier nodes: with an effect in normal routing or a SAR class.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "byteLen": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "complexRestrictionCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "costTupleCount": {
+          "description": "Distinct (cost flags, cost classes, speeds) tuples of the shared infos.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "edgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "heuristicCostPerM": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/$defs/MobilityProfile"
+              },
+              {
+                "type": "number",
+                "format": "double"
+              }
+            ]
+          }
+        },
+        "landmarkMs": {
+          "type": "integer",
+          "format": "uint128",
+          "default": 0,
+          "minimum": 0
+        },
+        "landmarkOneAnchorCount": {
+          "description": "(Column, node)s whose landmark distances derive from one anchor's\nrow, over all columns (not stored as rows).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "landmarkRowCount": {
+          "description": "Landmark rows stored, over all columns (rows unreachable from and to\nevery landmark are not).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "landmarkTwoAnchorCount": {
+          "description": "Likewise from two anchors' rows.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "loneEdgeCount": {
+          "description": "Edges without a twin (`Section::LoneInEdge`).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "modeMaskExceptionCount": {
+          "description": "Edges whose mode mask or tier is stored as an exception.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "nodeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "nodeInexactCount": {
+          "description": "Nodes whose position is not an exact E7 value (positions stored as f64).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "requestByteLen": {
+          "description": "Bytes of the request sections (`request.rs`).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "requestMs": {
+          "type": "integer",
+          "format": "uint128",
+          "default": 0,
+          "minimum": 0
+        },
+        "requestOpposingExceptionCount": {
+          "description": "Edges whose opposing edge the adjacency rule does not reproduce.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "sarMetricEdgeCount": {
+          "description": "Edges the Wheeled landmark metric adds to the stored column (SAR).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "sarPathEdgeCountByWidth": {
+          "description": "Paths R5 `vehicle_on_paths` can open (physically drivable, no legal\nvehicle access), by width class: unknown, under 2.5 m, 2.5–3 m, 3 m\nor more. They stay out of the landmark metric.",
+          "type": "array",
+          "default": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "shapeByteLen": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "shapeExplicitCount": {
+          "description": "Shapes stored with explicit endpoints (they differ from the nodes').",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "shapeInexactCount": {
+          "description": "Shapes with a point that is not an exact E7 value (stored exactly too).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "shapePointCount": {
+          "description": "Points across all stored shapes (one per shared info).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "sharedInfoCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "simpleRestrictionCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "skippedRestrictionCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "skippedSimpleMissingToEdge": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "tierExceptionCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "totalMs": {
+          "type": "integer",
+          "format": "uint128",
+          "default": 0,
+          "minimum": 0
+        },
+        "wayIdWideCount": {
+          "description": "Shared infos whose way id does not fit `u32` (synthetic negative ids).",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "nodeCount",
+        "edgeCount",
+        "sharedInfoCount",
+        "simpleRestrictionCount",
+        "complexRestrictionCount",
+        "skippedRestrictionCount",
+        "skippedSimpleMissingToEdge",
+        "byteLen",
+        "heuristicCostPerM",
+        "shapePointCount",
+        "shapeInexactCount",
+        "shapeExplicitCount",
+        "shapeByteLen",
+        "nodeInexactCount",
+        "requestByteLen",
+        "requestOpposingExceptionCount",
+        "loneEdgeCount",
+        "modeMaskExceptionCount",
+        "tierExceptionCount",
+        "costTupleCount",
+        "wayIdWideCount",
+        "landmarkRowCount",
+        "landmarkOneAnchorCount",
+        "landmarkTwoAnchorCount",
+        "sarMetricEdgeCount",
+        "sarPathEdgeCountByWidth",
+        "barrierNodeCount",
+        "assembleMs",
+        "landmarkMs",
+        "requestMs",
+        "totalMs"
+      ]
+    }
+  }
+}

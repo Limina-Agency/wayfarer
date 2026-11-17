@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RouteOverlayGeometryProjection",
+  "description": "The package edges a geometry covers ([`crate::RoutingEngine::project`]).",
+  "type": "object",
+  "properties": {
+    "confidenceBasisPoints": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "edgeIds": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "uniqueItems": true
+    },
+    "edgeRanges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteEdgeRange"
+      }
+    },
+    "insideEdgeCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "intersectingEdgeCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "nearEdgeCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "partialEdgeRangeCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "edgeIds",
+    "edgeRanges",
+    "insideEdgeCount",
+    "intersectingEdgeCount",
+    "nearEdgeCount",
+    "partialEdgeRangeCount",
+    "confidenceBasisPoints"
+  ],
+  "$defs": {
+    "RouteEdgeRange": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction"
+      ]
+    }
+  }
+}

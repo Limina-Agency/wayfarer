@@ -1,0 +1,21 @@
+[package]
+name = "wayfarer-line-network"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Line-network normalization: OSM ways split at shared nodes into a topology of segments with merged attributes"
+readme = "README.md"
+keywords = ["openstreetmap", "osm", "topology", "gis", "network"]
+categories = ["science::geo", "algorithms"]
+
+
+[lints]
+workspace = true
+[dependencies]
+libm = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = "2"
+serde = { workspace = true }
+

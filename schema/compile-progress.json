@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CompileProgress",
+  "description": "One progress report, for every stage alike. Reports arrive in stage order;\nwithin a stage `stage_fraction` never decreases, and `overall` never\ndecreases over a compile. The last report of a successful compile is\n[`CompileStage::WritePackage`] at fraction 1 (`overall` 1).",
+  "type": "object",
+  "properties": {
+    "message": {
+      "description": "Diagnostic text in English, such as the objects read so far in the\ningest (\"Indexed 1200 node locations and 3 relations\"). An app shows its\nown text per stage.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "overall": {
+      "description": "The share of the whole compile done, 0 to 1 (stages weighted by their\nusual share of the time).",
+      "type": "number",
+      "format": "double"
+    },
+    "stage": {
+      "$ref": "#/$defs/CompileStage"
+    },
+    "stageFraction": {
+      "description": "The share of this stage done, 0 to 1, when the stage's size is known:\nblobs read in the ingest, steps of the graph and package builds,\nDijkstras for landmarks, bytes written.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    }
+  },
+  "required": [
+    "stage",
+    "stageFraction",
+    "overall",
+    "message"
+  ],
+  "$defs": {
+    "CompileStage": {
+      "description": "The stages of a compile, in the order they run. The serialized names\n(`as_str`) are stable ids an app can key its own text on.",
+      "oneOf": [
+        {
+          "description": "Ingest pass 1: node locations, relations and tagged nodes.",
+          "type": "string",
+          "const": "index_nodes"
+        },
+        {
+          "description": "Ingest pass 2: road ways and turn-restriction relations.",
+          "type": "string",
+          "const": "collect_roads"
+        },
+        {
+          "description": "The road graph: topology, restrictions, enrichment and repair.",
+          "type": "string",
+          "const": "finalize_graph"
+        },
+        {
+          "description": "Edge costs and the package's sections other than landmarks.",
+          "type": "string",
+          "const": "build_package"
+        },
+        {
+          "description": "ALT landmarks for each profile column.",
+          "type": "string",
+          "const": "landmarks"
+        },
+        {
+          "description": "Checksums, the file written and synced, then reopened.",
+          "type": "string",
+          "const": "write_package"
+        }
+      ]
+    }
+  }
+}

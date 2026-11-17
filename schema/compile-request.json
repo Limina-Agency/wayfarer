@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CompileRequest",
+  "description": "What to compile, where to, and how. The JSON form (camelCase, unknown\nfields rejected) is what the `wayfarer compile --request` command and the\nC ABI take:\n\n```json\n{\"input\": \"monaco.osm.pbf\", \"output\": \"routing.mrt\", \"country\": \"MC\",\n \"memory\": \"low\", \"threads\": 2}\n```\n\nOnly `input` and `output` are required.",
+  "type": "object",
+  "properties": {
+    "country": {
+      "description": "The ISO country code recorded in the package (`\"PL\"`), if any.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "graphId": {
+      "description": "The package's graph id. Default: the input's file name without\n`.osm.pbf` (`monaco` for `monaco.osm.pbf`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "input": {
+      "description": "The OpenStreetMap extract (`.osm.pbf`).",
+      "type": "string"
+    },
+    "memory": {
+      "description": "Memory against speed for the ingest; see [`MemoryProfile`].",
+      "$ref": "#/$defs/MemoryProfile",
+      "default": "standard"
+    },
+    "output": {
+      "description": "Where the package (`routing.mrt`) is written. It is written to\n`<output>.tmp` and renamed into place at the very end, so a package\nalready there is replaced only by a complete one, and kept if the\ncompile fails or is cancelled. Missing parent directories are created\n(and removed again if the compile fails). On Windows a package that\nis open (memory-mapped by an engine in any process) can't be replaced:\nthe compile fails with access denied and leaves it intact, so compile\nto a new path and switch the engine over.",
+      "type": "string"
+    },
+    "scratchDir": {
+      "description": "Where the compile keeps scratch files (the node store of large\nextracts). The compile works in a fresh directory of its own inside it\nand removes that directory when it ends, whatever the outcome; nothing\nelse in `scratch_dir` is touched. Default: the directory of `output`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "threads": {
+      "description": "Threads for the compile: a rayon pool of this many is built for it (the\nglobal pool is not used) and the ingest runs this many decode workers,\nplus a reader thread. `None` runs on the current rayon pool (the global\none, or the caller's inside `ThreadPool::install`, which is how a\ncaller sets thread names, stack sizes or priorities) with the memory\nprofile's decode workers, at most that pool's size. The package's bytes\nare the same for every thread count.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "input",
+    "output"
+  ],
+  "$defs": {
+    "MemoryProfile": {
+      "description": "Memory against speed. It changes how much the ingest holds at once (batch\nand queue sizes) and its default number of decode workers, and so memory\nuse and speed; never the package's bytes.",
+      "oneOf": [
+        {
+          "description": "Large batches and deep queues: the fastest, for desktops and servers.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Small batches and queues and at most two default decode workers: for\nphones and other memory-constrained devices.",
+          "type": "string",
+          "const": "low"
+        }
+      ]
+    }
+  }
+}

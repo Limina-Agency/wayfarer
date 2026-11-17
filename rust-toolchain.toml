@@ -1,0 +1,6 @@
+# The toolchain CI, releases and scripts/check.sh build with. Clippy warnings
+# are errors, so upgrading it is a deliberate change: bump it here and fix new
+# lints.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

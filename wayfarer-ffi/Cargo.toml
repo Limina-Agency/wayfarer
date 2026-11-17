@@ -1,0 +1,39 @@
+[package]
+name = "wayfarer-ffi"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "C ABI for the offline routing engine: open routing packages; route (waypoints, closures), matrix, isochrone, map matching, snap and navigation progress requests as JSON, with cancellation"
+readme = "README.md"
+keywords = ["routing", "ffi", "c-api", "openstreetmap", "navigation"]
+categories = ["science::geo", "development-tools::ffi"]
+exclude = ["tests/abi.rs", "tests/compile.rs", "tests/schema.rs"]
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+wayfarer.workspace = true
+wayfarer-costing.workspace = true
+wayfarer-package.workspace = true
+wayfarer-service.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+wayfarer-compiler = { workspace = true, optional = true }
+
+[features]
+# The wayfarer_compile_* calls: compile packages on the device. A
+# separate build of the library, since it adds the compiler and OSM ingest.
+compiler = ["dep:wayfarer-compiler"]
+
+[dev-dependencies]
+# Generates the JSON Schemas in `schema/` (tests/schema.rs).
+wayfarer-service = { workspace = true, features = ["schema"] }
+wayfarer-compiler = { workspace = true, features = ["schema"] }
+schemars = { workspace = true }
+tempfile = "3"

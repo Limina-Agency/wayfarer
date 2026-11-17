@@ -1,0 +1,5 @@
+# Text files are checked out with LF on every platform: the regression gates
+# hash their JSON inputs, and the scripts and C examples expect LF.
+* text=auto eol=lf
+*.pbf binary
+*.mrt binary

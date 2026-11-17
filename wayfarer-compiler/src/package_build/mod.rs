@@ -1,0 +1,1982 @@
+//! Builds a routing package straight from an in-memory `RoadGraph`.
+//!
+//! Every directed edge is costed with the default costing model
+//! (`wayfarer_costing`) from the road graph's own records, the costing
+//! the reference oracle (`wayfarer::reference`) applies to the same
+//! records, so the stored weights are the record weights cast to f32 by
+//! construction. Nodes are the
+//! endpoints of edges, ordered along a Hilbert curve; edges are grouped by
+//! source node and ordered by edge id within a node.
+
+mod landmarks;
+mod pieces;
+mod request;
+
+/// Reports named checkpoints of a package build (with their live heap) when
+/// set; the compiler's opt-in `benchmark-profiling` build installs a reporter.
+/// Unset (the normal case) it costs one atomic load per checkpoint.
+pub static PACKAGE_BUILD_CHECKPOINT: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// `WAYFARER_DEBUG`: print build sub-phase timings and section stats.
+/// Read only with the `debug-env` feature, so a library build never prints.
+fn trace() -> bool {
+    cfg!(feature = "debug-env") && std::env::var_os("WAYFARER_DEBUG").is_some()
+}
+
+use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
+use std::time::Instant;
+
+use crate::CompileStage;
+use crate::job::Job;
+use serde::{Deserialize, Serialize};
+
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use wayfarer_package::{RoadEdge, SharedEdgeInfo, TraversalDirection};
+use wayfarer_road_graph::{
+    ResolvedEdgeRestriction, RoadGraph, RoadGraphPackageManifest, RoadGraphQualityManifest,
+};
+
+use wayfarer_costing::{
+    COSTING_MODEL_VERSION, CostModel, EdgeCostClasses, EdgeCostDecision, EdgeCostFlags,
+    EdgeCostInputs, NoOverrides, RouteCostingOptions,
+};
+use wayfarer_package::MobilityProfile;
+use wayfarer_package::format::{
+    EDGE_FLAG_BARRIER_AT_TARGET, EDGE_FLAG_COMPLEX_RESTRICTION_FIRST,
+    EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
+    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, MAX_COST_TUPLES, NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN,
+    PROFILE_SLOTS, PackageCounts, PackageFile, PackageLayout, PackageWriter, RoutingPackageError,
+    RoutingPackageMetadata, SHAPE_START_STRIDE, Section, WAY_ID_WIDE, e7_from_fixed_xyz,
+    edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7, profile_slot, reverse_heading, to_e7,
+    unit_xyz, xyz_from_fixed,
+};
+use wayfarer_package::format::{junction, road_type_rank};
+use wayfarer_package::request::derived_opposing;
+use wayfarer_package::sar::{
+    LegalReason, SarEdgeFacts, SarPackageInfo, edge_sar_bits, sar_metric_cost,
+};
+
+const ALL_PROFILES: [MobilityProfile; PROFILE_SLOTS] = [
+    MobilityProfile::Default,
+    MobilityProfile::Wheeled,
+    MobilityProfile::Tracked,
+    MobilityProfile::Emergency,
+    MobilityProfile::OnFoot,
+    MobilityProfile::Legged,
+];
+
+#[derive(Debug, Clone)]
+pub struct PackageBuildOptions {
+    /// Profiles that receive a cost/duration column. `Default` always shares
+    /// the `Wheeled` column because both use the same costing policy.
+    pub profiles: Vec<MobilityProfile>,
+    /// ALT landmarks per profile column (0 disables landmark bounds).
+    pub landmark_count: usize,
+    /// Leave out the landmark rows of nodes whose distances derive exactly
+    /// from anchors (`format::LandmarkRows`). Distances read the same either
+    /// way; `false` stores every finite row, for comparisons.
+    pub anchored_landmark_rows: bool,
+}
+
+impl Default for PackageBuildOptions {
+    fn default() -> Self {
+        Self {
+            profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
+            landmark_count: landmarks::DEFAULT_LANDMARK_COUNT,
+            anchored_landmark_rows: true,
+        }
+    }
+}
+
+/// What the package build made: counts of what it stored and its timings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct PackageBuildReport {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub shared_info_count: usize,
+    pub simple_restriction_count: usize,
+    pub complex_restriction_count: usize,
+    pub skipped_restriction_count: usize,
+    pub skipped_simple_missing_to_edge: usize,
+    pub byte_len: usize,
+    pub heuristic_cost_per_m: Vec<(MobilityProfile, f64)>,
+    /// Points across all stored shapes (one per shared info).
+    pub shape_point_count: usize,
+    /// Shapes with a point that is not an exact E7 value (stored exactly too).
+    pub shape_inexact_count: usize,
+    /// Shapes stored with explicit endpoints (they differ from the nodes').
+    pub shape_explicit_count: usize,
+    pub shape_byte_len: usize,
+    /// Nodes whose position is not an exact E7 value (positions stored as f64).
+    pub node_inexact_count: usize,
+    /// Bytes of the request sections (`request.rs`).
+    pub request_byte_len: usize,
+    /// Edges whose opposing edge the adjacency rule does not reproduce.
+    pub request_opposing_exception_count: usize,
+    /// Edges without a twin (`Section::LoneInEdge`).
+    #[serde(default)]
+    pub lone_edge_count: usize,
+    /// Edges whose mode mask or tier is stored as an exception.
+    pub mode_mask_exception_count: usize,
+    pub tier_exception_count: usize,
+    /// Distinct (cost flags, cost classes, speeds) tuples of the shared infos.
+    pub cost_tuple_count: usize,
+    /// Shared infos whose way id does not fit `u32` (synthetic negative ids).
+    pub way_id_wide_count: usize,
+    /// Landmark rows stored, over all columns (rows unreachable from and to
+    /// every landmark are not).
+    pub landmark_row_count: usize,
+    /// (Column, node)s whose landmark distances derive from one anchor's
+    /// row, over all columns (not stored as rows).
+    pub landmark_one_anchor_count: usize,
+    /// Likewise from two anchors' rows.
+    pub landmark_two_anchor_count: usize,
+    /// Edges the Wheeled landmark metric adds to the stored column (SAR).
+    pub sar_metric_edge_count: usize,
+    /// Paths R5 `vehicle_on_paths` can open (physically drivable, no legal
+    /// vehicle access), by width class: unknown, under 2.5 m, 2.5–3 m, 3 m
+    /// or more. They stay out of the landmark metric.
+    pub sar_path_edge_count_by_width: [usize; 4],
+    /// Barrier nodes: with an effect in normal routing or a SAR class.
+    pub barrier_node_count: usize,
+    pub assemble_ms: u128,
+    pub landmark_ms: u128,
+    pub request_ms: u128,
+    pub total_ms: u128,
+}
+
+/// The road graph's normalized identity tokens (corridor turn discounts
+/// compare names, refs and route refs by them). Token equality is exactly
+/// the trimmed, ASCII-case-insensitive string equality the turn costing
+/// applies, and tokens are numbered in a fixed order over the shared infos.
+struct TokenInterner {
+    normalized: HashMap<String, u32>,
+}
+
+impl TokenInterner {
+    fn from_shared_infos<'a>(shared_edge_infos: impl Iterator<Item = &'a SharedEdgeInfo>) -> Self {
+        let mut interner = Self {
+            normalized: HashMap::new(),
+        };
+        for info in shared_edge_infos {
+            interner.intern(info.ref_name.as_deref());
+            interner.intern(info.name.as_deref());
+            for route_ref in &info.route_refs {
+                interner.intern(Some(route_ref));
+            }
+        }
+        interner
+    }
+
+    fn normalize(value: Option<&str>) -> Option<String> {
+        let trimmed = value?.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
+    }
+
+    fn intern(&mut self, value: Option<&str>) {
+        let Some(normalized) = Self::normalize(value) else {
+            return;
+        };
+        if !self.normalized.contains_key(&normalized) {
+            let token = u32::try_from(self.normalized.len()).expect("token table overflow");
+            self.normalized.insert(normalized, token);
+        }
+    }
+
+    fn token(&self, value: Option<&str>) -> Option<u32> {
+        Self::normalize(value).and_then(|normalized| self.normalized.get(&normalized).copied())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: store node E7 positions even when they are derivable, to
+    /// exercise both layouts.
+    static STORE_DERIVABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the landmark metric's `[column][edge]` costs of the last
+    /// package built on this thread (the stored columns, with the SAR
+    /// metric's edges), for checks of the landmark tables against them.
+    pub(crate) static LANDMARK_COSTS: std::cell::RefCell<Vec<f32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn store_derivable() -> bool {
+    #[cfg(test)]
+    return STORE_DERIVABLE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
+}
+
+/// The sub-phases of the package build before landmarks, in order: each
+/// reports its share of [`CompileStage::BuildPackage`] as it ends.
+const BUILD_STEPS: [&str; 8] = [
+    "nodes",
+    "edge order",
+    "edge fields",
+    "costs",
+    "restrictions",
+    "shapes",
+    "request sections",
+    "adjacency, positions, heuristic",
+];
+
+/// The error a build returns when its job was cancelled; the caller reads the
+/// job, not this error, to tell a cancel from a failure.
+pub(crate) fn cancelled_error() -> RoutingPackageError {
+    RoutingPackageError::Invalid("the build was cancelled".into())
+}
+
+/// Ends sub-phases: checks the job for a cancel, reports progress, and prints
+/// timings with `WAYFARER_DEBUG` (feature `debug-env`).
+struct PhaseClock<'j, 'a> {
+    enabled: bool,
+    last: Instant,
+    job: &'j Job<'a>,
+}
+
+impl<'j, 'a> PhaseClock<'j, 'a> {
+    fn new(job: &'j Job<'a>) -> Self {
+        Self {
+            enabled: trace(),
+            last: Instant::now(),
+            job,
+        }
+    }
+
+    fn lap(&mut self, phase: &str) -> Result<(), RoutingPackageError> {
+        if let Some(step) = BUILD_STEPS.iter().position(|step| *step == phase) {
+            self.job.report(
+                CompileStage::BuildPackage,
+                Some((step + 1) as f64 / BUILD_STEPS.len() as f64),
+                0,
+                format!("Built {phase}"),
+            );
+        }
+        if self.job.cancelled() {
+            return Err(cancelled_error());
+        }
+        self.time(phase);
+        Ok(())
+    }
+
+    /// Ends a sub-phase without checking for a cancel (once the package is
+    /// in place, a cancel is too late).
+    fn time(&mut self, phase: &str) {
+        if self.enabled {
+            eprintln!(
+                "package build: {phase} {:.0} ms",
+                self.last.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        if let Some(hook) = PACKAGE_BUILD_CHECKPOINT.get() {
+            hook(phase);
+        }
+        self.last = Instant::now();
+    }
+}
+
+/// Runs `build` with a job that is never cancelled and reports nowhere.
+fn without_job<T>(build: impl FnOnce(&Job<'_>) -> T) -> T {
+    let never = || false;
+    let mut ignore = |_: &crate::job::Report| {};
+    build(&Job::new(&never, &mut ignore))
+}
+
+/// Profiles whose mode mask overlaps the restriction's (zero applies to all).
+fn profile_bits(mobility_mode_mask: u32) -> u8 {
+    ALL_PROFILES.iter().fold(0u8, |bits, profile| {
+        if mobility_mode_mask == 0 || mobility_mode_mask & profile.mobility_mode_mask() != 0 {
+            bits | (1 << profile_slot(*profile))
+        } else {
+            bits
+        }
+    })
+}
+
+/// Profiles whose mode mask overlaps the edge's (no wildcard for zero).
+fn profile_bits_strict(mobility_mode_mask: u32) -> u8 {
+    ALL_PROFILES.iter().fold(0u8, |bits, profile| {
+        if mobility_mode_mask & profile.mobility_mode_mask() != 0 {
+            bits | (1 << profile_slot(*profile))
+        } else {
+            bits
+        }
+    })
+}
+
+/// Hilbert index of (x, y) on a 2^16 grid; keeps spatially close nodes close
+/// in memory so a search's working set stays cache-friendly.
+fn hilbert_index(mut x: u32, mut y: u32) -> u64 {
+    let mut index = 0u64;
+    let mut s = 1u32 << 15;
+    while s > 0 {
+        let rx = u32::from(x & s > 0);
+        let ry = u32::from(y & s > 0);
+        index += u64::from(s) * u64::from(s) * u64::from((3 * rx) ^ ry);
+        if ry == 0 {
+            if rx == 1 {
+                x = (s - 1).wrapping_sub(x) & 0xFFFF;
+                y = (s - 1).wrapping_sub(y) & 0xFFFF;
+            }
+            std::mem::swap(&mut x, &mut y);
+        }
+        s >>= 1;
+    }
+    index
+}
+
+/// Road graph package metadata for `graph`: its manifest's schema, hash,
+/// counts and quality when the caller has one, else the graph's own counts.
+pub fn package_metadata(
+    graph: &RoadGraph,
+    manifest: Option<&RoadGraphPackageManifest>,
+) -> RoutingPackageMetadata<RoadGraphQualityManifest> {
+    let mode_mask_union = graph
+        .graph
+        .edge_weights()
+        .fold(0, |mask, edge| mask | edge.mobility_mode_mask);
+    match manifest {
+        Some(manifest) => RoutingPackageMetadata {
+            graph_id: graph.graph_id.clone(),
+            country_code: graph.country_code.clone(),
+            road_graph_schema_version: manifest.graph_schema_version,
+            road_graph_blake3_hash_hex: manifest.blake3_hash_hex.clone(),
+            node_count: manifest.node_count,
+            directed_edge_count: manifest.directed_edge_count,
+            shared_edge_info_count: manifest.shared_edge_info_count,
+            mode_mask_union,
+            quality: manifest.quality.clone(),
+            costing_model_version: COSTING_MODEL_VERSION,
+            sar: SarPackageInfo::default(),
+        },
+        None => RoutingPackageMetadata {
+            graph_id: graph.graph_id.clone(),
+            country_code: graph.country_code.clone(),
+            road_graph_schema_version: wayfarer_road_graph::ROAD_GRAPH_SNAPSHOT_VERSION,
+            road_graph_blake3_hash_hex: String::new(),
+            node_count: graph.node_count(),
+            directed_edge_count: graph.edge_count(),
+            shared_edge_info_count: graph.shared_edge_infos.len(),
+            mode_mask_union,
+            quality: Default::default(),
+            costing_model_version: COSTING_MODEL_VERSION,
+            sar: SarPackageInfo::default(),
+        },
+    }
+}
+
+/// Builds the package sections of `graph`.
+pub fn build_package(
+    graph: &RoadGraph,
+    metadata: &RoutingPackageMetadata<RoadGraphQualityManifest>,
+    options: &PackageBuildOptions,
+) -> Result<(PackageWriter, PackageBuildReport), RoutingPackageError> {
+    without_job(|job| build_package_from(GraphSource::Borrowed(graph), metadata, options, job))
+}
+
+/// The road graph a package is built from: borrowed, or owned so that it can
+/// be freed once every section derived from it is built (before landmarks,
+/// the build's memory peak).
+enum GraphSource<'a> {
+    Borrowed(&'a RoadGraph),
+    Owned(Option<Box<RoadGraph>>),
+}
+
+impl GraphSource<'_> {
+    fn get(&self) -> &RoadGraph {
+        match self {
+            Self::Borrowed(graph) => graph,
+            Self::Owned(graph) => graph.as_ref().expect("road graph already released"),
+        }
+    }
+
+    fn release(&mut self) {
+        if let Self::Owned(graph) = self {
+            *graph = None;
+        }
+    }
+}
+
+fn build_package_from(
+    mut source: GraphSource<'_>,
+    metadata: &RoutingPackageMetadata<RoadGraphQualityManifest>,
+    options: &PackageBuildOptions,
+    job: &Job<'_>,
+) -> Result<(PackageWriter, PackageBuildReport), RoutingPackageError> {
+    let graph = source.get();
+    let started = Instant::now();
+    job.report(
+        CompileStage::BuildPackage,
+        Some(0.0),
+        0,
+        "Costing edges and building the package sections",
+    );
+    let mut clock = PhaseClock::new(job);
+    let mut report = PackageBuildReport::default();
+
+    // Columns: one per distinct costing policy requested.
+    let mut column_profiles = Vec::<MobilityProfile>::new();
+    let mut profile_columns = [NO_COLUMN; PROFILE_SLOTS];
+    for profile in &options.profiles {
+        let canonical = match profile {
+            MobilityProfile::Default => MobilityProfile::Wheeled,
+            other => *other,
+        };
+        if !column_profiles.contains(&canonical) {
+            column_profiles.push(canonical);
+        }
+    }
+    for (column, profile) in column_profiles.iter().enumerate() {
+        profile_columns[profile_slot(*profile)] = column as u8;
+        if *profile == MobilityProfile::Wheeled {
+            profile_columns[profile_slot(MobilityProfile::Default)] = column as u8;
+        }
+    }
+
+    let raw_edges = graph.graph.raw_edges();
+    let raw_node_count = graph.graph.node_count();
+    if raw_edges.is_empty() {
+        return Err(RoutingPackageError::Unsupported(
+            "the graph has no edges".into(),
+        ));
+    }
+    if raw_edges.len() >= u32::MAX as usize || raw_node_count >= u32::MAX as usize {
+        return Err(RoutingPackageError::Unsupported(
+            "the graph exceeds u32 indexing".into(),
+        ));
+    }
+    // Shared infos by id (the last of a duplicated id wins, as in the road
+    // graph's own index). Every edge must resolve its shared info.
+    let shared_by_id = graph
+        .shared_edge_infos
+        .iter()
+        .enumerate()
+        .map(|(index, info)| (info.shared_edge_info_id, index as u32))
+        .collect::<FxHashMap<_, _>>();
+    let edge_shared_raw = raw_edges
+        .par_iter()
+        .map(|raw_edge| {
+            shared_by_id
+                .get(&raw_edge.weight.shared_edge_info_id)
+                .copied()
+        })
+        .collect::<Option<Vec<u32>>>()
+        .ok_or_else(|| {
+            RoutingPackageError::Unsupported("an edge's shared edge info is missing".into())
+        })?;
+    drop(shared_by_id);
+    let shared_infos = &graph.shared_edge_infos;
+    let road_edge = |raw: u32| -> &RoadEdge { &raw_edges[raw as usize].weight };
+
+    // Nodes: the endpoints of edges, ordered along a Hilbert curve.
+    let mut node_used = vec![false; raw_node_count];
+    for raw_edge in raw_edges {
+        node_used[raw_edge.source().index()] = true;
+        node_used[raw_edge.target().index()] = true;
+    }
+    let mut nodes = (0..raw_node_count as u32)
+        .filter(|raw| node_used[*raw as usize])
+        .collect::<Vec<_>>();
+    drop(node_used);
+    let position = |raw: u32| {
+        let node = &graph.graph[petgraph::graph::NodeIndex::new(raw as usize)];
+        (node.lat, node.lng)
+    };
+    let (min_lat, max_lat, min_lng, max_lng) = nodes.iter().fold(
+        (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
+        |(a, b, c, d), raw| {
+            let (lat, lng) = position(*raw);
+            (a.min(lat), b.max(lat), c.min(lng), d.max(lng))
+        },
+    );
+    let quantize = |value: f64, low: f64, high: f64| {
+        let span = (high - low).max(1e-9);
+        (((value - low) / span) * 65_535.0).clamp(0.0, 65_535.0) as u32
+    };
+    nodes.par_sort_by_cached_key(|raw| {
+        let (lat, lng) = position(*raw);
+        (
+            hilbert_index(
+                quantize(lng, min_lng, max_lng),
+                quantize(lat, min_lat, max_lat),
+            ),
+            *raw,
+        )
+    });
+    let mut raw_node_to_compact = vec![u32::MAX; raw_node_count];
+    for (index, raw) in nodes.iter().enumerate() {
+        raw_node_to_compact[*raw as usize] = index as u32;
+    }
+    let node_count = nodes.len();
+    // Barrier nodes: compact nodes whose barrier affects some profile
+    // (`BarrierAccess`) or vehicles under SAR `barriers` (a class).
+    let mut barrier_node = Vec::new();
+    let mut barrier_class = Vec::new();
+    let mut barrier_access = Vec::new();
+    for (compact, raw) in nodes.iter().enumerate() {
+        let node = &graph.graph[petgraph::graph::NodeIndex::new(*raw as usize)];
+        if node.barrier_class != 0 || node.barrier_access != 0 {
+            barrier_node.push(compact as u32);
+            barrier_class.push(node.barrier_class);
+            barrier_access.push(node.barrier_access);
+        }
+    }
+    report.barrier_node_count = barrier_node.len();
+    clock.lap("nodes")?;
+
+    // Edges: grouped by compact source node, ordered by edge id within a node
+    // (the adjacency order of the road graph's index, which keeps
+    // tie-breaking comparable). `order[compact edge]` is (source node, edge
+    // id, raw edge); edge ids are unique, so the order is total.
+    let mut order = raw_edges
+        .par_iter()
+        .enumerate()
+        .map(|(raw, raw_edge)| {
+            (
+                raw_node_to_compact[raw_edge.source().index()],
+                raw_edge.weight.edge_id,
+                raw as u32,
+            )
+        })
+        .collect::<Vec<_>>();
+    order.par_sort_unstable();
+    let edge_count = order.len();
+    let edge_raw = order.iter().map(|(_, _, raw)| *raw).collect::<Vec<_>>();
+    let edge_source = order
+        .iter()
+        .map(|(source, _, _)| *source)
+        .collect::<Vec<_>>();
+    let edge_ids = order.iter().map(|(_, id, _)| *id).collect::<Vec<_>>();
+    drop(order);
+    let edge_target = edge_raw
+        .par_iter()
+        .map(|raw| raw_node_to_compact[raw_edges[*raw as usize].target().index()])
+        .collect::<Vec<_>>();
+    // Edge ids: a dense lookup from (id - base) to the compact edge.
+    let edge_id_base = edge_ids.iter().copied().min().unwrap_or(0);
+    let edge_id_span = edge_ids
+        .iter()
+        .map(|id| id - edge_id_base)
+        .max()
+        .map_or(0, |span| span as usize + 1);
+    if edge_id_span > edge_id_span_limit(edge_count) {
+        return Err(RoutingPackageError::Unsupported(format!(
+            "edge ids span {edge_id_span} values for {edge_count} edges"
+        )));
+    }
+    let mut edge_id_lookup = vec![u32::MAX; edge_id_span];
+    for (edge, id) in edge_ids.iter().enumerate() {
+        let slot = &mut edge_id_lookup[(id - edge_id_base) as usize];
+        if *slot != u32::MAX {
+            return Err(RoutingPackageError::Unsupported(format!(
+                "edge id {id} is not unique"
+            )));
+        }
+        *slot = edge as u32;
+    }
+    clock.lap("edge order")?;
+
+    // Shared infos used by some edge, in shared-info id order, so a shared
+    // info's id follows from its index (see `request::shared_info_id`).
+    let mut shared_used = vec![false; shared_infos.len()];
+    for raw in &edge_shared_raw {
+        shared_used[*raw as usize] = true;
+    }
+    let mut shared_raw = (0..shared_infos.len() as u32)
+        .filter(|raw| shared_used[*raw as usize])
+        .collect::<Vec<_>>();
+    drop(shared_used);
+    shared_raw.sort_unstable_by_key(|raw| shared_infos.at(*raw as usize).shared_edge_info_id);
+    let mut shared_compact_by_raw = vec![u32::MAX; shared_infos.len()];
+    for (shared, raw) in shared_raw.iter().enumerate() {
+        shared_compact_by_raw[*raw as usize] = shared as u32;
+    }
+    // The shape of a shared info runs between the nodes of its first edge
+    // (in compact order); its endpoints are implicit when every edge using
+    // it agrees on those nodes' positions.
+    const NO_NODES: (u32, u32) = (u32::MAX, u32::MAX);
+    let mut si_nodes = vec![NO_NODES; shared_raw.len()];
+    let mut si_consistent = vec![true; shared_raw.len()];
+    let mut edge_shared_info = Vec::with_capacity(edge_count);
+    let node_e7_of = |compact: u32| {
+        let (lat, lng) = position(nodes[compact as usize]);
+        (to_e7(lat), to_e7(lng))
+    };
+    for edge in 0..edge_count {
+        let raw = edge_raw[edge];
+        let shared = shared_compact_by_raw[edge_shared_raw[raw as usize] as usize];
+        let backward = road_edge(raw).traversal_direction == TraversalDirection::Backward;
+        let shape_nodes = if backward {
+            (edge_target[edge], edge_source[edge])
+        } else {
+            (edge_source[edge], edge_target[edge])
+        };
+        let first = &mut si_nodes[shared as usize];
+        if *first == NO_NODES {
+            *first = shape_nodes;
+        }
+        let (from, to) = *first;
+        if node_e7_of(from) != node_e7_of(shape_nodes.0)
+            || node_e7_of(to) != node_e7_of(shape_nodes.1)
+        {
+            si_consistent[shared as usize] = false;
+        }
+        edge_shared_info.push(shared);
+    }
+    drop(shared_compact_by_raw);
+    drop(edge_shared_raw);
+    let shared_count = shared_raw.len();
+    let info_of = |shared: u32| shared_infos.at(shared_raw[shared as usize] as usize);
+
+    // Per-edge fields.
+    let edge_length = edge_raw
+        .par_iter()
+        .map(|raw| road_edge(*raw).distance_m)
+        .collect::<Vec<_>>();
+    let heading_start = edge_raw
+        .par_iter()
+        .map(|raw| road_edge(*raw).start_heading_deg.unwrap_or(NO_HEADING))
+        .collect::<Vec<_>>();
+    let heading_end = edge_raw
+        .par_iter()
+        .map(|raw| road_edge(*raw).end_heading_deg.unwrap_or(NO_HEADING))
+        .collect::<Vec<_>>();
+    // Profile bits (legal access), plus the SAR bits: physically drivable,
+    // and against a vehicle one-way (`wayfarer_package::sar`).
+    let edge_profile_access = edge_raw
+        .par_iter()
+        .zip(&edge_shared_info)
+        .map(|(raw, shared)| {
+            let edge = road_edge(*raw);
+            profile_bits_strict(edge.mobility_mode_mask)
+                | edge_sar_bits(
+                    info_of(*shared).attrs,
+                    edge.traversal_direction,
+                    edge.mobility_mode_mask,
+                )
+        })
+        .collect::<Vec<_>>();
+    let si_legal_reason = (0..shared_count as u32)
+        .map(|shared| info_of(shared).attrs.legal_reason)
+        .collect::<Vec<u8>>();
+    let edge_junction = edge_raw
+        .par_iter()
+        .map(|raw| {
+            let edge = road_edge(*raw);
+            junction::encode(edge.end_control, edge.end_minor_approach)
+        })
+        .collect::<Vec<u8>>();
+    let road_rank = edge_shared_info
+        .par_iter()
+        .map(|shared| road_type_rank(info_of(*shared).attrs.road_type))
+        .collect::<Vec<_>>();
+    // Inferred speed + 1, 0 for none.
+    let edge_inferred_speed = edge_raw
+        .par_iter()
+        .map(|raw| match road_edge(*raw).inferred_speed_kph {
+            None => Ok(0),
+            Some(speed) => speed.checked_add(1).ok_or_else(|| {
+                RoutingPackageError::Unsupported(format!("inferred speed {speed} is out of range"))
+            }),
+        })
+        .collect::<Result<Vec<u16>, _>>()?;
+    let mut edge_flags = edge_raw
+        .par_iter()
+        .zip(&edge_shared_info)
+        .map(|(raw, shared)| {
+            let mut flags = if info_of(*shared).attrs.is_link {
+                EDGE_FLAG_LINK
+            } else {
+                0
+            };
+            if road_edge(*raw).traversal_direction == TraversalDirection::Backward {
+                flags |= EDGE_FLAG_SHAPE_REVERSED;
+            }
+            flags
+        })
+        .collect::<Vec<_>>();
+    for (flags, target) in edge_flags.iter_mut().zip(&edge_target) {
+        if barrier_node.binary_search(target).is_ok() {
+            *flags |= EDGE_FLAG_BARRIER_AT_TARGET;
+        }
+    }
+
+    // Costing attributes (derived columns read these): a table of the
+    // distinct (flags, classes, speeds) tuples in order of first use, and each
+    // shared info's row of it.
+    let classes = (0..shared_count as u32)
+        .into_par_iter()
+        .map(|shared| EdgeCostClasses::from_shared_info(info_of(shared).attrs))
+        .collect::<Vec<_>>();
+    let shared_cost_inputs = (0..shared_count as u32)
+        .into_par_iter()
+        .map(|shared| {
+            let info = info_of(shared).attrs;
+            let speed = |value: Option<f32>| value.unwrap_or(f32::NAN);
+            (
+                EdgeCostFlags::from_shared_info(info).0,
+                classes[shared as usize].pack(),
+                [
+                    speed(info.maxspeed_kph),
+                    speed(info.free_flow_speed_kph),
+                    speed(info.constrained_speed_kph),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut tuple_rows = FxHashMap::<(u8, u32, [u32; 3]), u16>::default();
+    let (mut si_cost_flags, mut si_cost_classes, mut si_speeds) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut si_cost_tuple = Vec::with_capacity(shared_count);
+    for (flags, classes, speeds) in &shared_cost_inputs {
+        let key = (*flags, *classes, speeds.map(f32::to_bits));
+        let next = si_cost_flags.len();
+        let row = match tuple_rows.get(&key) {
+            Some(row) => *row,
+            None => {
+                if next >= MAX_COST_TUPLES {
+                    return Err(RoutingPackageError::Unsupported(format!(
+                        "more than {MAX_COST_TUPLES} distinct costing tuples"
+                    )));
+                }
+                si_cost_flags.push(*flags);
+                si_cost_classes.push(*classes);
+                si_speeds.extend_from_slice(speeds);
+                tuple_rows.insert(key, next as u16);
+                next as u16
+            }
+        };
+        si_cost_tuple.push(row);
+    }
+    drop(shared_cost_inputs);
+    drop(tuple_rows);
+    report.cost_tuple_count = si_cost_flags.len();
+    let conditional_edges = (0..edge_count as u32)
+        .filter(|edge| {
+            !info_of(edge_shared_info[*edge as usize])
+                .attrs
+                .conditional_restrictions
+                .is_empty()
+        })
+        .collect::<Vec<_>>();
+
+    // Identity tokens per shared info.
+    let interner = TokenInterner::from_shared_infos(shared_infos.iter().map(|info| info.attrs));
+    // Way ids: `u32`, and the others (synthetic negative ids) apart.
+    let (mut si_way_wide_shared, mut si_way_wide) = (Vec::new(), Vec::new());
+    let si_way = (0..shared_count as u32)
+        .map(|shared| {
+            let id = info_of(shared).osm_way_id;
+            match u32::try_from(id) {
+                Ok(narrow) if narrow != WAY_ID_WIDE => narrow,
+                _ => {
+                    si_way_wide_shared.push(shared);
+                    si_way_wide.push(id);
+                    WAY_ID_WIDE
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    report.way_id_wide_count = si_way_wide.len();
+    let si_name = (0..shared_count as u32)
+        .map(|shared| {
+            interner
+                .token(info_of(shared).attrs.name.as_deref())
+                .unwrap_or(NO_TOKEN)
+        })
+        .collect::<Vec<_>>();
+    let si_ref = (0..shared_count as u32)
+        .map(|shared| {
+            interner
+                .token(info_of(shared).attrs.ref_name.as_deref())
+                .unwrap_or(NO_TOKEN)
+        })
+        .collect::<Vec<_>>();
+    let mut si_route_ref_start = vec![0u32];
+    let mut si_route_ref_pool = Vec::new();
+    for shared in 0..shared_count as u32 {
+        let mut tokens = info_of(shared)
+            .attrs
+            .route_refs
+            .iter()
+            .filter_map(|route_ref| interner.token(Some(route_ref)))
+            .collect::<Vec<_>>();
+        tokens.sort_unstable();
+        tokens.dedup();
+        si_route_ref_pool.extend(tokens);
+        si_route_ref_start.push(si_route_ref_pool.len() as u32);
+    }
+    drop(interner);
+    clock.lap("edge fields")?;
+
+    // Costs and durations per column, from the road graph's records.
+    let column_count = column_profiles.len();
+    let costing = RouteCostingOptions::default();
+    let mut edge_cost = vec![f32::INFINITY; edge_count * column_count];
+    let mut edge_duration = vec![f32::INFINITY; edge_count * column_count];
+    // The Wheeled landmarks' metric (`SarPackageInfo`): the stored column,
+    // and each physically drivable edge it cannot use at its default cost
+    // with legal access, times the minimum SAR factors it needs.
+    let sar = metadata.sar;
+    let mut sar_metric = Vec::<(usize, f32)>::new();
+    for (column, profile) in column_profiles.iter().enumerate() {
+        let policy = CostModel::new(*profile, &costing);
+        let range = column * edge_count..(column + 1) * edge_count;
+        edge_cost[range.clone()]
+            .par_iter_mut()
+            .zip(&mut edge_duration[range])
+            .enumerate()
+            .for_each(|(edge, (cost, duration))| {
+                let shared = edge_shared_info[edge];
+                let inputs = EdgeCostInputs::from_parts(
+                    road_edge(edge_raw[edge]),
+                    info_of(shared).attrs,
+                    classes[shared as usize],
+                );
+                if let EdgeCostDecision::Allowed(costed) =
+                    policy.edge_cost_inputs(&inputs, &NoOverrides)
+                {
+                    *cost = costed.cost as f32;
+                    *duration = costed.duration_s as f32;
+                }
+            });
+        if *profile == MobilityProfile::Wheeled {
+            let costs = &edge_cost[column * edge_count..(column + 1) * edge_count];
+            sar_metric = (0..edge_count)
+                .into_par_iter()
+                .filter(|edge| !costs[*edge].is_finite())
+                .filter_map(|edge| {
+                    let shared = edge_shared_info[edge];
+                    let factor = sar.landmark_factor(SarEdgeFacts {
+                        access: edge_profile_access[edge],
+                        reason: LegalReason(si_legal_reason[shared as usize]),
+                        path: classes[shared as usize].path_class,
+                        width: classes[shared as usize].width,
+                    })?;
+                    let mut inputs = EdgeCostInputs::from_parts(
+                        road_edge(edge_raw[edge]),
+                        info_of(shared).attrs,
+                        classes[shared as usize],
+                    );
+                    inputs.mobility_mode_mask = profile.mobility_mode_mask();
+                    match policy.edge_cost_inputs(&inputs, &NoOverrides) {
+                        EdgeCostDecision::Allowed(costed) => Some((
+                            column * edge_count + edge,
+                            sar_metric_cost(costed.cost, factor),
+                        )),
+                        _ => None,
+                    }
+                })
+                .collect();
+        }
+    }
+    let wheeled = 1u8 << profile_slot(MobilityProfile::Wheeled);
+    for edge in 0..edge_count {
+        let access = edge_profile_access[edge];
+        let class = classes[edge_shared_info[edge] as usize];
+        if access & wheeled == 0
+            && access & wayfarer_package::sar::ACCESS_VEHICLE_PHYSICAL != 0
+            && class.path_class != wayfarer_package::sar::SarPathClass::None
+        {
+            report.sar_path_edge_count_by_width[class.width as usize] += 1;
+        }
+    }
+    drop(classes);
+    report.sar_metric_edge_count = sar_metric.len();
+    clock.lap("costs")?;
+
+    // Restrictions, from the road graph's resolved restrictions.
+    let edge_for_id = |edge_id: u64| -> Option<u32> {
+        edge_id
+            .checked_sub(edge_id_base)
+            .and_then(|slot| edge_id_lookup.get(slot as usize))
+            .copied()
+            .filter(|edge| *edge != u32::MAX)
+    };
+    let mut simple_by_pair = BTreeMap::<(u64, u64), Vec<(i64, u32)>>::new();
+    let mut complex_by_to = BTreeMap::<u64, Vec<(Vec<u64>, u32)>>::new();
+    for restriction in &graph.resolved_restrictions {
+        match restriction {
+            ResolvedEdgeRestriction::Simple {
+                from_edge_id,
+                to_edge_id,
+                via_node_id,
+                mobility_mode_mask,
+                ..
+            } => simple_by_pair
+                .entry((*from_edge_id, *to_edge_id))
+                .or_default()
+                .push((*via_node_id, *mobility_mode_mask)),
+            ResolvedEdgeRestriction::Complex {
+                from_edge_id,
+                to_edge_id,
+                via_edge_ids,
+                mobility_mode_mask,
+                ..
+            } => {
+                let mut prefix = Vec::with_capacity(via_edge_ids.len() + 1);
+                prefix.push(*from_edge_id);
+                prefix.extend(via_edge_ids.iter().copied());
+                complex_by_to
+                    .entry(*to_edge_id)
+                    .or_default()
+                    .push((prefix, *mobility_mode_mask));
+            }
+        }
+    }
+    let mut simple_rows = Vec::<(u32, u32, u32, u8)>::new();
+    for ((from_id, to_id), restrictions) in &simple_by_pair {
+        let Some(from) = edge_for_id(*from_id) else {
+            report.skipped_restriction_count += restrictions.len();
+            continue;
+        };
+        // The via node is the end of the from edge; the stored id is an OSM id.
+        match edge_for_id(*to_id) {
+            Some(to) => {
+                for (_via, mask) in restrictions {
+                    simple_rows.push((from, to, edge_target[from as usize], profile_bits(*mask)));
+                }
+                edge_flags[from as usize] |= EDGE_FLAG_SIMPLE_RESTRICTION_FROM;
+            }
+            None => {
+                report.skipped_restriction_count += restrictions.len();
+                report.skipped_simple_missing_to_edge += restrictions.len();
+            }
+        }
+    }
+    drop(simple_by_pair);
+    let mut complex_rows = Vec::<(u32, Vec<u32>, u8)>::new();
+    for (to_id, restrictions) in &complex_by_to {
+        let Some(to) = edge_for_id(*to_id) else {
+            report.skipped_restriction_count += restrictions.len();
+            continue;
+        };
+        for (prefix, mask) in restrictions {
+            let mapped = prefix
+                .iter()
+                .map(|id| edge_for_id(*id))
+                .collect::<Option<Vec<_>>>();
+            match mapped {
+                Some(prefix) if !prefix.is_empty() => {
+                    complex_rows.push((to, prefix, profile_bits(*mask)));
+                    edge_flags[to as usize] |= EDGE_FLAG_COMPLEX_RESTRICTION_TO;
+                }
+                _ => report.skipped_restriction_count += 1,
+            }
+        }
+    }
+    drop(complex_by_to);
+    simple_rows.sort_unstable();
+    complex_rows.sort();
+    let mut complex_by_first = (0..complex_rows.len() as u32).collect::<Vec<_>>();
+    complex_by_first.sort_by_key(|row| (complex_rows[*row as usize].1[0], *row));
+    let complex_first = complex_by_first
+        .iter()
+        .map(|row| complex_rows[*row as usize].1[0])
+        .collect::<Vec<_>>();
+    for first in &complex_first {
+        edge_flags[*first as usize] |= EDGE_FLAG_COMPLEX_RESTRICTION_FIRST;
+    }
+    let mut complex_prefix_start = vec![0u32];
+    let mut complex_prefix_pool = Vec::new();
+    for (_, prefix, _) in &complex_rows {
+        complex_prefix_pool.extend_from_slice(prefix);
+        complex_prefix_start.push(complex_prefix_pool.len() as u32);
+    }
+    clock.lap("restrictions")?;
+
+    // Shapes: the road graph geometry of each shared info, as E7 deltas with
+    // implicit endpoints where every edge agrees on the nodes; shapes with a
+    // point that is not an exact E7 value are also stored exactly.
+    let mut shape_start = Vec::with_capacity(shared_count.div_ceil(SHAPE_START_STRIDE) + 1);
+    let mut shape_bytes = Vec::new();
+    let mut exact_shape_shared = Vec::new();
+    let mut exact_shape_start = vec![0u32];
+    let mut exact_shape_points = Vec::<f64>::new();
+    shape_start.push(0u32);
+    for shared in 0..shared_count {
+        let info = info_of(shared as u32);
+        let (from, to) = si_nodes[shared];
+        let endpoints = si_consistent[shared].then(|| (node_e7_of(from), node_e7_of(to)));
+        let exact = info
+            .geometry
+            .iter()
+            .all(|(lat, lng)| is_exact_e7(*lat) && is_exact_e7(*lng));
+        let points = info
+            .geometry
+            .iter()
+            .map(|(lat, lng)| (to_e7(*lat), to_e7(*lng)))
+            .collect::<Vec<_>>();
+        report.shape_point_count += points.len();
+        if !exact {
+            report.shape_inexact_count += 1;
+            exact_shape_shared.push(shared as u32);
+            for (lat, lng) in info.geometry {
+                exact_shape_points.extend([*lat, *lng]);
+            }
+            exact_shape_start.push((exact_shape_points.len() / 2) as u32);
+        }
+        let before = shape_bytes.len();
+        encode_shape(&mut shape_bytes, &points, endpoints);
+        if shape_bytes
+            .get(before)
+            .is_some_and(|header| header & 1 != 0)
+        {
+            report.shape_explicit_count += 1;
+        }
+        let end = u32::try_from(shape_bytes.len())
+            .map_err(|_| RoutingPackageError::Unsupported("shape section exceeds 4 GiB".into()))?;
+        // The offset of every SHAPE_START_STRIDEth shape, then the end.
+        if (shared + 1).is_multiple_of(SHAPE_START_STRIDE) || shared + 1 == shared_count {
+            shape_start.push(end);
+        }
+    }
+    report.shape_byte_len = shape_bytes.len() + shape_start.len() * 4;
+    drop(si_consistent);
+    clock.lap("shapes")?;
+
+    // Incoming adjacency: compact edges grouped by target, ascending edge index.
+    let mut first_out = vec![0u32; node_count + 1];
+    for source in &edge_source {
+        first_out[*source as usize + 1] += 1;
+    }
+    for node in 0..node_count {
+        first_out[node + 1] += first_out[node];
+    }
+    let mut first_in = vec![0u32; node_count + 1];
+    for target in &edge_target {
+        first_in[*target as usize + 1] += 1;
+    }
+    for node in 0..node_count {
+        first_in[node + 1] += first_in[node];
+    }
+    let mut in_cursor = first_in.clone();
+    let mut in_edges = vec![0u32; edge_count];
+    for (edge, target) in edge_target.iter().enumerate() {
+        let slot = &mut in_cursor[*target as usize];
+        in_edges[*slot as usize] = edge as u32;
+        *slot += 1;
+    }
+    drop(in_cursor);
+
+    // Request sections (correlation, legs).
+    let request_started = Instant::now();
+    let request_sections = request::build_request_sections(&request::RequestBuildInput {
+        graph,
+        node_raw: &nodes,
+        first_out: &first_out,
+        edge_source: &edge_source,
+        edge_target: &edge_target,
+        edge_ids: &edge_ids,
+        edge_id_base,
+        edge_id_lookup: &edge_id_lookup,
+        edge_raw: &edge_raw,
+        edge_shared_info: &edge_shared_info,
+        edge_flags: &edge_flags,
+        edge_profile_access: &edge_profile_access,
+        shared_raw: &shared_raw,
+    })?;
+    report.request_byte_len = request_sections.byte_len();
+    report.request_opposing_exception_count = request_sections.opposing_exception_count();
+    report.mode_mask_exception_count = request_sections.mode_mask_exception_count();
+    report.tier_exception_count = request_sections.tier_exception_count();
+    report.request_ms = request_started.elapsed().as_millis();
+    drop(edge_raw);
+    drop(shared_raw);
+    // Not stored: engines build the lookup from the ids on first use.
+    drop(edge_id_lookup);
+    // Name and ref tokens per attribute class: the class key holds the name
+    // and ref, so every shared info of a class has the same tokens.
+    let shared_class = request_sections.shared_attr_class();
+    let class_count = request_sections.class_count();
+    let si_name = per_class(&si_name, shared_class, class_count, "name")?;
+    let si_ref = per_class(&si_ref, shared_class, class_count, "ref")?;
+    let (si_route_ref_start, si_route_ref_pool) = per_class_lists(
+        &si_route_ref_start,
+        &si_route_ref_pool,
+        shared_class,
+        class_count,
+    )?;
+    clock.lap("request sections")?;
+
+    // Node positions: unit vectors in fixed point, and E7 / exact positions
+    // only when they cannot be recomputed from them. A node whose position
+    // is not an E7 value reads its E7 position from its exact one, so only
+    // the others need to round-trip.
+    let node_lat = nodes.iter().map(|raw| position(*raw).0).collect::<Vec<_>>();
+    let node_lng = nodes.iter().map(|raw| position(*raw).1).collect::<Vec<_>>();
+    drop(nodes);
+    let mut node_xyz = Vec::with_capacity(node_count * 3);
+    for (lat, lng) in node_lat.iter().zip(&node_lng) {
+        node_xyz.extend_from_slice(&fixed_xyz(unit_xyz(*lat, *lng)));
+    }
+    let node_lat_e7 = node_lat.iter().map(|lat| to_e7(*lat)).collect::<Vec<_>>();
+    let node_lng_e7 = node_lng.iter().map(|lng| to_e7(*lng)).collect::<Vec<_>>();
+    let node_e7_derived = !store_derivable()
+        && (0..node_count).all(|node| {
+            let at = node * 3;
+            !is_exact_e7(node_lat[node])
+                || !is_exact_e7(node_lng[node])
+                || e7_from_fixed_xyz([node_xyz[at], node_xyz[at + 1], node_xyz[at + 2]])
+                    == (node_lat_e7[node], node_lng_e7[node])
+        });
+    let (node_lat_e7, node_lng_e7) = if node_e7_derived {
+        (Vec::new(), Vec::new())
+    } else {
+        (node_lat_e7, node_lng_e7)
+    };
+    report.node_inexact_count = node_lat
+        .iter()
+        .zip(&node_lng)
+        .filter(|(lat, lng)| !is_exact_e7(**lat) || !is_exact_e7(**lng))
+        .count();
+    // Exact positions of the nodes that are not their E7 value; the others
+    // read their E7 position.
+    let node_lat_lng_nodes = (0..node_count as u32)
+        .filter(|node| {
+            let node = *node as usize;
+            !is_exact_e7(node_lat[node]) || !is_exact_e7(node_lng[node])
+        })
+        .collect::<Vec<_>>();
+    let node_lat_lng = node_lat_lng_nodes
+        .iter()
+        .flat_map(|node| [node_lat[*node as usize], node_lng[*node as usize]])
+        .collect::<Vec<_>>();
+    let layout = PackageLayout {
+        node_e7_derived,
+        edge_id_base,
+    };
+
+    // Admissible, consistent A* factor: the smallest cost per metre any edge
+    // realises, measured against max(polyline length, endpoint chord) so it
+    // also bounds partially traversed destination edges.
+    let mut heuristic_cost_per_m = [0.0f64; PROFILE_SLOTS];
+    for (column, profile) in column_profiles.iter().enumerate() {
+        let mut factor = f64::INFINITY;
+        for edge in 0..edge_count {
+            let cost = f64::from(edge_cost[column * edge_count + edge]);
+            if !cost.is_finite() {
+                continue;
+            }
+            let (s, t) = (edge_source[edge] as usize, edge_target[edge] as usize);
+            // Against the stored (fixed-point) vectors, as the query measures
+            // chords: the bound stays consistent.
+            let xyz = |node: usize| {
+                xyz_from_fixed([
+                    node_xyz[node * 3],
+                    node_xyz[node * 3 + 1],
+                    node_xyz[node * 3 + 2],
+                ])
+            };
+            let chord = wayfarer_package::format::chord_m(xyz(s), xyz(t));
+            let span = f64::from(edge_length[edge]).max(chord);
+            if span > 0.0 {
+                factor = factor.min(cost / span);
+            }
+        }
+        let factor = if factor.is_finite() {
+            factor * 0.999
+        } else {
+            0.0
+        };
+        heuristic_cost_per_m[profile_slot(*profile)] = factor;
+        if *profile == MobilityProfile::Wheeled {
+            heuristic_cost_per_m[profile_slot(MobilityProfile::Default)] = factor;
+        }
+        report.heuristic_cost_per_m.push((*profile, factor));
+    }
+    clock.lap("adjacency, positions, heuristic")?;
+
+    source.release();
+    let landmark_started = Instant::now();
+    let landmark_cost = if sar_metric.is_empty() {
+        None
+    } else {
+        let mut costs = edge_cost.clone();
+        for (index, cost) in &sar_metric {
+            costs[*index] = *cost;
+        }
+        Some(costs)
+    };
+    drop(sar_metric);
+    #[cfg(test)]
+    LANDMARK_COSTS.with(|costs| {
+        *costs.borrow_mut() = landmark_cost.as_deref().unwrap_or(&edge_cost).to_vec();
+    });
+    let landmarks = landmarks::build_landmarks(
+        &landmarks::LandmarkInput {
+            node_count,
+            edge_count,
+            first_out: &first_out,
+            first_in: &first_in,
+            in_edges: &in_edges,
+            edge_source: &edge_source,
+            edge_target: &edge_target,
+            edge_cost: landmark_cost.as_deref().unwrap_or(&edge_cost),
+            node_lat: &node_lat,
+            node_lng: &node_lng,
+        },
+        column_count,
+        options.landmark_count,
+        options.anchored_landmark_rows,
+        job,
+    )?;
+    drop(landmark_cost);
+    report.landmark_row_count = landmarks.row_count;
+    report.landmark_one_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.0).sum();
+    report.landmark_two_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.1).sum();
+    report.landmark_ms = landmark_started.elapsed().as_millis();
+    drop(node_lat);
+    drop(node_lng);
+    clock.lap("landmarks")?;
+
+    // Clean pieces per column, for the route search's walks.
+    // Via nodes: where a restricted transition happens.
+    let mut restricted = vec![false; node_count];
+    for (from, _, _, _) in &simple_rows {
+        restricted[edge_target[*from as usize] as usize] = true;
+    }
+    for edge in &complex_prefix_pool {
+        restricted[edge_target[*edge as usize] as usize] = true;
+    }
+    let piece_bits = pieces::piece_bits(
+        &pieces::PieceInput {
+            node_count,
+            edge_count,
+            first_out: &first_out,
+            first_in: &first_in,
+            in_edges: &in_edges,
+            edge_source: &edge_source,
+            edge_target: &edge_target,
+            edge_cost: &edge_cost,
+            edge_shared_info: &edge_shared_info,
+            restricted: &restricted,
+        },
+        column_count,
+    );
+    drop(restricted);
+    if trace() {
+        eprintln!(
+            "  piece (chain, tree) nodes per column: {:?}",
+            piece_bits.counts
+        );
+    }
+    clock.lap("pieces")?;
+    // Twins, once nothing reads the incoming adjacency any more: it is
+    // stored as each edge's reverse edge (`Section::EdgeTwin`) and the few
+    // edges without one.
+    drop(first_in);
+    drop(in_edges);
+    let edge_twin = edge_twins(
+        &first_out,
+        &edge_source,
+        &edge_target,
+        &edge_shared_info,
+        &edge_flags,
+        &heading_start,
+        &heading_end,
+    );
+    let mut lone_in_edge = (0..edge_count as u32)
+        .filter(|edge| edge_twin[*edge as usize] == NO_TWIN)
+        .collect::<Vec<_>>();
+    lone_in_edge.sort_unstable_by_key(|edge| (edge_target[*edge as usize], *edge));
+    let mut lone_in_present = vec![0u64; node_count.div_ceil(64)];
+    for edge in &lone_in_edge {
+        let target = edge_target[*edge as usize] as usize;
+        lone_in_present[target / 64] |= 1 << (target % 64);
+    }
+    report.lone_edge_count = lone_in_edge.len();
+
+    let counts = PackageCounts {
+        node_count,
+        edge_count,
+        shared_info_count: shared_count,
+        simple_restriction_count: simple_rows.len(),
+        complex_restriction_count: complex_rows.len(),
+        column_count,
+        landmark_count: options.landmark_count,
+    };
+    let mut writer = PackageWriter::new(counts, layout, profile_columns, heuristic_cost_per_m);
+    writer.put_metadata(metadata);
+    writer.put(Section::NodeFirstOut, first_out);
+    writer.put(Section::NodeXyzFixed, node_xyz);
+    writer.put(Section::NodeLatE7, node_lat_e7);
+    writer.put(Section::NodeLngE7, node_lng_e7);
+    writer.put(Section::NodeLatLng, node_lat_lng);
+    writer.put(Section::NodeLatLngNodes, node_lat_lng_nodes);
+    // Derived from the twins and the out-adjacency.
+    drop(edge_source);
+    writer.put(Section::EdgeTarget, edge_target);
+    writer.put(
+        Section::EdgeId,
+        edge_ids
+            .iter()
+            .map(|id| (id - edge_id_base) as u32)
+            .collect::<Vec<_>>(),
+    );
+    drop(edge_ids);
+    writer.put(Section::EdgeLength, edge_length);
+    writer.put(Section::EdgeSharedInfo, edge_shared_info);
+    writer.put(Section::EdgeHeadingStart, heading_start);
+    // Derived from the twins' start headings, but for the edges without a
+    // twin.
+    let lone_heading_end = lone_in_edge
+        .iter()
+        .map(|edge| heading_end[*edge as usize])
+        .collect::<Vec<_>>();
+    drop(heading_end);
+    writer.put(Section::LoneHeadingEnd, lone_heading_end);
+    writer.put(Section::EdgeFlags, edge_flags);
+    writer.put(Section::EdgeRoadRank, road_rank);
+    writer.put(Section::EdgeCost, edge_cost);
+    writer.put(Section::EdgeDuration, edge_duration);
+    writer.put(Section::SharedInfoWay, si_way);
+    writer.put(Section::SharedInfoWayWideShared, si_way_wide_shared);
+    writer.put(Section::SharedInfoWayWide, si_way_wide);
+    writer.put(Section::SharedInfoName, si_name);
+    writer.put(Section::SharedInfoRef, si_ref);
+    writer.put(Section::SharedInfoRouteRefStart, si_route_ref_start);
+    writer.put(Section::SharedInfoRouteRefPool, si_route_ref_pool);
+    writer.put(
+        Section::SimpleFrom,
+        simple_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::SimpleTo,
+        simple_rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::SimpleVia,
+        simple_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::SimpleMask,
+        simple_rows.iter().map(|row| row.3).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::ComplexTo,
+        complex_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::ComplexMask,
+        complex_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+    );
+    writer.put(Section::ComplexPrefixStart, complex_prefix_start);
+    writer.put(Section::ComplexPrefixPool, complex_prefix_pool);
+    writer.put(Section::EdgeTwin, edge_twin);
+    writer.put(Section::LoneInPresent, lone_in_present);
+    writer.put(Section::LoneInEdge, lone_in_edge);
+    writer.put(Section::EdgeProfileAccess, edge_profile_access);
+    writer.put(Section::LandmarkNode, landmarks.nodes);
+    writer.put(Section::LandmarkScale, landmarks.scales);
+    writer.put(Section::LandmarkFrom, landmarks.from);
+    writer.put(Section::LandmarkTo, landmarks.to);
+    writer.put(Section::LandmarkRowPresent, landmarks.present);
+    writer.put(Section::LandmarkRowRank, landmarks.rank);
+    writer.put(Section::LandmarkOneAnchorPresent, landmarks.one_present);
+    writer.put(Section::LandmarkOneAnchorRank, landmarks.one_rank);
+    writer.put(Section::LandmarkOneAnchor, landmarks.one);
+    writer.put(Section::LandmarkTwoAnchorPresent, landmarks.two_present);
+    writer.put(Section::LandmarkTwoAnchorRank, landmarks.two_rank);
+    writer.put(Section::LandmarkTwoAnchor, landmarks.two);
+    writer.put(Section::PieceChain, piece_bits.chain);
+    writer.put(Section::PieceTree, piece_bits.tree);
+    writer.put(Section::ComplexFirst, complex_first);
+    writer.put(Section::ComplexByFirst, complex_by_first);
+    writer.put(Section::ShapeStart, shape_start);
+    writer.put(Section::ShapeBytes, shape_bytes);
+    writer.put(Section::ExactShapeShared, exact_shape_shared);
+    writer.put(Section::ExactShapeStart, exact_shape_start);
+    writer.put(Section::ExactShapePoints, exact_shape_points);
+    writer.put(Section::SharedInfoCostFlags, si_cost_flags);
+    writer.put(Section::SharedInfoCostClasses, si_cost_classes);
+    writer.put(Section::SharedInfoSpeeds, si_speeds);
+    writer.put(Section::SharedInfoCostTuple, si_cost_tuple);
+    writer.put(Section::EdgeInferredSpeed, edge_inferred_speed);
+    writer.put(Section::ConditionalEdges, conditional_edges);
+    writer.put(Section::EdgeJunction, edge_junction);
+    writer.put(Section::SharedInfoLegalReason, si_legal_reason);
+    writer.put(Section::BarrierNode, barrier_node);
+    writer.put(Section::BarrierClass, barrier_class);
+    writer.put(Section::BarrierAccess, barrier_access);
+    request_sections.put(&mut writer);
+
+    report.node_count = node_count;
+    report.edge_count = edge_count;
+    report.shared_info_count = counts.shared_info_count;
+    report.simple_restriction_count = counts.simple_restriction_count;
+    report.complex_restriction_count = counts.complex_restriction_count;
+    report.byte_len = writer.byte_len();
+    report.assemble_ms = started.elapsed().as_millis() - report.landmark_ms;
+    report.total_ms = started.elapsed().as_millis();
+    Ok((writer, report))
+}
+
+/// Each edge's twin ([`Section::EdgeTwin`]): the edge the adjacency rule
+/// for opposing edges finds (`request::derived_opposing`: out of the target,
+/// back to the source over the same shared info, against its shape), when
+/// the rule pairs the two both ways and each one's end heading is the
+/// other's start heading reversed ([`reverse_heading`]); [`NO_TWIN`]
+/// otherwise. A twin then determines the edge's source, its end heading and
+/// its place among its target's in-edges.
+fn edge_twins(
+    first_out: &[u32],
+    edge_source: &[u32],
+    edge_target: &[u32],
+    edge_shared_info: &[u32],
+    edge_flags: &[u8],
+    heading_start: &[u16],
+    heading_end: &[u16],
+) -> Vec<u32> {
+    let rule = |edge: u32| {
+        derived_opposing(
+            first_out,
+            edge_source,
+            edge_target,
+            edge_shared_info,
+            edge_flags,
+            edge,
+        )
+    };
+    (0..edge_source.len() as u32)
+        .into_par_iter()
+        .map(|edge| {
+            let Some(twin) = rule(edge) else {
+                return NO_TWIN;
+            };
+            let (e, t) = (edge as usize, twin as usize);
+            let paired = rule(twin) == Some(edge)
+                && heading_end[e] == reverse_heading(heading_start[t])
+                && heading_end[t] == reverse_heading(heading_start[e]);
+            if paired { twin } else { NO_TWIN }
+        })
+        .collect()
+}
+
+/// Builds the package of `graph` in memory (in-memory engines and tests).
+/// `values` (one per shared info) as one value per attribute class, failing
+/// if two shared infos of a class disagree: the reader takes the class's
+/// value for every shared info of it.
+fn per_class(
+    values: &[u32],
+    shared_class: &[u32],
+    class_count: usize,
+    what: &str,
+) -> Result<Vec<u32>, RoutingPackageError> {
+    const UNSET: u32 = u32::MAX - 1;
+    debug_assert!(values.iter().all(|value| *value != UNSET));
+    let mut by_class = vec![UNSET; class_count];
+    for (value, class) in values.iter().zip(shared_class) {
+        let slot = &mut by_class[*class as usize];
+        if *slot == UNSET {
+            *slot = *value;
+        } else if *slot != *value {
+            return Err(RoutingPackageError::Invalid(format!(
+                "attribute class {class} has shared infos with different {what} tokens"
+            )));
+        }
+    }
+    // A class no shared info uses (none today) reads as no token.
+    for slot in &mut by_class {
+        if *slot == UNSET {
+            *slot = NO_TOKEN;
+        }
+    }
+    Ok(by_class)
+}
+
+/// Lists (`start` offsets into `pool`, one per shared info + 1) as one list
+/// per attribute class, failing if two shared infos of a class disagree.
+fn per_class_lists(
+    start: &[u32],
+    pool: &[u32],
+    shared_class: &[u32],
+    class_count: usize,
+) -> Result<(Vec<u32>, Vec<u32>), RoutingPackageError> {
+    let list = |shared: usize| &pool[start[shared] as usize..start[shared + 1] as usize];
+    let mut first = vec![u32::MAX; class_count];
+    for (shared, class) in shared_class.iter().enumerate() {
+        let slot = &mut first[*class as usize];
+        if *slot == u32::MAX {
+            *slot = shared as u32;
+        } else if list(*slot as usize) != list(shared) {
+            return Err(RoutingPackageError::Invalid(format!(
+                "attribute class {class} has shared infos with different route refs"
+            )));
+        }
+    }
+    let mut class_start = Vec::with_capacity(class_count + 1);
+    let mut class_pool = Vec::new();
+    class_start.push(0u32);
+    for shared in first {
+        // A class no shared info uses (none today) has no route refs.
+        if shared != u32::MAX {
+            class_pool.extend_from_slice(list(shared as usize));
+        }
+        class_start.push(class_pool.len() as u32);
+    }
+    Ok((class_start, class_pool))
+}
+
+pub fn package_bytes(
+    graph: &RoadGraph,
+    options: &PackageBuildOptions,
+) -> Result<(Vec<u8>, PackageBuildReport), RoutingPackageError> {
+    let metadata = package_metadata(graph, None);
+    let (writer, report) = build_package(graph, &metadata, options)?;
+    Ok((writer.finish(), report))
+}
+
+/// Writes the routing package of `graph` to `path` atomically. The manifest
+/// supplies the road graph's schema, hash, counts and quality.
+pub fn write_package(
+    graph: &RoadGraph,
+    manifest: Option<&RoadGraphPackageManifest>,
+    path: &std::path::Path,
+    options: &PackageBuildOptions,
+) -> Result<PackageBuildReport, RoutingPackageError> {
+    let metadata = package_metadata(graph, manifest);
+    let (writer, report) = build_package(graph, &metadata, options)?;
+    without_job(|job| {
+        let mut clock = PhaseClock::new(job);
+        PackageFile::write_encoded(path, &writer)?;
+        clock.time("write");
+        Ok::<_, RoutingPackageError>(())
+    })?;
+    Ok(report)
+}
+
+/// [`write_package`], consuming `graph` and freeing it before the landmark
+/// phase, the build's memory peak.
+pub fn write_package_consuming(
+    graph: RoadGraph,
+    manifest: Option<&RoadGraphPackageManifest>,
+    path: &std::path::Path,
+    options: &PackageBuildOptions,
+) -> Result<PackageBuildReport, RoutingPackageError> {
+    without_job(|job| write_package_for_job(graph, manifest, path, options, job))
+}
+
+/// [`write_package_consuming`] for a compile job: reports the build, landmark
+/// and write stages, and stops within about a second of a cancel, leaving no
+/// file at `path` (nor its `.tmp`). After a cancel the error says only that;
+/// the job tells the caller it was a cancel.
+pub(crate) fn write_package_for_job(
+    graph: RoadGraph,
+    manifest: Option<&RoadGraphPackageManifest>,
+    path: &std::path::Path,
+    options: &PackageBuildOptions,
+    job: &Job<'_>,
+) -> Result<PackageBuildReport, RoutingPackageError> {
+    let metadata = package_metadata(&graph, manifest);
+    let (writer, report) = build_package_from(
+        GraphSource::Owned(Some(Box::new(graph))),
+        &metadata,
+        options,
+        job,
+    )?;
+    let mut clock = PhaseClock::new(job);
+    write_file(path, &writer, job)?;
+    clock.time("write");
+    Ok(report)
+}
+
+/// Bytes handed to the file per write while writing a package, so a cancel
+/// or a progress report never waits on more than this.
+const WRITE_CHUNK: usize = 4 << 20;
+
+/// Writes `writer` to `path` as [`PackageFile::write_encoded`] does (the same
+/// bytes, through `path.tmp`, synced, then renamed into place), reporting
+/// [`CompileStage::WritePackage`] and checking the job between chunks.
+/// On any error or cancel the `.tmp` file is removed and `path` is untouched.
+fn write_file(
+    path: &std::path::Path,
+    writer: &PackageWriter,
+    job: &Job<'_>,
+) -> Result<(), RoutingPackageError> {
+    let total = writer.byte_len();
+    job.report(
+        CompileStage::WritePackage,
+        Some(0.0),
+        0,
+        "Checksumming the package sections",
+    );
+    // Hashes every section; the write below reuses the result.
+    let _ = writer.seal();
+    if job.cancelled() {
+        return Err(cancelled_error());
+    }
+    // The directories this write creates, deepest first, so that a failed
+    // or cancelled write takes them away again.
+    let mut created = Vec::new();
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let mut missing = Some(parent);
+        while let Some(dir) = missing.filter(|dir| !dir.as_os_str().is_empty() && !dir.exists()) {
+            created.push(dir.to_path_buf());
+            missing = dir.parent();
+        }
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = std::path::PathBuf::from(temp);
+    let result = (|| -> Result<(), RoutingPackageError> {
+        let mut file = std::fs::File::create(&temp)?;
+        let mut out = ProgressFile {
+            file: &mut file,
+            written: 0,
+            reported: 0,
+            total,
+            job,
+        };
+        let mut buffered = std::io::BufWriter::with_capacity(1 << 20, &mut out);
+        writer.write_to(&mut buffered)?;
+        buffered.flush()?;
+        drop(buffered);
+        file.sync_all()?;
+        if job.cancelled() {
+            return Err(cancelled_error());
+        }
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        for dir in &created {
+            // Only if empty: something else may have been put there meanwhile.
+            let _ = std::fs::remove_dir(dir);
+        }
+        if job.cancelled() {
+            return Err(cancelled_error());
+        }
+    }
+    result?;
+    job.report(
+        CompileStage::WritePackage,
+        Some(1.0),
+        total,
+        "Routing package written",
+    );
+    Ok(())
+}
+
+/// The package file being written: hands the file at most [`WRITE_CHUNK`] per
+/// write, reports progress every 1% and fails the write once the job is
+/// cancelled.
+struct ProgressFile<'f, 'j, 'a> {
+    file: &'f mut std::fs::File,
+    written: usize,
+    reported: usize,
+    total: usize,
+    job: &'j Job<'a>,
+}
+
+impl Write for ProgressFile<'_, '_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.job.cancelled() {
+            return Err(std::io::Error::other("the write was cancelled"));
+        }
+        let count = self.file.write(&bytes[..bytes.len().min(WRITE_CHUNK)])?;
+        self.written += count;
+        if self.written - self.reported >= (self.total / 100).max(1) {
+            self.reported = self.written;
+            self.job.report(
+                CompileStage::WritePackage,
+                Some(self.written as f64 / self.total.max(1) as f64),
+                self.written,
+                "Writing the routing package",
+            );
+        }
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wayfarer_package::format::{LANDMARK_INFINITY, LandmarkRow};
+    use wayfarer_package::{DirectionalAccess, RoadType};
+    use wayfarer_road_graph::{RoadGraph, RoadGraphBuilder, RoutableWay};
+
+    use super::*;
+    use wayfarer::internals::GraphAccess;
+
+    /// The package of `graph`, opened by the engine.
+    fn in_memory(graph: &RoadGraph) -> (wayfarer::RoutingPackage, PackageBuildReport) {
+        let (bytes, report) = package_bytes(graph, &PackageBuildOptions::default()).unwrap();
+        (
+            wayfarer::RoutingPackage::from_bytes(&bytes).unwrap(),
+            report,
+        )
+    }
+    use wayfarer_package::{GeoPoint, directed_geometry};
+
+    /// Curved two-way and one-way streets sharing nodes, so edges run both
+    /// with and against their shared-info shapes.
+    fn curved_graph() -> RoadGraph {
+        let mut builder = RoadGraphBuilder::new("compact-shapes");
+        let ways = [
+            (
+                1,
+                vec![
+                    (50.0, 19.9),
+                    (50.0004, 19.9003),
+                    (50.0011, 19.9004),
+                    (50.0015, 19.9011),
+                ],
+                vec![Some(1), None, None, Some(2)],
+                DirectionalAccess::Both,
+            ),
+            (
+                2,
+                vec![(50.0015, 19.9011), (50.0019, 19.90155), (50.0021, 19.9023)],
+                vec![Some(2), None, Some(3)],
+                DirectionalAccess::Forward,
+            ),
+            (
+                3,
+                vec![(50.0021, 19.9023), (50.00135, 19.90251), (50.0, 19.9)],
+                vec![Some(3), None, Some(1)],
+                DirectionalAccess::Both,
+            ),
+        ];
+        for (osm_way_id, points, source_node_ids, directional_access) in ways {
+            builder.push_way(RoutableWay {
+                osm_way_id,
+                points,
+                source_node_ids,
+                road_type: RoadType::Residential,
+                directional_access,
+                highway: Some("residential".into()),
+                ..Default::default()
+            });
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn derived_and_stored_layouts_reproduce_road_graph_ids_and_geometry() {
+        let road_graph = curved_graph();
+        let access = GraphAccess::new(&road_graph);
+        for stored in [false, true] {
+            STORE_DERIVABLE.with(|flag| flag.set(stored));
+            let (graph, report) = in_memory(&road_graph);
+            STORE_DERIVABLE.with(|flag| flag.set(false));
+            assert_eq!(!graph.file().layout().node_e7_derived, stored);
+            assert!(report.shape_point_count > 2 * report.shared_info_count);
+            assert_eq!(report.shape_explicit_count, 0);
+            let view = graph.file().view();
+            let mut shape = Vec::new();
+            let mut reversed = 0;
+            for edge in 0..view.edge_count as u32 {
+                let edge_id = view.edge_id(edge as usize);
+                assert_eq!(view.edge_for_id(edge_id), Some(edge));
+                let record = access.edge_by_id(edge_id).unwrap();
+                view.edge_shape(edge, &mut shape);
+                let expected: Vec<GeoPoint> =
+                    directed_geometry(record.shared_info, record.edge.traversal_direction);
+                assert!(expected.len() >= 3);
+                assert_eq!(shape, expected, "edge {edge} stored={stored}");
+                reversed += usize::from(
+                    view.edge_flags[edge as usize]
+                        & wayfarer_package::format::EDGE_FLAG_SHAPE_REVERSED
+                        != 0,
+                );
+            }
+            assert!(reversed > 0, "some edge runs against its shape");
+        }
+    }
+
+    #[test]
+    fn inexact_coordinates_are_kept_exactly() {
+        let mut builder = RoadGraphBuilder::new("inexact");
+        builder.push_way(RoutableWay {
+            osm_way_id: 1,
+            points: vec![(50.0, 19.9), (50.0 + 0.1 + 0.2, 19.9 + 1.0 / 3.0)],
+            road_type: RoadType::Residential,
+            directional_access: DirectionalAccess::Both,
+            highway: Some("residential".into()),
+            ..Default::default()
+        });
+        let road_graph = builder.finish();
+        let (graph, report) = in_memory(&road_graph);
+        assert!(report.shape_inexact_count > 0);
+        assert!(report.node_inexact_count > 0);
+        let access = GraphAccess::new(&road_graph);
+        let view = graph.file().view();
+        let request = graph.file().request_view().unwrap();
+        let mut shape = Vec::new();
+        for edge in 0..view.edge_count as u32 {
+            let record = access.edge_by_id(view.edge_id(edge as usize)).unwrap();
+            view.edge_shape(edge, &mut shape);
+            assert_eq!(
+                shape,
+                directed_geometry(record.shared_info, record.edge.traversal_direction)
+            );
+            let leg = request.leg_record(edge).unwrap();
+            assert_eq!(leg.source.lat, record.source.lat);
+            assert_eq!(leg.target.lng, record.target.lng);
+        }
+    }
+
+    /// Streets with posted limits (some shared, so costing tuples repeat), a
+    /// synthetic and an over-`u32` way id, steps past the end of the streets
+    /// (outside the driving column's landmark network: unlike a footway, R5
+    /// never opens them) and a node that is not an E7 position.
+    fn compact_layout_graph() -> RoadGraph {
+        let mut builder = RoadGraphBuilder::new("compact-layout");
+        let street =
+            |osm_way_id: i64, points: Vec<(f64, f64)>, maxspeed: Option<&str>| RoutableWay {
+                osm_way_id,
+                points,
+                road_type: RoadType::Residential,
+                directional_access: DirectionalAccess::Both,
+                highway: Some("residential".into()),
+                maxspeed: maxspeed.map(Into::into),
+                ..Default::default()
+            };
+        builder.push_way(street(1, vec![(50.0, 19.9), (50.001, 19.9)], Some("30")));
+        builder.push_way(street(
+            -9_000_000_000_001,
+            vec![(50.001, 19.9), (50.001, 19.901)],
+            Some("30"),
+        ));
+        builder.push_way(street(
+            5_000_000_000,
+            vec![(50.001, 19.901), (50.0, 19.901)],
+            Some("50"),
+        ));
+        builder.push_way(street(
+            7,
+            vec![(50.0, 19.901), (50.0 + 0.0001 / 3.0, 19.901 + 0.0001 / 7.0)],
+            None,
+        ));
+        builder.push_way(RoutableWay {
+            osm_way_id: 9,
+            points: vec![(50.001, 19.901), (50.002, 19.902)],
+            road_type: RoadType::Path,
+            directional_access: DirectionalAccess::Both,
+            highway: Some("steps".into()),
+            ..Default::default()
+        });
+        builder.finish()
+    }
+
+    #[test]
+    fn compact_layout_reproduces_the_road_graph() {
+        let road_graph = compact_layout_graph();
+        let access = GraphAccess::new(&road_graph);
+        let (graph, report) = in_memory(&road_graph);
+        let view = graph.file().view();
+        let request = graph.file().request_view().unwrap();
+        assert!(!graph.file().edge_id_lookup_built());
+        assert_eq!(report.way_id_wide_count, 2);
+        assert!(report.cost_tuple_count < view.si_cost_tuple.len());
+        assert_eq!(report.node_inexact_count, view.node_lat_lng_nodes.len());
+        assert!(report.node_inexact_count > 0);
+        for edge in 0..view.edge_count as u32 {
+            let edge_id = view.edge_id(edge as usize);
+            // The lookup built on first use.
+            assert_eq!(view.edge_for_id(edge_id), Some(edge));
+            let record = access.edge_by_id(edge_id).unwrap();
+            let shared = view.edge_shared_info[edge as usize] as usize;
+            let info = record.shared_info;
+            assert_eq!(view.si_way.get(shared), info.osm_way_id);
+            let tuple = view.cost_tuple(shared);
+            assert_eq!(
+                view.si_cost_flags[tuple],
+                EdgeCostFlags::from_shared_info(info).0
+            );
+            assert_eq!(
+                view.si_cost_classes[tuple],
+                EdgeCostClasses::from_shared_info(info).pack()
+            );
+            let speed = |value: Option<f32>| value.unwrap_or(f32::NAN).to_bits();
+            assert_eq!(
+                view.si_speeds[tuple * 3..tuple * 3 + 3]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                [
+                    speed(info.maxspeed_kph),
+                    speed(info.free_flow_speed_kph),
+                    speed(info.constrained_speed_kph)
+                ]
+            );
+            let leg = request.leg_record(edge).unwrap();
+            assert_eq!(leg.shared_info.osm_way_id, info.osm_way_id);
+            for (node, expected) in [
+                (view.edge_source(edge as usize), &record.source),
+                (view.edge_target[edge as usize], &record.target),
+            ] {
+                let (lat, lng) = view.node_lat_lng(node);
+                assert_eq!(
+                    (lat.to_bits(), lng.to_bits()),
+                    (expected.lat.to_bits(), expected.lng.to_bits())
+                );
+            }
+        }
+        // Ways compare by id, wide ones included.
+        for left in 0..view.si_way.len() {
+            for right in 0..view.si_way.len() {
+                let (a, b) = (view.si_way.get(left), view.si_way.get(right));
+                assert_eq!(view.si_way.same_way(left, right), a != 0 && a == b);
+            }
+        }
+        // The steps' far node has no row in the driving column, and one on
+        // foot; rows that are stored are finite for every landmark.
+        let rows = view.landmark_from.rows();
+        let far = (0..view.node_count as u32)
+            .find(|node| view.node_lat_lng(*node) == (50.002, 19.902))
+            .unwrap();
+        let drive = graph.file().column_for(MobilityProfile::Wheeled).unwrap();
+        let walk = graph.file().column_for(MobilityProfile::OnFoot).unwrap();
+        assert_eq!(rows.row(drive, far), LandmarkRow::Absent);
+        assert!(rows.row(walk, far).is_present());
+        assert_eq!(view.landmark_from.value(drive, far, 0), LANDMARK_INFINITY);
+        let mut stored = 0;
+        for column in [drive, walk] {
+            for node in 0..view.node_count as u32 {
+                let row = rows.row(column, node);
+                stored += usize::from(row.stored().is_some());
+                for landmark in 0..view.landmark_count {
+                    let finite = view.landmark_from.get(row, landmark) != LANDMARK_INFINITY
+                        || view.landmark_to.get(row, landmark) != LANDMARK_INFINITY;
+                    assert_eq!(finite, row.is_present(), "column {column} node {node}");
+                }
+            }
+        }
+        assert_eq!(stored, report.landmark_row_count);
+        assert!(stored < 2 * view.node_count);
+    }
+
+    #[test]
+    fn open_rejects_duplicate_edge_ids() {
+        let (mut bytes, _) =
+            package_bytes(&compact_layout_graph(), &PackageBuildOptions::default()).unwrap();
+        let (offset, len) = PackageFile::from_bytes(&bytes)
+            .unwrap()
+            .section_range(Section::EdgeId);
+        assert!(len >= 8);
+        let first = bytes[offset..offset + 4].to_vec();
+        bytes[offset + 4..offset + 8].copy_from_slice(&first);
+        assert!(matches!(
+            PackageFile::from_bytes(&bytes),
+            Err(RoutingPackageError::Invalid(message)) if message.contains("edge ids")
+        ));
+    }
+}

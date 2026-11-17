@@ -1,0 +1,34 @@
+[package]
+name = "wayfarer-package"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "The routing package format: open, verify, read and write routing.mrt files"
+readme = "README.md"
+keywords = ["routing", "openstreetmap", "osm", "file-format", "navigation"]
+categories = ["science::geo", "encoding"]
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars = { workspace = true, optional = true }
+blake3 = { workspace = true }
+libm = { workspace = true }
+memmap2 = "0.9"
+rayon = { workspace = true }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# JSON Schema derives for the request and result types (`schemars`).
+schema = ["dep:schemars"]
+
+[dev-dependencies]
+# The codec module's tests check its bytes against bincode 1.3.3, the encoder
+# packages were first written with. Not a dependency of the library.
+bincode = { workspace = true }

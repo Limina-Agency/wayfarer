@@ -1,0 +1,477 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RouteNavigationProgress",
+  "type": "object",
+  "properties": {
+    "activeDynamicOverlay": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteShapeDynamicOverlay"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "activeEdgeId": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "activeSegmentIndex": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "activeShapeIndex": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "arrived": {
+      "type": "boolean"
+    },
+    "crossTrackErrorMeters": {
+      "type": "number",
+      "format": "double"
+    },
+    "currentManeuverIndex": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "distanceAlongRouteMeters": {
+      "type": "number",
+      "format": "double"
+    },
+    "distanceRemainingMeters": {
+      "type": "number",
+      "format": "double"
+    },
+    "distanceToNextManeuverMeters": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "durationRemainingSeconds": {
+      "type": "number",
+      "format": "double"
+    },
+    "effectiveOffRouteThresholdMeters": {
+      "type": "number",
+      "format": "double"
+    },
+    "lowAccuracy": {
+      "type": "boolean"
+    },
+    "nextManeuverIndex": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "offRouteCandidate": {
+      "type": "boolean"
+    },
+    "offRouteCandidateSampleCount": {
+      "description": "Consecutive samples, this one included, that were off-route candidates.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 0,
+      "minimum": 0
+    },
+    "offRouteCandidateSinceMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "positionProvider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rawPosition": {
+      "$ref": "#/$defs/GeoPoint"
+    },
+    "rerouteSuggested": {
+      "type": "boolean"
+    },
+    "routeFraction": {
+      "type": "number",
+      "format": "double"
+    },
+    "sampleAgeMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "snapDiagnostics": {
+      "$ref": "#/$defs/RouteNavigationSnapDiagnostics"
+    },
+    "snappedPosition": {
+      "$ref": "#/$defs/GeoPoint"
+    },
+    "status": {
+      "$ref": "#/$defs/RouteNavigationStatus"
+    },
+    "upcomingManeuverIndices": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0
+      }
+    }
+  },
+  "required": [
+    "status",
+    "rawPosition",
+    "snappedPosition",
+    "crossTrackErrorMeters",
+    "distanceAlongRouteMeters",
+    "distanceRemainingMeters",
+    "durationRemainingSeconds",
+    "effectiveOffRouteThresholdMeters",
+    "lowAccuracy",
+    "routeFraction",
+    "activeShapeIndex",
+    "snapDiagnostics",
+    "upcomingManeuverIndices",
+    "offRouteCandidate",
+    "offRouteCandidateSampleCount",
+    "rerouteSuggested",
+    "arrived"
+  ],
+  "$defs": {
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "RouteDynamicEndpointKind": {
+      "type": "string",
+      "enum": [
+        "origin",
+        "destination"
+      ]
+    },
+    "RouteDynamicVirtualEdgeKind": {
+      "type": "string",
+      "enum": [
+        "endpoint",
+        "road_entry",
+        "road_to_road_bypass",
+        "cross_country"
+      ]
+    },
+    "RouteNavigationSnapCandidate": {
+      "type": "object",
+      "properties": {
+        "beginShapeIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "distanceAlongRouteMeters": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceMeters": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endShapeIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "headingDeltaDegrees": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headingScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "reason": {
+          "$ref": "#/$defs/RouteNavigationSnapCandidateReason"
+        },
+        "segmentIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "snappedPosition": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "status": {
+          "$ref": "#/$defs/RouteNavigationSnapCandidateStatus"
+        },
+        "totalScore": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "segmentIndex",
+        "beginShapeIndex",
+        "endShapeIndex",
+        "snappedPosition",
+        "distanceMeters",
+        "distanceAlongRouteMeters",
+        "distanceScore",
+        "headingScore",
+        "totalScore"
+      ]
+    },
+    "RouteNavigationSnapCandidateReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "outside_progress_window",
+            "weaker_heading_alignment",
+            "farther_from_sample"
+          ]
+        },
+        {
+          "description": "Accepted: the best of the whole route (no previous progress, or the\nroute was rejoined elsewhere).",
+          "type": "string",
+          "const": "nearest_route_shape_segment"
+        },
+        {
+          "description": "Accepted: the best around the previous progress.",
+          "type": "string",
+          "const": "within_progress_window"
+        }
+      ]
+    },
+    "RouteNavigationSnapCandidateStatus": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "rejected"
+      ]
+    },
+    "RouteNavigationSnapDiagnostics": {
+      "type": "object",
+      "properties": {
+        "acceptedCandidate": {
+          "$ref": "#/$defs/RouteNavigationSnapCandidate"
+        },
+        "candidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "candidates": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteNavigationSnapCandidate"
+          }
+        },
+        "rejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "candidateCount",
+        "rejectedCandidateCount",
+        "acceptedCandidate",
+        "candidates"
+      ]
+    },
+    "RouteNavigationStatus": {
+      "type": "string",
+      "enum": [
+        "on_route",
+        "approaching_maneuver",
+        "off_route_candidate",
+        "off_route",
+        "arrived"
+      ]
+    },
+    "RouteShapeDynamicOverlay": {
+      "type": "object",
+      "properties": {
+        "connectorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectorType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicVirtualEdgeKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "distanceMeters": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "kind": {
+          "$ref": "#/$defs/RouteShapeDynamicOverlayKind"
+        },
+        "sourceChunkIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sourceEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sourceEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicEndpointKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceFraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sourcePoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "targetEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicEndpointKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetFraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "targetPoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "sourceChunkIds"
+      ]
+    },
+    "RouteShapeDynamicOverlayKind": {
+      "type": "string",
+      "enum": [
+        "partial_edge_fragment",
+        "endpoint_connector",
+        "road_entry_connector",
+        "road_to_road_bypass_connector",
+        "cross_country_connector"
+      ]
+    }
+  }
+}

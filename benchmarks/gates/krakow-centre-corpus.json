@@ -1,0 +1,13 @@
+[
+  {"label": "krakow-local-core", "bucket": "local", "origin": [19.9373, 50.0617], "destination": [19.945, 50.0647], "profile": "wheeled"},
+  {"label": "krakow-kazimierz-podgorze-local", "bucket": "local", "origin": [19.9449, 50.0516], "destination": [19.9512, 50.0469], "profile": "wheeled"},
+  {"label": "krakow-rynek-wawel", "bucket": "local", "origin": [19.9373, 50.0617], "destination": [19.9355, 50.0545], "profile": "wheeled"},
+  {"label": "krakow-kazimierz-rynek", "bucket": "local", "origin": [19.9449, 50.0516], "destination": [19.9373, 50.0617], "profile": "wheeled"},
+  {"label": "krakow-centre-west-east", "bucket": "city", "origin": [19.926, 50.061], "destination": [19.956, 50.062], "profile": "wheeled"},
+  {"label": "krakow-centre-north-south", "bucket": "city", "origin": [19.94, 50.07], "destination": [19.95, 50.043], "profile": "wheeled"},
+  {"label": "krakow-podgorze-kleparz", "bucket": "city", "origin": [19.956, 50.044], "destination": [19.942, 50.069], "profile": "wheeled"},
+  {"label": "krakow-local-core-on-foot", "bucket": "local", "origin": [19.9373, 50.0617], "destination": [19.945, 50.0647], "profile": "on_foot"},
+  {"label": "krakow-kazimierz-podgorze-local-on-foot", "bucket": "local", "origin": [19.9449, 50.0516], "destination": [19.9512, 50.0469], "profile": "on_foot"},
+  {"label": "krakow-rynek-wawel-on-foot", "bucket": "local", "origin": [19.9373, 50.0617], "destination": [19.9355, 50.0545], "profile": "on_foot"},
+  {"label": "krakow-centre-north-south-on-foot", "bucket": "city", "origin": [19.94, 50.07], "destination": [19.95, 50.043], "profile": "on_foot"}
+]

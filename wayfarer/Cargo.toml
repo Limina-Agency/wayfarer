@@ -1,0 +1,69 @@
+[package]
+name = "wayfarer"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Offline routing engine over routing packages: routes, matrices, isochrones, map matching"
+readme = "README.md"
+keywords = ["routing", "openstreetmap", "osm", "isochrone", "navigation"]
+categories = ["science::geo", "algorithms"]
+# Targets that need workspace-only crates (the compiler and OSM ingest build
+# their test packages) or files outside the crate stay out of the published
+# package.
+exclude = [
+    "examples/analysis_parity.rs",
+    "examples/make_test_archive.rs",
+    "examples/route_parity.rs",
+    "tests/package_formats.rs",
+    "tests/qualified_access.rs",
+    "tests/routing_acceptance.rs",
+]
+
+
+[lints]
+workspace = true
+[dependencies]
+schemars = { workspace = true, optional = true }
+wayfarer-road-graph = { workspace = true, optional = true }
+wayfarer-package = { workspace = true }
+wayfarer-costing = { workspace = true }
+# The reference oracle's graph and segment index; not linked otherwise.
+petgraph = { workspace = true, optional = true }
+rayon = { workspace = true }
+rstar = { workspace = true, optional = true }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# JSON Schema derives for the request and result types (`schemars`).
+schema = ["dep:schemars", "wayfarer-package/schema", "wayfarer-costing/schema"]
+# Test support: the reference oracle (plain Dijkstra over the road graph) for
+# parity tests and harnesses. Not a production path. It takes the routing
+# package of its graph from the caller, so it needs no route compiler.
+reference = [
+    "dep:wayfarer-road-graph",
+    "wayfarer-road-graph/snapshot",
+    "dep:petgraph",
+    "dep:rstar",
+]
+# Debug switches read from the environment (WAYFARER_DEBUG, _VERIFY,
+# _UNIDIRECTIONAL) for the parity harnesses and profiling.
+debug-env = []
+
+[dev-dependencies]
+# Re-signs tampered packages in the hostile-package tests.
+blake3 = { workspace = true }
+chrono = { workspace = true }
+# The compiler builds the test packages. Path only (no version), so publishing
+# drops it and this crate needs no compiler on crates.io.
+wayfarer-compiler = { path = "../wayfarer-compiler" }
+wayfarer-road-graph = { workspace = true, features = ["snapshot"] }
+# Path only (no version), so publishing drops it: a versioned self-dependency
+# would need this crate on crates.io before its first release.
+wayfarer = { path = ".", features = ["reference", "debug-env"] }
+petgraph = { workspace = true }
+tempfile = "3"

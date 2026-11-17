@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MapMatchRequest",
+  "description": "A trace to match onto the road network ([`RoutingEngine::map_match`]).",
+  "type": "object",
+  "properties": {
+    "options": {
+      "$ref": "#/$defs/MapMatchOptions",
+      "default": {
+        "alternativeCount": 2,
+        "backtrackPenalty": 8.0,
+        "betaM": 10.0,
+        "breakageDistanceM": 2000.0,
+        "candidateLimit": 8,
+        "gpsSigmaM": 5.0,
+        "headingWeight": 1.4,
+        "maxConsecutiveOutliers": 2,
+        "maxCorrelationDistanceM": 75,
+        "maxSpeedMps": 50.0,
+        "maxTimeGapS": 60.0,
+        "outlierCost": 8.0,
+        "routeDistanceFactor": 2.0,
+        "routeDistanceSlackM": 100.0,
+        "transitionWeight": 0.65,
+        "useReportedAccuracy": true
+      }
+    },
+    "profile": {
+      "$ref": "#/$defs/MobilityProfile"
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NavigationPositionSample"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "samples",
+    "profile"
+  ],
+  "$defs": {
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "MapMatchOptions": {
+      "description": "Map-matching parameters. Fields missing from JSON take their defaults.",
+      "type": "object",
+      "properties": {
+        "alternativeCount": {
+          "description": "Alternative endings of the match reported, at most 8.",
+          "type": "integer",
+          "format": "uint",
+          "default": 2,
+          "minimum": 0
+        },
+        "backtrackPenalty": {
+          "description": "Cost (negative log-likelihood) of a U-turn onto the opposing edge, at a\nnode or mid-edge. Formerly the penalty for moving backwards along one\nedge id.",
+          "type": "number",
+          "format": "double",
+          "default": 8.0
+        },
+        "betaM": {
+          "description": "Scale (m) of the exponential transition in `|route - great circle|`.",
+          "type": "number",
+          "format": "double",
+          "default": 10.0
+        },
+        "breakageDistanceM": {
+          "description": "A jump over this between consecutive matchable samples breaks the\ntrace (m).",
+          "type": "number",
+          "format": "double",
+          "default": 2000.0
+        },
+        "candidateLimit": {
+          "description": "Candidates kept per sample: the most likely by emission.",
+          "type": "integer",
+          "format": "uint",
+          "default": 8,
+          "minimum": 0
+        },
+        "gpsSigmaM": {
+          "description": "GPS noise standard deviation (m) of the Gaussian emission.",
+          "type": "number",
+          "format": "double",
+          "default": 5.0
+        },
+        "headingWeight": {
+          "description": "Weight of the emission's heading term, `heading_weight * (1 - cos\ndelta)`.",
+          "type": "number",
+          "format": "double",
+          "default": 1.4
+        },
+        "maxConsecutiveOutliers": {
+          "description": "Samples in a row the match may skip as outliers.",
+          "type": "integer",
+          "format": "uint",
+          "default": 2,
+          "minimum": 0
+        },
+        "maxCorrelationDistanceM": {
+          "description": "Candidate search radius around each sample (m), widened to twice the\nsample's reported accuracy.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 75,
+          "minimum": 0
+        },
+        "maxSpeedMps": {
+          "description": "Route distance between timestamped samples is at most this speed\ntimes their time apart, plus twice their sigmas (m/s).",
+          "type": "number",
+          "format": "double",
+          "default": 50.0
+        },
+        "maxTimeGapS": {
+          "description": "A time gap over this between consecutive matchable samples breaks the\ntrace (s).",
+          "type": "number",
+          "format": "double",
+          "default": 60.0
+        },
+        "outlierCost": {
+          "description": "Cost of skipping one sample as an outlier.",
+          "type": "number",
+          "format": "double",
+          "default": 8.0
+        },
+        "routeDistanceFactor": {
+          "description": "Route searches between samples stop at this multiple of their great\ncircle distance, plus `route_distance_slack_m`.",
+          "type": "number",
+          "format": "double",
+          "default": 2.0
+        },
+        "routeDistanceSlackM": {
+          "type": "number",
+          "format": "double",
+          "default": 100.0
+        },
+        "transitionWeight": {
+          "description": "Unused since the HMM matcher (`beta_m` weighs transitions); kept for\nsource compatibility.",
+          "type": "number",
+          "format": "double",
+          "default": 0.65
+        },
+        "useReportedAccuracy": {
+          "description": "Whether a sample's reported accuracy, when larger than `gps_sigma_m`,\nis its sigma.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "NavigationPositionSample": {
+      "type": "object",
+      "properties": {
+        "accuracyMeters": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "headingDegrees": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "position": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sampledAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "speedMetersPerSecond": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "position"
+      ]
+    }
+  }
+}

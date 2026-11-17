@@ -1,0 +1,41 @@
+[
+ {
+  "label": "monte-carlo-fontvieille",
+  "bucket": "local",
+  "origin": [
+   7.4275,
+   43.7397
+  ],
+  "destination": [
+   7.416,
+   43.729
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "monaco-ville-larvotto",
+  "bucket": "local",
+  "origin": [
+   7.4197,
+   43.7311
+  ],
+  "destination": [
+   7.435,
+   43.745
+  ],
+  "profile": "wheeled"
+ },
+ {
+  "label": "monaco-ville-larvotto-on-foot",
+  "bucket": "local",
+  "origin": [
+   7.4197,
+   43.7311
+  ],
+  "destination": [
+   7.435,
+   43.745
+  ],
+  "profile": "on_foot"
+ }
+]

@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SnapResult",
+  "description": "Where a point snaps, best candidate first.",
+  "type": "object",
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CorrelatedLocation"
+      }
+    },
+    "mode": {
+      "$ref": "#/$defs/CorrelationMode"
+    },
+    "rejectedCandidateCount": {
+      "description": "Edges within reach that the profile, layer or preferences ruled out.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "candidates",
+    "rejectedCandidateCount",
+    "mode"
+  ],
+  "$defs": {
+    "CorrelatedLocation": {
+      "type": "object",
+      "properties": {
+        "componentSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fractionAlongEdge": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headingDeltaDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "inboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "layer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "opposingEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "outboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "roadGroupKey": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sameRoadCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "score": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "scoreBreakdown": {
+          "$ref": "#/$defs/CorrelationScoreBreakdown",
+          "default": {
+            "accessScore": 0.0,
+            "candidateTypeScore": 0.0,
+            "componentScore": 0.0,
+            "distanceScore": 0.0,
+            "headingScore": 0.0,
+            "layerScore": 0.0,
+            "levelScore": 0.0,
+            "reachScore": 0.0,
+            "roadClassScore": 0.0,
+            "sideScore": 0.0,
+            "totalScore": 0.0
+          }
+        },
+        "sharedEdgeInfoId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "side": {
+          "$ref": "#/$defs/CorrelationSide",
+          "default": "unknown"
+        },
+        "snappedPoint": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "sourceNodeId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "targetNodeId": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "edgeId",
+        "sharedEdgeInfoId",
+        "opposingEdgeId",
+        "roadGroupKey",
+        "sameRoadCandidateCount",
+        "sourceNodeId",
+        "targetNodeId",
+        "snappedPoint",
+        "distanceM",
+        "fractionAlongEdge",
+        "headingDeg",
+        "headingDeltaDeg",
+        "side",
+        "componentSize",
+        "outboundReachEdgeCount",
+        "inboundReachEdgeCount",
+        "layer",
+        "level",
+        "score",
+        "scoreBreakdown",
+        "confidence"
+      ]
+    },
+    "CorrelationMode": {
+      "type": "string",
+      "enum": [
+        "indexed"
+      ]
+    },
+    "CorrelationScoreBreakdown": {
+      "type": "object",
+      "properties": {
+        "accessScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "candidateTypeScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "componentScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "layerScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "levelScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "reachScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "roadClassScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "sideScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "totalScore": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "distanceScore",
+        "headingScore",
+        "roadClassScore",
+        "accessScore",
+        "componentScore",
+        "reachScore",
+        "sideScore",
+        "layerScore",
+        "levelScore",
+        "candidateTypeScore",
+        "totalScore"
+      ]
+    },
+    "CorrelationSide": {
+      "type": "string",
+      "enum": [
+        "left",
+        "right",
+        "on_edge",
+        "unknown"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    }
+  }
+}

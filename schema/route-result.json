@@ -1,0 +1,4025 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RouteWorkflowResult",
+  "description": "The engine's route (its fields at the top level of the JSON) with the\nsource it ran on and what the service added to the request.",
+  "type": "object",
+  "properties": {
+    "alternatives": {
+      "$ref": "#/$defs/RouteAlternatives"
+    },
+    "cacheHit": {
+      "type": "boolean"
+    },
+    "cost": {
+      "type": "number",
+      "format": "double"
+    },
+    "costSummary": {
+      "$ref": "#/$defs/RouteCostSummary"
+    },
+    "diagnostics": {
+      "description": "Counts over the whole request (unstable: diagnostics carry no\ncompatibility promise).",
+      "$ref": "#/$defs/RouteSummaryDiagnostics"
+    },
+    "distanceM": {
+      "type": "number",
+      "format": "double"
+    },
+    "durationS": {
+      "type": "number",
+      "format": "double"
+    },
+    "edgeAttributions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteEdgeAttribution"
+      }
+    },
+    "edgeIds": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      }
+    },
+    "explanations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteExplanation"
+      }
+    },
+    "geometry": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GeoPoint"
+      }
+    },
+    "locationMatches": {
+      "description": "How each of the request's locations snapped onto the road network,\nfrom the leg arriving at it and the leg leaving it.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteLocationMatch"
+      }
+    },
+    "maneuvers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteManeuver"
+      }
+    },
+    "mobilityProvenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteWorkflowMobilityProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "overlayDiagnostics": {
+      "$ref": "#/$defs/RouteOverlayDiagnostics"
+    },
+    "overlayProvenance": {
+      "$ref": "#/$defs/RouteWorkflowOverlayProvenance"
+    },
+    "overlaySets": {
+      "description": "How each overlay set reached the request.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteOverlaySetBinding"
+      }
+    },
+    "overlayUses": {
+      "description": "Overlays the route uses: every applied overlay with at least one\nroute edge, with its set item id and versions when it has them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteOverlayUse"
+      }
+    },
+    "overlayWindows": {
+      "description": "Overlay time windows (`RouteOverlay::valid_from_ms`), when\nany overlay has one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteOverlayWindows"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policySummary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoutePolicySummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "qualifiedAccess": {
+      "description": "Qualified legal access along every routed leg, in route order (see\n`LegResult::qualified_access`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteQualifiedAccess"
+      }
+    },
+    "recosts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteRecostSummary"
+      }
+    },
+    "revision": {
+      "type": "string"
+    },
+    "sar": {
+      "description": "The SAR relaxations the routed legs used, merged; SAR requests only.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteSarReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "segments": {
+      "description": "One per leg, in order: a routed leg's full single-leg result, or a\ndirect leg.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteSegment"
+      }
+    },
+    "shapeSegments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteSegmentShape"
+      }
+    },
+    "sourceId": {
+      "$ref": "#/$defs/RoutingSourceId"
+    }
+  },
+  "required": [
+    "sourceId",
+    "revision",
+    "cacheHit",
+    "segments",
+    "locationMatches",
+    "edgeIds",
+    "geometry",
+    "distanceM",
+    "durationS",
+    "cost",
+    "maneuvers",
+    "recosts",
+    "edgeAttributions",
+    "shapeSegments",
+    "alternatives",
+    "policySummary",
+    "costSummary",
+    "explanations",
+    "overlayDiagnostics",
+    "diagnostics",
+    "overlayUses",
+    "qualifiedAccess",
+    "overlayProvenance",
+    "mobilityProvenance",
+    "overlaySets"
+  ],
+  "$defs": {
+    "CorrelatedLocation": {
+      "type": "object",
+      "properties": {
+        "componentSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fractionAlongEdge": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headingDeltaDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "inboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "layer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "opposingEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "outboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "roadGroupKey": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sameRoadCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "score": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "scoreBreakdown": {
+          "$ref": "#/$defs/CorrelationScoreBreakdown",
+          "default": {
+            "accessScore": 0.0,
+            "candidateTypeScore": 0.0,
+            "componentScore": 0.0,
+            "distanceScore": 0.0,
+            "headingScore": 0.0,
+            "layerScore": 0.0,
+            "levelScore": 0.0,
+            "reachScore": 0.0,
+            "roadClassScore": 0.0,
+            "sideScore": 0.0,
+            "totalScore": 0.0
+          }
+        },
+        "sharedEdgeInfoId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "side": {
+          "$ref": "#/$defs/CorrelationSide",
+          "default": "unknown"
+        },
+        "snappedPoint": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "sourceNodeId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "targetNodeId": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "edgeId",
+        "sharedEdgeInfoId",
+        "opposingEdgeId",
+        "roadGroupKey",
+        "sameRoadCandidateCount",
+        "sourceNodeId",
+        "targetNodeId",
+        "snappedPoint",
+        "distanceM",
+        "fractionAlongEdge",
+        "headingDeg",
+        "headingDeltaDeg",
+        "side",
+        "componentSize",
+        "outboundReachEdgeCount",
+        "inboundReachEdgeCount",
+        "layer",
+        "level",
+        "score",
+        "scoreBreakdown",
+        "confidence"
+      ]
+    },
+    "CorrelationMode": {
+      "type": "string",
+      "enum": [
+        "indexed"
+      ]
+    },
+    "CorrelationRejectReason": {
+      "type": "string",
+      "enum": [
+        "inaccessible_profile",
+        "snap_unavailable",
+        "beyond_max_distance",
+        "heading_outside_tolerance",
+        "below_min_component_size",
+        "below_min_reach",
+        "layer_mismatch",
+        "level_mismatch"
+      ]
+    },
+    "CorrelationScoreBreakdown": {
+      "type": "object",
+      "properties": {
+        "accessScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "candidateTypeScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "componentScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "layerScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "levelScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "reachScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "roadClassScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "sideScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "totalScore": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "distanceScore",
+        "headingScore",
+        "roadClassScore",
+        "accessScore",
+        "componentScore",
+        "reachScore",
+        "sideScore",
+        "layerScore",
+        "levelScore",
+        "candidateTypeScore",
+        "totalScore"
+      ]
+    },
+    "CorrelationSide": {
+      "type": "string",
+      "enum": [
+        "left",
+        "right",
+        "on_edge",
+        "unknown"
+      ]
+    },
+    "DirectRouteLeg": {
+      "description": "A synthesized straight-line leg, shaped so a caller can merge it beside a\ngraph-routed segment without special-casing the merge.",
+      "type": "object",
+      "properties": {
+        "distanceM": {
+          "description": "Length of `geometry`, summed over its own vertices.",
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "description": "Estimated traverse time at the profile's off-road speed.",
+          "type": "number",
+          "format": "double"
+        },
+        "geometry": {
+          "description": "Densified great-circle vertices, origin first and destination last.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "maneuver": {
+          "description": "The single maneuver covering the whole leg.",
+          "$ref": "#/$defs/RouteManeuver"
+        }
+      },
+      "required": [
+        "geometry",
+        "distanceM",
+        "durationS",
+        "maneuver"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "LegResult": {
+      "type": "object",
+      "properties": {
+        "alternatives": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteAlternative"
+          }
+        },
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "costSummary": {
+          "$ref": "#/$defs/RouteCostSummary",
+          "default": {
+            "attributedEdgeCount": 0,
+            "avoidedPenaltyCount": 0,
+            "conditionalRestrictionEdgeCount": 0,
+            "costedEdgeCount": 0,
+            "dominantDriver": null,
+            "maxOverlayMultiplier": 1.0,
+            "maxProfileTimeFactor": 1.0,
+            "maxRoadUsePenalty": 1.0,
+            "overlayMultiplierCount": 0,
+            "profileTimePenaltyCount": 0,
+            "roadUsePenaltyCount": 0,
+            "totalCost": 0.0,
+            "turnPenaltyTotal": 0.0
+          }
+        },
+        "destination": {
+          "$ref": "#/$defs/CorrelatedLocation"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/RouteDiagnostics"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeIds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "geometry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "legs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteLeg"
+          }
+        },
+        "maneuvers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteManeuver"
+          }
+        },
+        "origin": {
+          "$ref": "#/$defs/CorrelatedLocation"
+        },
+        "policySummary": {
+          "$ref": "#/$defs/RoutePolicySummary",
+          "default": {
+            "allowFord": true,
+            "avoidAccessRestricted": 0.0,
+            "avoidDestinationOnly": 0.0,
+            "avoidFerries": 0.0,
+            "avoidGates": 0.0,
+            "avoidMotorways": 0.0,
+            "avoidPaths": 0.0,
+            "avoidTolls": 0.0,
+            "avoidTracks": 0.0,
+            "avoidedEdgeCount": 0,
+            "avoidedRangeCount": 0,
+            "blockedEdgeCount": 0,
+            "conditionalRestrictionEvalAtMs": null,
+            "costMultiplierEdgeCount": 0,
+            "costMultiplierRangeCount": 0,
+            "dynamicOverlayPartialSplitEdgeCount": 0,
+            "dynamicOverlaySplitEdgeCount": 0,
+            "dynamicOverlayVirtualConnectorCount": 0,
+            "emergencyOverrideStrength": 0.0,
+            "fixedSpeedKph": null,
+            "maxCostRatio": 1.6,
+            "maxSharedEdgeRatio": 0.8,
+            "maxVisitedEdgeCount": null,
+            "minimumWarningDifference": 0,
+            "preferKnownRouteRefs": 0.0,
+            "preferPaved": 0.0,
+            "profile": "default",
+            "requestedAlternativeCount": 0,
+            "speedPreference": "posted_or_inferred",
+            "topSpeedKph": null,
+            "warningEdgeCount": 0
+          }
+        },
+        "qualifiedAccess": {
+          "description": "Where the route's legal access is qualified (`destination`,\n`permissive`, …), on every route (see `crate::sar`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteQualifiedAccess"
+          }
+        },
+        "recosts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteRecostSummary"
+          }
+        },
+        "sar": {
+          "description": "The SAR relaxations the route used; requests with SAR only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteSarReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/RouteStatus"
+        }
+      },
+      "required": [
+        "status",
+        "origin",
+        "destination",
+        "edgeIds",
+        "distanceM",
+        "cost",
+        "durationS",
+        "geometry",
+        "legs",
+        "maneuvers",
+        "alternatives",
+        "recosts",
+        "policySummary",
+        "costSummary",
+        "diagnostics",
+        "qualifiedAccess"
+      ]
+    },
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "RejectedCorrelationCandidate": {
+      "type": "object",
+      "properties": {
+        "componentSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "distanceMillimeters": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "edgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "headingDeltaDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "inboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "layer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "outboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "reason": {
+          "$ref": "#/$defs/CorrelationRejectReason"
+        }
+      },
+      "required": [
+        "edgeId",
+        "reason",
+        "distanceMillimeters",
+        "headingDeltaDeg",
+        "componentSize",
+        "outboundReachEdgeCount",
+        "inboundReachEdgeCount",
+        "layer",
+        "level"
+      ]
+    },
+    "RoadType": {
+      "type": "string",
+      "enum": [
+        "motorway",
+        "primary",
+        "secondary",
+        "tertiary",
+        "residential",
+        "track",
+        "path",
+        "other"
+      ]
+    },
+    "RouteAccessQualifier": {
+      "description": "The qualifier of a legal right that is not plain `yes`.",
+      "oneOf": [
+        {
+          "description": "Access for destination traffic only.",
+          "type": "string",
+          "const": "destination"
+        },
+        {
+          "description": "Access the owner tolerates and may withdraw.",
+          "type": "string",
+          "const": "permissive"
+        },
+        {
+          "description": "Access with a permit.",
+          "type": "string",
+          "const": "permit"
+        },
+        {
+          "description": "Access for deliveries.",
+          "type": "string",
+          "const": "delivery"
+        },
+        {
+          "description": "Private access: vehicles going somewhere on the way (with the owner's\nleave), no through traffic.",
+          "type": "string",
+          "const": "private"
+        },
+        {
+          "description": "Access for the customers of a place on the way.",
+          "type": "string",
+          "const": "customers"
+        },
+        {
+          "description": "The profile may use a way whose class excludes it by default\n(`highway=pedestrian` open to cars): some tag granted it, but the\npackage does not record which, so the qualifier is unknown.",
+          "type": "string",
+          "const": "unrecorded"
+        }
+      ]
+    },
+    "RouteAlternative": {
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/RouteDiagnostics"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeIds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "geometry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "label": {
+          "$ref": "#/$defs/RouteAlternativeLabel"
+        },
+        "legs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteLeg"
+          }
+        },
+        "maneuvers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteManeuver"
+          }
+        },
+        "qualityReasons": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "qualityScore": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "sharedEdgeRatio": {
+          "type": "number",
+          "format": "double"
+        },
+        "warningEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "label",
+        "edgeIds",
+        "distanceM",
+        "cost",
+        "durationS",
+        "sharedEdgeRatio",
+        "warningEdgeCount",
+        "qualityScore",
+        "qualityReasons",
+        "geometry",
+        "legs",
+        "maneuvers",
+        "diagnostics"
+      ]
+    },
+    "RouteAlternativeLabel": {
+      "type": "string",
+      "enum": [
+        "alternative",
+        "safer",
+        "warning_bearing",
+        "blocked_primary_fallback"
+      ]
+    },
+    "RouteAlternatives": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "not_requested",
+            "unavailable_for_multi_leg",
+            "unavailable_for_direct_leg"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "computed": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RouteAlternative"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "computed"
+          ]
+        }
+      ]
+    },
+    "RouteCostBreakdown": {
+      "type": "object",
+      "properties": {
+        "accessRestrictionPenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "avoidedEdgePenalty": {
+          "type": "number",
+          "format": "double"
+        },
+        "baseDistanceCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "bridgeTunnelFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "destinationOnlyPenalty": {
+          "type": "number",
+          "format": "double"
+        },
+        "ferryPenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "fordFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "gatePenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "overlayMultiplier": {
+          "type": "number",
+          "format": "double"
+        },
+        "profileTimeFactor": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "roadTypeFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "routeRefFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "sarFactor": {
+          "description": "The SAR relaxation's factor on an edge the profile may not legally\nuse (1 elsewhere).",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "smoothnessFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "speedTimeS": {
+          "type": "number",
+          "format": "double"
+        },
+        "surfaceFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "tollPenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "totalCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "tracktypeFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "turnPenalty": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "baseDistanceCost",
+        "speedTimeS",
+        "profileTimeFactor",
+        "roadTypeFactor",
+        "surfaceFactor",
+        "tracktypeFactor",
+        "smoothnessFactor",
+        "fordFactor",
+        "bridgeTunnelFactor",
+        "tollPenalty",
+        "ferryPenalty",
+        "gatePenalty",
+        "accessRestrictionPenalty",
+        "destinationOnlyPenalty",
+        "avoidedEdgePenalty",
+        "overlayMultiplier",
+        "routeRefFactor",
+        "sarFactor",
+        "turnPenalty",
+        "totalCost"
+      ]
+    },
+    "RouteCostDriverKind": {
+      "type": "string",
+      "enum": [
+        "profile_time",
+        "road_type",
+        "surface",
+        "track_quality",
+        "road_use",
+        "overlay",
+        "avoidance",
+        "turns"
+      ]
+    },
+    "RouteCostDriverSummary": {
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "kind": {
+          "$ref": "#/$defs/RouteCostDriverKind"
+        }
+      },
+      "required": [
+        "kind",
+        "cost"
+      ]
+    },
+    "RouteCostSummary": {
+      "type": "object",
+      "properties": {
+        "attributedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "avoidedPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "conditionalRestrictionEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "costedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "dominantDriver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteCostDriverSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "maxOverlayMultiplier": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxProfileTimeFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxRoadUsePenalty": {
+          "type": "number",
+          "format": "double"
+        },
+        "overlayMultiplierCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "profileTimePenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "roadUsePenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "totalCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "turnPenaltyTotal": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "attributedEdgeCount",
+        "costedEdgeCount",
+        "totalCost",
+        "dominantDriver",
+        "profileTimePenaltyCount",
+        "maxProfileTimeFactor",
+        "overlayMultiplierCount",
+        "maxOverlayMultiplier",
+        "turnPenaltyTotal",
+        "avoidedPenaltyCount",
+        "roadUsePenaltyCount",
+        "maxRoadUsePenalty",
+        "conditionalRestrictionEdgeCount"
+      ]
+    },
+    "RouteDiagnostics": {
+      "type": "object",
+      "properties": {
+        "acceptedAlternativeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "accessRestrictionPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "alternativeAttemptCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "avoidedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "blockedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "correlationDurationNs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "correlationMode": {
+          "$ref": "#/$defs/CorrelationMode"
+        },
+        "destinationBestCandidateScoreBasisPoints": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "destinationBestInboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "destinationCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "destinationOnlyPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "destinationOnlyRelaxedRetryCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "destinationRejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "destinationRejectedCandidates": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RejectedCorrelationCandidate"
+          }
+        },
+        "destinationRelaxedCorrelationRetryCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "ferryPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "finalPathEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "fordPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "forwardVisitedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "gatePenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "inaccessibleEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "normalEdgeExpandedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "originBestCandidateScoreBasisPoints": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "originBestOutboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "originCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "originRejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "originRejectedCandidates": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RejectedCorrelationCandidate"
+          }
+        },
+        "originRelaxedCorrelationRetryCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "overlayMultiplierCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "rejectedAlternativeCostRatioCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "rejectedAlternativeDuplicateCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "rejectedAlternativeSearchFailedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "rejectedAlternativeSharedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "rejectedAlternativeWarningDifferenceCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "rejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "relaxedCorrelationRetryCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "restrictedTransitionCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "routeLegBuildDurationNs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "searchBudgetExceeded": {
+          "description": "The visited-edge budget ran out after a route was found: the route is\nthe best found so far, not proven optimal.",
+          "type": "boolean",
+          "default": false
+        },
+        "searchDurationNs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "searchOptimalityGapMillicost": {
+          "description": "With `search_budget_exceeded`, how much dearer than optimal the route\ncan be, in thousandths of a cost unit (rounded up), by the lower bound\nthe search stops on: an upper bound for unidirectional searches, with\nthe exact stop (`WAYFARER_EXACT_STOP`), and with the default\nbidirectional stop (package landmark bounds are consistent).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "settledNodeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgConnectorCost": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgConnectorDistanceMeters": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgCrossCountryConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgEndpointConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgPartialEdgeFragmentUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgRoadBypassConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "ssvgRoadEntryConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "tollPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "totalComputeDurationNs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "visitedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "originCandidateCount",
+        "destinationCandidateCount",
+        "rejectedCandidateCount",
+        "originRejectedCandidateCount",
+        "destinationRejectedCandidateCount",
+        "originBestCandidateScoreBasisPoints",
+        "destinationBestCandidateScoreBasisPoints",
+        "originBestOutboundReachEdgeCount",
+        "destinationBestInboundReachEdgeCount",
+        "relaxedCorrelationRetryCount",
+        "originRelaxedCorrelationRetryCount",
+        "destinationRelaxedCorrelationRetryCount",
+        "originRejectedCandidates",
+        "destinationRejectedCandidates",
+        "blockedEdgeCount",
+        "avoidedEdgeCount",
+        "inaccessibleEdgeCount",
+        "destinationOnlyPenaltyCount",
+        "destinationOnlyRelaxedRetryCount",
+        "fordPenaltyCount",
+        "tollPenaltyCount",
+        "ferryPenaltyCount",
+        "gatePenaltyCount",
+        "accessRestrictionPenaltyCount",
+        "overlayMultiplierCount",
+        "ssvgPartialEdgeFragmentUsedCount",
+        "ssvgConnectorUsedCount",
+        "ssvgEndpointConnectorUsedCount",
+        "ssvgRoadEntryConnectorUsedCount",
+        "ssvgRoadBypassConnectorUsedCount",
+        "ssvgCrossCountryConnectorUsedCount",
+        "ssvgConnectorDistanceMeters",
+        "ssvgConnectorCost",
+        "restrictedTransitionCount",
+        "normalEdgeExpandedCount",
+        "alternativeAttemptCount",
+        "acceptedAlternativeCount",
+        "rejectedAlternativeDuplicateCount",
+        "rejectedAlternativeSharedEdgeCount",
+        "rejectedAlternativeCostRatioCount",
+        "rejectedAlternativeWarningDifferenceCount",
+        "rejectedAlternativeSearchFailedCount",
+        "correlationDurationNs",
+        "searchDurationNs",
+        "routeLegBuildDurationNs",
+        "totalComputeDurationNs",
+        "visitedEdgeCount",
+        "settledNodeCount",
+        "finalPathEdgeCount",
+        "forwardVisitedEdgeCount",
+        "correlationMode",
+        "searchBudgetExceeded",
+        "searchOptimalityGapMillicost"
+      ]
+    },
+    "RouteDynamicEndpointKind": {
+      "type": "string",
+      "enum": [
+        "origin",
+        "destination"
+      ]
+    },
+    "RouteDynamicVirtualEdgeKind": {
+      "type": "string",
+      "enum": [
+        "endpoint",
+        "road_entry",
+        "road_to_road_bypass",
+        "cross_country"
+      ]
+    },
+    "RouteEdgeAttribution": {
+      "type": "object",
+      "properties": {
+        "adminCountryId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "adminRegionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "conditionalRestrictions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "constrainedSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "costBreakdown": {
+          "$ref": "#/$defs/RouteCostBreakdown",
+          "default": {
+            "accessRestrictionPenalty": 1.0,
+            "avoidedEdgePenalty": 1.0,
+            "baseDistanceCost": 0.0,
+            "bridgeTunnelFactor": 1.0,
+            "destinationOnlyPenalty": 1.0,
+            "ferryPenalty": 1.0,
+            "fordFactor": 1.0,
+            "gatePenalty": 1.0,
+            "overlayMultiplier": 1.0,
+            "profileTimeFactor": 1.0,
+            "roadTypeFactor": 1.0,
+            "routeRefFactor": 1.0,
+            "sarFactor": 1.0,
+            "smoothnessFactor": 1.0,
+            "speedTimeS": 0.0,
+            "surfaceFactor": 1.0,
+            "tollPenalty": 1.0,
+            "totalCost": 0.0,
+            "tracktypeFactor": 1.0,
+            "turnPenalty": 0.0
+          }
+        },
+        "destination": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "destinationRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "destinationStreet": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "description": "Time on this edge's traversed stretch.",
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "freeFlowSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "hasFord": {
+          "type": "boolean"
+        },
+        "hasGate": {
+          "type": "boolean",
+          "default": false
+        },
+        "hasWarningOverlay": {
+          "type": "boolean"
+        },
+        "inferredSpeedKph": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "isAccessRestricted": {
+          "type": "boolean",
+          "default": false
+        },
+        "isBridge": {
+          "type": "boolean"
+        },
+        "isDestinationOnly": {
+          "type": "boolean",
+          "default": false
+        },
+        "isFerry": {
+          "type": "boolean",
+          "default": false
+        },
+        "isLink": {
+          "type": "boolean",
+          "default": false
+        },
+        "isRoundabout": {
+          "type": "boolean"
+        },
+        "isToll": {
+          "type": "boolean",
+          "default": false
+        },
+        "isTunnel": {
+          "type": "boolean"
+        },
+        "junctionBranchAnglesDeg": {
+          "description": "Signed angles (degrees, negative to the left) from the approach to each\nother edge the profile may take at the junction this edge starts at\n(U-turns excluded); empty on a leg's first edge.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768
+          }
+        },
+        "junctionDelayS": {
+          "description": "Time lost at the junction this edge starts at, entering it from the\nleg's previous edge (turning, yielding, signals); 0 on a leg's first\nedge. A leg's duration is its edges' `duration_s` plus their\n`junction_delay_s`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "junctionIncomingEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "junctionJoiningAnglesDeg": {
+          "description": "Signed angles (degrees) from the arrival of each other edge the profile\nmay use into that junction to this edge's departure.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768
+          }
+        },
+        "junctionOutgoingEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "junctionRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "laneConnectivityAvailable": {
+          "type": "boolean",
+          "default": false
+        },
+        "laneCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "default": null,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "lanes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "layer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "maxspeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opposingEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "refName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roadType": {
+          "$ref": "#/$defs/RoadType"
+        },
+        "roundaboutExitCount": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 0,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "routeRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sharedEdgeInfoId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "smoothness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "speedSource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteSpeedSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speedSourceProvenance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "surface": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timezoneId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "tracktype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "traversalDirection": {
+          "$ref": "#/$defs/TraversalDirection"
+        },
+        "turnLanes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "turnLanesBackward": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "turnLanesForward": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "warningRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        }
+      },
+      "required": [
+        "edgeId",
+        "sharedEdgeInfoId",
+        "roadType",
+        "name",
+        "refName",
+        "routeRefs",
+        "surface",
+        "tracktype",
+        "smoothness",
+        "maxspeedKph",
+        "inferredSpeedKph",
+        "laneCount",
+        "lanes",
+        "turnLanes",
+        "turnLanesForward",
+        "turnLanesBackward",
+        "laneConnectivityAvailable",
+        "speedSourceProvenance",
+        "freeFlowSpeedKph",
+        "constrainedSpeedKph",
+        "adminCountryId",
+        "adminRegionId",
+        "timezoneId",
+        "conditionalRestrictions",
+        "opposingEdgeId",
+        "layer",
+        "level",
+        "destination",
+        "destinationRef",
+        "destinationStreet",
+        "junctionRef",
+        "isBridge",
+        "isTunnel",
+        "hasFord",
+        "isToll",
+        "isFerry",
+        "hasGate",
+        "isAccessRestricted",
+        "isDestinationOnly",
+        "isLink",
+        "isRoundabout",
+        "roundaboutExitCount",
+        "hasWarningOverlay",
+        "warningRanges",
+        "junctionOutgoingEdgeCount",
+        "junctionIncomingEdgeCount",
+        "distanceM",
+        "durationS",
+        "junctionDelayS",
+        "traversalDirection",
+        "costBreakdown"
+      ]
+    },
+    "RouteEdgeRange": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction"
+      ]
+    },
+    "RouteExplanation": {
+      "type": "object",
+      "properties": {
+        "edgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/RouteExplanationKind"
+        },
+        "severity": {
+          "$ref": "#/$defs/RouteExplanationSeverity"
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "kind",
+        "severity",
+        "edgeCount",
+        "value"
+      ]
+    },
+    "RouteExplanationKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "dynamic_overlay",
+            "mobility_policy",
+            "speed_policy",
+            "conditional_restrictions",
+            "access_constraints"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dominant_cost_driver": {
+              "$ref": "#/$defs/RouteCostDriverKind"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "dominant_cost_driver"
+          ]
+        }
+      ]
+    },
+    "RouteExplanationSeverity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "cost",
+        "warning"
+      ]
+    },
+    "RouteGuidanceQualityFlag": {
+      "type": "string",
+      "enum": [
+        "missing_road_name",
+        "inferred_heading",
+        "complex_junction",
+        "weak_maneuver_classification",
+        "combined_short_connector",
+        "overlay_warning_on_clipped_shape",
+        "ssvg_connector"
+      ]
+    },
+    "RouteLeg": {
+      "type": "object",
+      "properties": {
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteEdgeAttribution"
+          }
+        },
+        "geometry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "shapeSegments": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteShapeSegment"
+          }
+        }
+      },
+      "required": [
+        "distanceM",
+        "durationS",
+        "geometry",
+        "edges",
+        "shapeSegments"
+      ]
+    },
+    "RouteLocationMatch": {
+      "description": "Correlation evidence for a stop from both adjacent routed legs.\n\nKeeping both sides avoids the old direct-to-routed gap where a waypoint was\nconsidered unsnapped merely because its incoming leg was direct, even though\nits outgoing routed leg successfully correlated it.",
+      "type": "object",
+      "properties": {
+        "incoming": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CorrelatedLocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outgoing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CorrelatedLocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "incoming",
+        "outgoing"
+      ]
+    },
+    "RouteManeuver": {
+      "type": "object",
+      "properties": {
+        "alertInstruction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "bearingDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "beginShapeIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "branchText": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cardinalDirection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "conciseInstruction": {
+          "type": "string",
+          "default": ""
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "endShapeIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "instructionKey": {
+          "type": "string",
+          "default": ""
+        },
+        "instructionParameters": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "kind": {
+          "$ref": "#/$defs/RouteManeuverKind"
+        },
+        "laneCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "default": null,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "legIndex": {
+          "description": "The leg of a multi-leg route this maneuver belongs to.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "postTransitionInstruction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "preTransitionInstruction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "qualityFlags": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteGuidanceQualityFlag"
+          }
+        },
+        "roadName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roadRefs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "roundaboutExitNumber": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "signText": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "turnAngleDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "maximum": 32767,
+          "minimum": -32768
+        }
+      },
+      "required": [
+        "kind",
+        "instruction",
+        "conciseInstruction",
+        "preTransitionInstruction",
+        "postTransitionInstruction",
+        "alertInstruction",
+        "cardinalDirection",
+        "bearingDeg",
+        "roadRefs",
+        "signText",
+        "branchText",
+        "laneCount",
+        "roundaboutExitNumber",
+        "instructionKey",
+        "instructionParameters",
+        "qualityFlags",
+        "distanceM",
+        "durationS",
+        "beginShapeIndex",
+        "endShapeIndex",
+        "roadName",
+        "turnAngleDeg"
+      ]
+    },
+    "RouteManeuverKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "start",
+            "continue",
+            "keep",
+            "fork",
+            "merge",
+            "roundabout",
+            "turn",
+            "u_turn",
+            "hazard",
+            "destination"
+          ]
+        },
+        {
+          "description": "Arrival at an intermediate waypoint of a multi-leg route.",
+          "type": "string",
+          "const": "waypoint"
+        }
+      ]
+    },
+    "RouteOverlayDiagnostics": {
+      "description": "Counters describing what the overlay pass did to a route, surfaced on the\ncomputed route's diagnostics. Populated by whoever applies the projections.",
+      "type": "object",
+      "properties": {
+        "areaInsideEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "areaIntersectingEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "areaNearEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "closureOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "compileCacheHitCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "compileCacheMissCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "compileDurationNs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "decodedTileCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "discountOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "entityAvoidanceOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "explicitEdgeReferenceCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "hazardWarningOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ignoredOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "lowConfidenceWarningOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "noGoOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "openOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "partialEdgeRangeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "projectedGeometryCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "projectedTileCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "projectionBackend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectionConfidenceBasisPoints": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reportWarningOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "reviewedOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "slowGoOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "subjectConstraintOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unreviewedWarningOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warningEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "reviewedOverlayCount",
+        "unreviewedWarningOverlayCount",
+        "lowConfidenceWarningOverlayCount",
+        "ignoredOverlayCount",
+        "projectedGeometryCount",
+        "explicitEdgeReferenceCount",
+        "warningEdgeCount",
+        "closureOverlayCount",
+        "noGoOverlayCount",
+        "slowGoOverlayCount",
+        "discountOverlayCount",
+        "openOverlayCount",
+        "hazardWarningOverlayCount",
+        "reportWarningOverlayCount",
+        "entityAvoidanceOverlayCount",
+        "subjectConstraintOverlayCount",
+        "areaInsideEdgeCount",
+        "areaIntersectingEdgeCount",
+        "areaNearEdgeCount",
+        "partialEdgeRangeCount",
+        "projectionConfidenceBasisPoints",
+        "projectionBackend",
+        "projectedTileCount",
+        "decodedTileCount",
+        "compileCacheHitCount",
+        "compileCacheMissCount",
+        "compileDurationNs"
+      ]
+    },
+    "RouteOverlayPolicy": {
+      "description": "What an overlay does to the edges it covers.\nInside one request: a block wins over a discount and a slow-go; an\n`open` wins over legal closure and over a block whose `valid_from_ms` is\nearlier than its own (an absent one is earliest); overlapping discounts\nmultiply, slow-go factors take the largest, and of several speed\noverrides on one edge the slowest stands.",
+      "oneOf": [
+        {
+          "description": "Blocked.",
+          "type": "string",
+          "const": "no_go"
+        },
+        {
+          "description": "Dearer: `cost_multiplier` above 1 (default 2), cost only.",
+          "type": "string",
+          "const": "slow_go"
+        },
+        {
+          "description": "A hazard warning on the route; costs are unchanged.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Cheaper: `cost_multiplier` in (0, 1) scales cost and duration, and\n`speed_kph` sets the speed (cost follows the time). Costed exactly;\ngoal-directed bounds are scaled by the least cost ratio.",
+          "type": "string",
+          "const": "discount"
+        },
+        {
+          "description": "Usable by the request's profile (when `profiles` lists it, or lists\nnone) whatever its legal access says, at `speed_kph` if given. The\nedge must be in the package; endpoints do not snap onto it.",
+          "type": "string",
+          "const": "open"
+        }
+      ]
+    },
+    "RouteOverlaySetBinding": {
+      "description": "How a set's items reached a workflow (`RouteWorkflowResult::overlay_sets`).",
+      "type": "object",
+      "properties": {
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "boundItemCount": {
+          "description": "Items applied by their bound edge ids.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "boundToPackage": {
+          "description": "The set's `package.datasetHash` is the routing package's: its edge ids\nare used as they stand.",
+          "type": "boolean"
+        },
+        "reprojectedItemCount": {
+          "description": "Items applied by projecting their geometry.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "setId": {
+          "type": "string"
+        },
+        "setVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "skippedItemIds": {
+          "description": "Items with no geometry whose edges are bound to another package.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tombstoneCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "setId",
+        "setVersion",
+        "author",
+        "boundToPackage",
+        "boundItemCount",
+        "reprojectedItemCount",
+        "tombstoneCount",
+        "skippedItemIds"
+      ]
+    },
+    "RouteOverlaySource": {
+      "description": "Where an overlay came from, when it came from an overlay set.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "itemVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "setId": {
+          "type": "string"
+        },
+        "setVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "setId",
+        "setVersion",
+        "itemId",
+        "itemVersion"
+      ]
+    },
+    "RouteOverlayUse": {
+      "description": "One overlay the route crosses.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "overlayIndex": {
+          "description": "The overlay's index in the request's overlays (overlay-set items\nfollow them).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "policy": {
+          "$ref": "#/$defs/RouteOverlayPolicy"
+        },
+        "routeEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "routeLengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOverlaySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "overlayIndex",
+        "label",
+        "policy",
+        "routeEdgeCount",
+        "routeLengthM"
+      ]
+    },
+    "RouteOverlayWindows": {
+      "description": "What the time windows of a request's overlays did.",
+      "type": "object",
+      "properties": {
+        "endingWithinRoute": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evaluatedAtMs": {
+          "description": "The time the windows were evaluated at (UTC ms).",
+          "type": "integer",
+          "format": "int64"
+        },
+        "inactiveOverlayItems": {
+          "description": "Overlays outside their window, by label: not applied.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "overlayWindowEndsWithinRoute": {
+          "description": "Applied overlays whose window ends before the estimated arrival\n(evaluation time plus the route's duration). The search is static: it\ndoes not see an item expire en route.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "evaluatedAtMs",
+        "inactiveOverlayItems",
+        "overlayWindowEndsWithinRoute",
+        "endingWithinRoute"
+      ]
+    },
+    "RoutePolicySummary": {
+      "type": "object",
+      "properties": {
+        "allowFord": {
+          "type": "boolean"
+        },
+        "avoidAccessRestricted": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidDestinationOnly": {
+          "type": "number",
+          "format": "double"
+        },
+        "avoidFerries": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidGates": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidMotorways": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidPaths": {
+          "type": "number",
+          "format": "double"
+        },
+        "avoidTolls": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidTracks": {
+          "type": "number",
+          "format": "double"
+        },
+        "avoidedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "avoidedRangeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "blockedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "conditionalRestrictionEvalAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "costMultiplierEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "costMultiplierRangeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "dynamicOverlayPartialSplitEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "dynamicOverlaySplitEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "dynamicOverlayVirtualConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "emergencyOverrideStrength": {
+          "type": "number",
+          "format": "double"
+        },
+        "fixedSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "maxCostRatio": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxSharedEdgeRatio": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxVisitedEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "minimumWarningDifference": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "preferKnownRouteRefs": {
+          "type": "number",
+          "format": "double"
+        },
+        "preferPaved": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "profile": {
+          "$ref": "#/$defs/MobilityProfile"
+        },
+        "requestedAlternativeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "sar": {
+          "description": "The effective SAR surcharges; requests with SAR only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteSarPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speedPreference": {
+          "$ref": "#/$defs/RouteSpeedPreference",
+          "default": "posted_or_inferred"
+        },
+        "topSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "warningEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "profile",
+        "maxVisitedEdgeCount",
+        "blockedEdgeCount",
+        "avoidedEdgeCount",
+        "avoidedRangeCount",
+        "warningEdgeCount",
+        "costMultiplierEdgeCount",
+        "costMultiplierRangeCount",
+        "avoidTracks",
+        "avoidPaths",
+        "avoidMotorways",
+        "avoidDestinationOnly",
+        "allowFord",
+        "avoidTolls",
+        "avoidFerries",
+        "avoidGates",
+        "avoidAccessRestricted",
+        "preferPaved",
+        "preferKnownRouteRefs",
+        "emergencyOverrideStrength",
+        "speedPreference",
+        "fixedSpeedKph",
+        "topSpeedKph",
+        "conditionalRestrictionEvalAtMs",
+        "requestedAlternativeCount",
+        "maxSharedEdgeRatio",
+        "maxCostRatio",
+        "minimumWarningDifference",
+        "dynamicOverlaySplitEdgeCount",
+        "dynamicOverlayPartialSplitEdgeCount",
+        "dynamicOverlayVirtualConnectorCount"
+      ]
+    },
+    "RouteQualifiedAccess": {
+      "description": "One stretch of a route whose legal access is qualified\n(`LegResult::qualified_access`, on every route).",
+      "type": "object",
+      "properties": {
+        "conditional": {
+          "description": "Whether the qualifier holds only under a condition (a conditional\ntag), at the time the request was evaluated or not.",
+          "type": "boolean",
+          "default": false
+        },
+        "edgeIds": {
+          "description": "Consecutive route edges of one way with this qualifier.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "legalTag": {
+          "description": "The tag that qualifies the access, as the package records it\n(`access=permissive`, `motor_vehicle:conditional=delivery @ …`); for\n`destination` without a recorded `access=destination` it is\n`destination` (the key is not recorded), for `unrecorded` the way's\nclass (`highway=pedestrian`).",
+          "type": "string"
+        },
+        "lengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "osmWayId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "qualifier": {
+          "$ref": "#/$defs/RouteAccessQualifier"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "qualifier",
+        "edgeIds",
+        "startFraction",
+        "endFraction",
+        "lengthM",
+        "osmWayId",
+        "legalTag",
+        "conditional"
+      ]
+    },
+    "RouteRecostSummary": {
+      "type": "object",
+      "properties": {
+        "accessRestrictionPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "accessible": {
+          "type": "boolean"
+        },
+        "blockedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "destinationOnlyPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "ferryPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "fordPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "gatePenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "inaccessibleEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "overlayMultiplierCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "profile": {
+          "$ref": "#/$defs/MobilityProfile"
+        },
+        "tollPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "turnPenaltyTotal": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "profile",
+        "accessible",
+        "distanceM",
+        "cost",
+        "durationS",
+        "blockedEdgeCount",
+        "inaccessibleEdgeCount",
+        "destinationOnlyPenaltyCount",
+        "fordPenaltyCount",
+        "tollPenaltyCount",
+        "ferryPenaltyCount",
+        "gatePenaltyCount",
+        "accessRestrictionPenaltyCount",
+        "overlayMultiplierCount",
+        "turnPenaltyTotal"
+      ]
+    },
+    "RouteSarPolicy": {
+      "description": "The effective SAR surcharges of a request (`RoutePolicySummary::sar`).",
+      "type": "object",
+      "properties": {
+        "barrierGateS": {
+          "description": "R4: a gate's and a locked gate's time.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "barrierLockedGateS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "enabled": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SarRelaxationKind"
+          }
+        },
+        "ignoreConditional": {
+          "type": "boolean"
+        },
+        "legalAccessFactor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "legalAccessValues": {
+          "description": "R1: the access values it opens and its factor.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "offNetworkMaxLegM": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "turnRestrictionPenaltyS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "vehicleOnPathsClasses": {
+          "description": "R5: the path classes it opens, its factor, the least known width and\nwhether unknown widths are allowed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "vehicleOnPathsFactor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "vehicleOnPathsMinWidthM": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "vehicleOnPathsUnknownWidth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarUnknownWidth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wrongWayEntryS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "wrongWayFactor": {
+          "description": "R2: its factor and entry time.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "enabled",
+        "ignoreConditional"
+      ]
+    },
+    "RouteSarReport": {
+      "description": "What a route did under SAR (`LegResult::sar`, SAR requests only).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "The relaxations the request enabled.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SarRelaxationKind"
+          }
+        },
+        "totals": {
+          "description": "Per relaxation used: how often, how far, and the cost it added.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteSarUseTotal"
+          }
+        },
+        "uses": {
+          "description": "Every place the route uses a relaxation, in route order. An operator\nmust see these before driving.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteSarUse"
+          }
+        }
+      },
+      "required": [
+        "enabled",
+        "uses",
+        "totals"
+      ]
+    },
+    "RouteSarUse": {
+      "description": "One use of a relaxation on a route.",
+      "type": "object",
+      "properties": {
+        "addedCostS": {
+          "description": "Cost the relaxation added (seconds): the R3 penalty, or for R7 the\nleg's time at the off-road pace (which the route's own cost and\nduration leave out).",
+          "type": "number",
+          "format": "double"
+        },
+        "confidence": {
+          "description": "Data-quality notes for the operator.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "edgeIds": {
+          "description": "The route edges involved: for `turn_restrictions` the restriction's\nwhole sequence (from, via…, to), for `conditional` the closed edge(s),\nempty for `off_network`.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "geometry": {
+          "description": "For `off_network`: the requested point and the road point it joins.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/SarRelaxationKind"
+        },
+        "legalTag": {
+          "description": "The rule broken: `restriction=simple` / `restriction=complex`, the\nconditional tag, or `off_network`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "osmWayId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "startFraction": {
+          "description": "The traversed piece of the first and last edge.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "kind",
+        "edgeIds",
+        "startFraction",
+        "endFraction",
+        "lengthM",
+        "addedCostS"
+      ]
+    },
+    "RouteSarUseTotal": {
+      "type": "object",
+      "properties": {
+        "addedCostS": {
+          "type": "number",
+          "format": "double"
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/SarRelaxationKind"
+        },
+        "lengthM": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "kind",
+        "count",
+        "lengthM",
+        "addedCostS"
+      ]
+    },
+    "RouteSegment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "routed": {
+              "$ref": "#/$defs/LegResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "routed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "direct": {
+              "$ref": "#/$defs/DirectRouteLeg"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "direct"
+          ]
+        }
+      ]
+    },
+    "RouteSegmentShape": {
+      "type": "object",
+      "properties": {
+        "routeSegmentIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "segment": {
+          "$ref": "#/$defs/RouteShapeSegment"
+        }
+      },
+      "required": [
+        "routeSegmentIndex",
+        "segment"
+      ]
+    },
+    "RouteShapeDynamicOverlay": {
+      "type": "object",
+      "properties": {
+        "connectorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectorType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicVirtualEdgeKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "distanceMeters": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "kind": {
+          "$ref": "#/$defs/RouteShapeDynamicOverlayKind"
+        },
+        "sourceChunkIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sourceEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sourceEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicEndpointKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceFraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sourcePoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "targetEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicEndpointKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetFraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "targetPoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "sourceChunkIds"
+      ]
+    },
+    "RouteShapeDynamicOverlayKind": {
+      "type": "string",
+      "enum": [
+        "partial_edge_fragment",
+        "endpoint_connector",
+        "road_entry_connector",
+        "road_to_road_bypass_connector",
+        "cross_country_connector"
+      ]
+    },
+    "RouteShapeQualityFlag": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "clipped_origin_edge",
+            "clipped_destination_edge",
+            "waypoint_split",
+            "duplicated_edge_suppressed",
+            "shape_fallback_used",
+            "same_edge_direct",
+            "ssvg_partial_edge_split",
+            "ssvg_connector"
+          ]
+        },
+        {
+          "description": "The leg starts away from where the previous leg ended (the waypoint\nsnapped to different places for its two legs).",
+          "type": "string",
+          "const": "waypoint_gap"
+        }
+      ]
+    },
+    "RouteShapeSegment": {
+      "type": "object",
+      "properties": {
+        "beginShapeIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "dynamicOverlay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteShapeDynamicOverlay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "endShapeIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "qualityFlags": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteShapeQualityFlag"
+          }
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "beginShapeIndex",
+        "endShapeIndex",
+        "startFraction",
+        "endFraction",
+        "qualityFlags"
+      ]
+    },
+    "RouteSpeedPreference": {
+      "type": "string",
+      "enum": [
+        "posted_or_inferred",
+        "posted",
+        "inferred",
+        "free_flow",
+        "constrained",
+        "road_type_default"
+      ]
+    },
+    "RouteSpeedSource": {
+      "type": "string",
+      "enum": [
+        "posted",
+        "inferred",
+        "free_flow",
+        "constrained",
+        "conditional",
+        "fixed",
+        "default"
+      ]
+    },
+    "RouteStatus": {
+      "type": "string",
+      "enum": [
+        "routed"
+      ]
+    },
+    "RouteSummaryDiagnostics": {
+      "type": "object",
+      "properties": {
+        "accessRestrictionPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "destinationBestCandidateScoreBasisPoints": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "destinationCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "destinationOnlyPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "destinationRejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "directSegmentCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ferryPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "fordPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "gatePenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "inaccessibleEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "mobilityAdjustmentCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "originBestCandidateScoreBasisPoints": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "originCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "originRejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "overlayMultiplierCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "projectedOverlayCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "rejectedCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "routedSegmentCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "segmentCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "settledNodeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgCrossCountryConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgEndpointConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgPartialEdgeFragmentUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgRoadBypassConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ssvgRoadEntryConnectorUsedCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tollPenaltyCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "visitedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warningEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "waypointGapCount": {
+          "description": "Waypoints whose outgoing leg starts away from where the incoming one\nended (each such leg's first shape segment is flagged `WaypointGap`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "segmentCount",
+        "routedSegmentCount",
+        "directSegmentCount",
+        "visitedEdgeCount",
+        "settledNodeCount",
+        "projectedOverlayCount",
+        "mobilityAdjustmentCount",
+        "inaccessibleEdgeCount",
+        "destinationOnlyPenaltyCount",
+        "fordPenaltyCount",
+        "tollPenaltyCount",
+        "ferryPenaltyCount",
+        "gatePenaltyCount",
+        "accessRestrictionPenaltyCount",
+        "overlayMultiplierCount",
+        "warningEdgeCount",
+        "ssvgPartialEdgeFragmentUsedCount",
+        "ssvgConnectorUsedCount",
+        "ssvgEndpointConnectorUsedCount",
+        "ssvgRoadEntryConnectorUsedCount",
+        "ssvgRoadBypassConnectorUsedCount",
+        "ssvgCrossCountryConnectorUsedCount",
+        "originCandidateCount",
+        "destinationCandidateCount",
+        "rejectedCandidateCount",
+        "originRejectedCandidateCount",
+        "destinationRejectedCandidateCount",
+        "originBestCandidateScoreBasisPoints",
+        "destinationBestCandidateScoreBasisPoints",
+        "waypointGapCount"
+      ]
+    },
+    "RouteWorkflowMobilityProvenance": {
+      "type": "object",
+      "properties": {
+        "connectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "connectorIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "connectorSourceChunkIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "crossCountryConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "crossCountryNoCoverage": {
+          "type": "boolean",
+          "default": false
+        },
+        "elevationModelVersion": {
+          "description": "Identifies the elevation/cost model already folded into range costs.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "endpointConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "impactTierCounts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "default": {}
+        },
+        "modelVersions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "partialEdgeSplitCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "patchIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "policyVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "roadBypassConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "slopeApplied": {
+          "type": "boolean",
+          "default": false
+        },
+        "sourceIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "policyVersion",
+        "patchIds",
+        "sourceIds",
+        "modelVersions",
+        "elevationModelVersion",
+        "impactTierCounts",
+        "connectorIds",
+        "connectorSourceChunkIds",
+        "partialEdgeSplitCount",
+        "connectorCount",
+        "endpointConnectorCount",
+        "roadBypassConnectorCount",
+        "crossCountryConnectorCount",
+        "crossCountryNoCoverage",
+        "slopeApplied"
+      ]
+    },
+    "RouteWorkflowOverlayProvenance": {
+      "type": "object",
+      "properties": {
+        "policyVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sourceIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "policyVersion",
+        "sourceIds"
+      ]
+    },
+    "RoutingSourceId": {
+      "description": "Stable identity used by the host to refer to a route source.\n\nIt is intentionally unrelated to package ids. An application embedding the\nengine can use any stable namespace it owns.",
+      "type": "string"
+    },
+    "SarRelaxationKind": {
+      "description": "One SAR relaxation, by its request name.",
+      "oneOf": [
+        {
+          "description": "R1: vehicle use of ways closed by legal access tags.",
+          "type": "string",
+          "const": "legal_access"
+        },
+        {
+          "description": "R2: driving against a vehicle one-way.",
+          "type": "string",
+          "const": "wrong_way"
+        },
+        {
+          "description": "R3: turns banned by turn restrictions.",
+          "type": "string",
+          "const": "turn_restrictions"
+        },
+        {
+          "description": "R4: passing gates and other barriers.",
+          "type": "string",
+          "const": "barriers"
+        },
+        {
+          "description": "R5: vehicles on footways, paths and cycleways.",
+          "type": "string",
+          "const": "vehicle_on_paths"
+        },
+        {
+          "description": "R6: ignoring time-limited (conditional) closures.",
+          "type": "string",
+          "const": "conditional"
+        },
+        {
+          "description": "R7: endpoints away from the road network.",
+          "type": "string",
+          "const": "off_network"
+        }
+      ]
+    },
+    "SarUnknownWidth": {
+      "description": "Whether R5 admits paths of unknown width.",
+      "type": "string",
+      "enum": [
+        "deny",
+        "allow"
+      ]
+    },
+    "TraversalDirection": {
+      "type": "string",
+      "enum": [
+        "forward",
+        "backward"
+      ]
+    }
+  }
+}

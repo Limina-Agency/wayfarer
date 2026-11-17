@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RouteNavigationProgressOptions",
+  "type": "object",
+  "properties": {
+    "approachingManeuverDistanceMeters": {
+      "type": "number",
+      "format": "double",
+      "default": 80.0
+    },
+    "arrivalThresholdMeters": {
+      "type": "number",
+      "format": "double",
+      "default": 20.0
+    },
+    "offRouteSustainMs": {
+      "type": "integer",
+      "format": "int64",
+      "default": 15000
+    },
+    "offRouteSustainSamples": {
+      "description": "Consecutive off-route samples that make a sustained off-route state\nwhen samples carry no `sampled_at_ms`.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 3,
+      "minimum": 0
+    },
+    "offRouteThresholdMeters": {
+      "type": "number",
+      "format": "double",
+      "default": 35.0
+    }
+  }
+}

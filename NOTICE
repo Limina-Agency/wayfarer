@@ -1,0 +1,9 @@
+Wayfarer
+Copyright 2026 Limina
+
+This product includes software developed by Limina.
+
+Test fixtures under fixtures/ (the Monaco and Kraków extracts, the routing
+packages built from them, and fixtures/osm/) contain OpenStreetMap data,
+© OpenStreetMap contributors, available under the Open Database License 1.0
+(https://www.openstreetmap.org/copyright).
