@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
 use crate::package::destination::relax_split_costs;
-use crate::package::profile_bit;
 use crate::package::search::analysis::{
     AnalysisPath, AnalysisPoint, AnalysisQuery, MatrixTargetCandidate, matrix_cell, matrix_row,
     overlay_split_costs, override_bounds, request_cost_overrides, request_duration_overrides,
@@ -18,6 +17,7 @@ use crate::package::search::patch::{
     PatchCosts, PatchCounters, PatchGraph, PatchOutcome, PatchPath, PatchQuery, analysis_overlay,
     matrix_row as patch_row, run as run_patch,
 };
+use crate::package::{SearchGraph, profile_bit};
 use crate::search::RoutingEngine;
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, MobilityProfile, RouteError, RouteMatrixCell,
@@ -116,6 +116,11 @@ impl RoutingEngine {
         let strict = self
             .package()
             .confines_destination_only(&request.options, request.profile);
+        // Tests compare with re-running the whole matrix relaxed.
+        #[cfg(test)]
+        let only_retried = !test_mode::full_relaxed_pass();
+        #[cfg(not(test))]
+        let only_retried = true;
         let outcome = self.package().in_matrix_pool(|| {
             let mut outcome = self.matrix_cells(
                 &request,
@@ -123,13 +128,16 @@ impl RoutingEngine {
                 &target_candidates,
                 &mut cells,
                 !strict,
+                None,
             );
             // Cells that cannot connect without crossing a destination-only
-            // road get the relaxed search, as routes do.
+            // road get the relaxed search, as routes do. Only those cells are
+            // searched again (see `matrix_cells`' `retry`).
             if let Ok((expansions, visited, settled)) = &mut outcome
                 && strict
                 && cells.iter().any(retries_relaxed)
             {
+                let retry = cells.iter().map(retries_relaxed).collect::<Vec<_>>();
                 let mut relaxed = cells.clone();
                 match self.matrix_cells(
                     &request,
@@ -137,6 +145,7 @@ impl RoutingEngine {
                     &target_candidates,
                     &mut relaxed,
                     true,
+                    only_retried.then_some(retry.as_slice()),
                 ) {
                     Ok((more_expansions, more_visited, more_settled)) => {
                         *expansions += more_expansions;
@@ -188,6 +197,19 @@ impl RoutingEngine {
     /// `package::columns`). The error, for every searchable cell, is
     /// `GraphNotReady` without a package and `MissingEdgeMetadata` for a
     /// candidate edge the package does not hold.
+    ///
+    /// `retry` (row-major, one flag per cell) limits a relaxed pass to the
+    /// cells the strict pass could not connect; the other cells keep whatever
+    /// `cells` held. The relaxed query does not depend on the endpoints (no
+    /// pockets are unblocked): pairwise searches only the flagged cells,
+    /// which are independent. Rows search only the sources with a flagged
+    /// cell and, without a visited-edge budget (which applies to a whole
+    /// row), only towards their flagged targets: each target's path is exact
+    /// whatever the others, though between paths of exactly equal cost a
+    /// differently focused expansion could label another first (none did in
+    /// the Krakow and Malopolskie matrices measured). Buckets size every
+    /// backward search from all the sources and search every row. The mode
+    /// is chosen from the whole matrix either way.
     fn matrix_cells(
         &self,
         request: &RouteMatrixRequest,
@@ -195,7 +217,19 @@ impl RoutingEngine {
         target_candidates: &[&[CorrelatedLocation]],
         cells: &mut [RouteMatrixCell],
         allow_destination_only: bool,
+        retry: Option<&[bool]>,
     ) -> Result<(usize, usize, usize), RouteError> {
+        debug_assert!(retry.is_none() || allow_destination_only);
+        let target_count = target_candidates.len();
+        let retries = |source: usize, target: usize| {
+            retry.is_none_or(|retry| retry[source * target_count + target])
+        };
+        let source_retries =
+            |source: usize| retry.is_none_or(|_| (0..target_count).any(|t| retries(source, t)));
+        // A relaxed row also searches only towards its retried targets, unless
+        // a visited-edge budget makes the row's outcome depend on all of them.
+        let retried_targets_only =
+            retry.is_some() && request.options.max_visited_edge_count.is_none();
         let access = self.route_graph_view();
         let graph = access.routing_package();
         let overlay = request
@@ -366,7 +400,6 @@ impl RoutingEngine {
             cost: path.cost,
         };
 
-        let target_count = target_candidates.len();
         let searchable_targets = targets.iter().filter(|points| !points.is_empty()).count();
         // A cell across two weak components has no path: it is not searched
         // (an unreachable target would otherwise keep a row's expansion going
@@ -500,18 +533,21 @@ impl RoutingEngine {
                         .filter(|target| !targets[*target].is_empty())
                         .map(move |target| (source, target))
                 })
-                .filter(|(source, target)| connected[*source][*target])
+                .filter(|(source, target)| connected[*source][*target] && retries(*source, *target))
                 .collect::<Vec<_>>();
             let cells = search_cells(&pairs);
             let mut rows = sources
                 .iter()
-                .map(|origins| {
-                    (!origins.is_empty() && searchable_targets > 0).then(|| MatrixRowCells {
-                        paths: vec![None; target_count],
-                        budget_exceeded: vec![false; target_count],
-                        visited_edge_count: 0,
-                        settled_edge_count: 0,
-                    })
+                .enumerate()
+                .map(|(source, origins)| {
+                    (!origins.is_empty() && searchable_targets > 0 && source_retries(source)).then(
+                        || MatrixRowCells {
+                            paths: vec![None; target_count],
+                            budget_exceeded: vec![false; target_count],
+                            visited_edge_count: 0,
+                            settled_edge_count: 0,
+                        },
+                    )
                 })
                 .collect::<Vec<_>>();
             for ((source, target), (path, visited, settled, budget_exceeded)) in
@@ -527,12 +563,43 @@ impl RoutingEngine {
             rows
         } else {
             // Many targets: one shared expansion per source row, in parallel.
+            // A row runs until its last target is final, so one target no
+            // source can reach (in a strict pass, one ringed by
+            // destination-only roads) floods the whole component from every
+            // source. Targets whose few reaching edges are known leave the
+            // rows of the sources outside them (their cells find no path, as
+            // the flood did). A visited-edge budget applies to a whole row,
+            // so with one the rows keep every target.
+            #[cfg(test)]
+            let prune = !test_mode::keep_unreachable_targets();
+            #[cfg(not(test))]
+            let prune = true;
+            let reaching = if prune
+                && patch.is_none()
+                && request.options.max_visited_edge_count.is_none()
+            {
+                target_edges
+                    .par_iter()
+                    .map(|edges| {
+                        reaching_edges(view, edges, |edge| query.edge_cost(view, edge).is_finite())
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![None; target_count]
+            };
+            let may_reach = |source: usize, target: usize| {
+                reaching[target].as_ref().is_none_or(|reaching| {
+                    source_edges[source]
+                        .iter()
+                        .any(|edge| reaching.contains(edge))
+                })
+            };
             sources
                 .par_iter()
                 .enumerate()
                 .zip(&connected)
                 .map(|((source, origins), connected)| {
-                    if origins.is_empty() || candidates.is_empty() {
+                    if origins.is_empty() || candidates.is_empty() || !source_retries(source) {
                         return None;
                     }
                     let mut state = graph.take_state();
@@ -583,7 +650,12 @@ impl RoutingEngine {
                         None => {
                             let candidates = candidates
                                 .iter()
-                                .filter(|candidate| connected[candidate.target])
+                                .filter(|candidate| {
+                                    connected[candidate.target]
+                                        && (!retried_targets_only
+                                            || retries(source, candidate.target))
+                                        && may_reach(source, candidate.target)
+                                })
                                 .copied()
                                 .collect::<Vec<_>>();
                             let row = matrix_row(
@@ -670,11 +742,22 @@ impl RoutingEngine {
 /// region, so a row costs about the same whatever its targets, while a cell
 /// costs more the farther apart its points are. Measured on Malopolskie
 /// (`examples/analysis_parity.rs`, process CPU, 10 source rows): on foot in
-/// Krakow, pairwise wins at 8 targets and rows from 16; driving, rows win
-/// from about 50 targets across the region but pairwise still wins 2-3x at
-/// 100 targets in Krakow.
+/// Krakow, pairwise wins at 8 targets and rows from 16.
+///
+/// Driving, a strict pass's cells also slow down as the matrix grows: every
+/// endpoint's destination-only pocket is unblocked for every cell, and each
+/// unblocked edge is a discount gate weakening the landmark bounds. Measured
+/// 2026-11-17 (square matrices of random road points, 16 threads, visited
+/// edges, rows with unreachable targets skipped): across Malopolskie rows
+/// and pairwise visit about as much at 50 points (305M and 292M) and rows a
+/// quarter as much at 64 (384M and 1,486M; 23 s and 62 s) and 80 (33 s and
+/// 110 s); on the Krakow centre package rows win from 10 points (0.24 s and
+/// 4.3 s at 50, 0.47 s and 26 s at 100). Rows and pairwise cells have the
+/// same paths there; their costs, distances and durations differ only in
+/// the last bits (the two halves of a bidirectional search add up in
+/// another order).
 const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT: usize = 12;
-const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 100;
+const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 50;
 
 /// The pairwise cut-off for `profile`; `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS`
 /// overrides it for every profile (for benchmarking).
@@ -778,6 +861,26 @@ pub(crate) mod test_mode {
 
     thread_local! {
         static MODE: Cell<Option<MatrixMode>> = const { Cell::new(None) };
+        static FULL_RELAXED_PASS: Cell<bool> = const { Cell::new(false) };
+        static KEEP_UNREACHABLE_TARGETS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Makes the relaxed pass search every cell again, as it used to.
+    pub(crate) fn set_full_relaxed_pass(full: bool) {
+        FULL_RELAXED_PASS.with(|cell| cell.set(full));
+    }
+
+    pub(crate) fn full_relaxed_pass() -> bool {
+        FULL_RELAXED_PASS.with(Cell::get)
+    }
+
+    /// Keeps targets no source can reach in every row, as rows used to.
+    pub(crate) fn set_keep_unreachable_targets(keep: bool) {
+        KEEP_UNREACHABLE_TARGETS.with(|cell| cell.set(keep));
+    }
+
+    pub(crate) fn keep_unreachable_targets() -> bool {
+        KEEP_UNREACHABLE_TARGETS.with(Cell::get)
     }
 
     pub(crate) fn set(mode: Option<MatrixMode>) {
@@ -866,6 +969,35 @@ pub(crate) fn apply_matrix_error(cell: &mut RouteMatrixCell, error: &RouteError)
     cell.cost = None;
     cell.edge_ids.clear();
     cell.failure_reason = Some(route_error_code(error));
+}
+
+/// Reaching sets larger than this are not collected: the target is taken to
+/// be reachable from everywhere.
+const MATRIX_REACHING_EDGES_LIMIT: usize = 16_384;
+
+/// Every edge from which a path over edges that are `usable` can reach one of
+/// `target_edges` (which are included), or `None` when there are more than
+/// [`MATRIX_REACHING_EDGES_LIMIT`]. Turn restrictions and turn costs are
+/// ignored, so a search from an edge outside the set cannot reach the
+/// targets.
+fn reaching_edges(
+    graph: SearchGraph<'_>,
+    target_edges: &[u32],
+    usable: impl Fn(u32) -> bool,
+) -> Option<FxHashSet<u32>> {
+    let mut reaching = target_edges.iter().copied().collect::<FxHashSet<_>>();
+    let mut pending = target_edges.to_vec();
+    while let Some(edge) = pending.pop() {
+        for (previous, _) in graph.in_edges(graph.edge_source(edge as usize) as usize) {
+            if usable(previous) && reaching.insert(previous) {
+                if reaching.len() > MATRIX_REACHING_EDGES_LIMIT {
+                    return None;
+                }
+                pending.push(previous);
+            }
+        }
+    }
+    Some(reaching)
 }
 
 /// `[source][target]`: whether the cell's candidates may share a weak
