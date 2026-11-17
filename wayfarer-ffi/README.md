@@ -62,12 +62,14 @@ cl /MD wayfarer-ffi\examples\route.c /Iwayfarer-ffi\include target\release\wayfa
 route.exe routing.mrt 43.7397 7.4275 43.7290 7.4160
 ```
 
-The static library needs `/MD` (or `/MDd`), not `cl`'s default `/MT`: Rust's
-MSVC targets build against the DLL C runtime, and so does the bundled zstd C
-code, so with `/MT` the link fails with unresolved `__imp_clock`,
-`__imp__wassert` and `__imp_qsort_s`. A host that has to use `/MT` builds the
-library with `RUSTFLAGS="-C target-feature=+crt-static"`. The system
-libraries a static link needs are printed by
+Link the static library with `/MD` (or `/MDd`), not `cl`'s default `/MT`:
+Rust's MSVC targets build against the DLL C runtime, so `/MT` puts two C
+runtimes in one program. A default build happens to link that way, but one
+that pulls in C code (zstd, through `wayfarer-road-graph`'s `snapshot`
+feature) fails with unresolved `__imp_clock`, `__imp__wassert` and
+`__imp_qsort_s`. A host that has to use `/MT` builds the library with
+`RUSTFLAGS="-C target-feature=+crt-static"`. The system libraries a static
+link needs are printed by
 `cargo rustc --release -p wayfarer-ffi --crate-type staticlib -- --print native-static-libs`.
 
 **Paths are UTF-8, also on Windows.** A Windows C program gets `argv` and
