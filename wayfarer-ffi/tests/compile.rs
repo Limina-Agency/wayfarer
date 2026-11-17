@@ -1,6 +1,6 @@
 //! Compiling through the C ABI (the `compiler` feature): a job compiles the
-//! Monaco fixture to the same bytes as the CLI, and a cancelled job leaves
-//! nothing behind.
+//! Monaco fixture to the same bytes as the CLI, a cancelled job leaves
+//! nothing behind, and a compile replaces a package that is open.
 #![cfg(feature = "compiler")]
 
 use std::ffi::{CStr, CString, c_char};
@@ -132,4 +132,63 @@ fn a_cancelled_job_leaves_no_package() {
     take(out);
     assert_eq!(status, WAYFARER_INVALID_ARGUMENT);
     assert!(job.is_null());
+}
+
+/// Runs a compile job for `request` to the end and returns its result.
+fn compile(request: &CString) -> Value {
+    let mut job = ptr::null_mut();
+    let mut out = ptr::null_mut();
+    let status =
+        unsafe { wayfarer_compile_start(request.as_ptr(), ptr::null(), &mut job, &mut out) };
+    let first = take(out);
+    assert_eq!(status, WAYFARER_OK, "{first}");
+    let mut out = ptr::null_mut();
+    let status = unsafe { wayfarer_compile_wait(job, &mut out) };
+    let result = take(out);
+    unsafe { wayfarer_compile_free(job) };
+    assert_eq!(status, WAYFARER_OK, "{result}");
+    result
+}
+
+/// Recompiling onto the path of an open package works on every platform
+/// (on Windows the open file is moved aside): the open handle keeps
+/// routing on the old file, a new open gets the new one, and once no handle
+/// has the old one open the next compile leaves only the package behind.
+#[test]
+fn a_compile_replaces_a_package_that_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("monaco.mrt");
+    let request = request(&output);
+    let first = compile(&request);
+
+    let path = CString::new(output.to_str().unwrap()).unwrap();
+    let mut old = ptr::null_mut();
+    let mut out = ptr::null_mut();
+    let status = unsafe { wayfarer_open(path.as_ptr(), ptr::null(), &mut old, &mut out) };
+    assert_eq!(status, WAYFARER_OK, "{}", take(out));
+
+    let second = compile(&request);
+    assert_eq!(second["datasetHash"], first["datasetHash"]);
+    let route = CString::new(
+        r#"{"locations": [{"point": {"lat": 43.7397, "lng": 7.4275}}, {"point": {"lat": 43.7290, "lng": 7.4160}}], "profile": "wheeled"}"#,
+    )
+    .unwrap();
+    let mut out = ptr::null_mut();
+    let status = unsafe { wayfarer_route(old, route.as_ptr(), &mut out) };
+    assert_eq!(status, WAYFARER_OK, "{}", take(out));
+
+    let mut new = ptr::null_mut();
+    let status = unsafe { wayfarer_open(path.as_ptr(), ptr::null(), &mut new, &mut out) };
+    assert_eq!(status, WAYFARER_OK, "{}", take(out));
+    unsafe {
+        wayfarer_close(old);
+        wayfarer_close(new);
+    }
+
+    compile(&request);
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["monaco.mrt"]);
 }

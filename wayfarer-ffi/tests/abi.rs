@@ -138,6 +138,46 @@ fn verify_hashes_every_section() {
     assert!(verification["sections"].as_array().unwrap().len() > 50);
 }
 
+/// A package under a path that is not ASCII opens and verifies from its
+/// UTF-8 bytes, and on Windows from UTF-16 through the `_w` calls.
+#[test]
+fn packages_open_from_non_ascii_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Łódź ścieżka");
+    std::fs::create_dir(&folder).unwrap();
+    let copy = folder.join("pakiet.mrt");
+    std::fs::copy(fixture().to_str().unwrap(), &copy).unwrap();
+
+    let utf8 = CString::new(copy.to_str().unwrap()).unwrap();
+    let mut package = ptr::null_mut();
+    let mut out = ptr::null_mut();
+    let status = unsafe { wayfarer_open(utf8.as_ptr(), ptr::null(), &mut package, &mut out) };
+    let info = take(out);
+    assert_eq!(status, WAYFARER_OK, "{info}");
+    let (status, route) = call(wayfarer_route, package, ROUTE);
+    assert_eq!(status, WAYFARER_OK, "{route}");
+    unsafe { wayfarer_close(package) };
+    let status = unsafe { wayfarer_verify(utf8.as_ptr(), &mut out) };
+    assert_eq!(status, WAYFARER_OK, "{}", take(out));
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = copy.as_os_str().encode_wide().chain([0]).collect();
+        let mut package = ptr::null_mut();
+        let status = unsafe { wayfarer_open_w(wide.as_ptr(), ptr::null(), &mut package, &mut out) };
+        let wide_info = take(out);
+        assert_eq!(status, WAYFARER_OK, "{wide_info}");
+        assert_eq!(wide_info["datasetHash"], info["datasetHash"]);
+        unsafe { wayfarer_close(package) };
+        let status = unsafe { wayfarer_verify_w(wide.as_ptr(), &mut out) };
+        assert_eq!(status, WAYFARER_OK, "{}", take(out));
+        let status = unsafe { wayfarer_open_w(ptr::null(), ptr::null(), &mut package, &mut out) };
+        assert_eq!(status, WAYFARER_INVALID_ARGUMENT);
+        take(out);
+    }
+}
+
 const ROUTE: &str = r#"{"locations": [{"point": {"lat": 52.0, "lng": 21.0002}}, {"point": {"lat": 52.0, "lng": 21.0018}}], "profile": "wheeled"}"#;
 const MATRIX: &str = r#"{"sources": [{"lat": 52.0, "lng": 21.0002}], "targets": [{"lat": 52.0, "lng": 21.0018}], "profile": "wheeled"}"#;
 const ISOCHRONE: &str = r#"{"origin": {"lat": 52.0, "lng": 21.0002}, "profile": "wheeled", "contours": [{"contour": 60.0, "metric": "time_seconds"}]}"#;

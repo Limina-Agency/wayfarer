@@ -16,8 +16,20 @@
 
 use wayfarer_package::format::{LANDMARK_INFINITY, LandmarkRow, LandmarkTable};
 
-/// Landmarks used per query (best bound at the origin).
-pub(crate) const ACTIVE_LANDMARKS: usize = 6;
+/// Landmarks a walking query bounds with (best bound at the origin).
+/// Vehicle queries use every stored landmark: on Małopolskie all 16 cut a
+/// plain drive's visited edges by about a third (the corpus's p95 from 81k
+/// to 45k), while walks got slower with them (p95 69 to 102 ms).
+pub(crate) const WALKING_LANDMARKS: usize = 6;
+
+/// How many of a column's `count` landmarks a query bounds with.
+pub(crate) fn active_landmarks(walking: bool, count: usize) -> usize {
+    if walking {
+        WALKING_LANDMARKS.min(count)
+    } else {
+        count
+    }
+}
 
 /// Per-query ALT bound towards a set of target nodes: the minimum over
 /// targets of the best landmark bound for that target. (Aggregating targets
@@ -43,6 +55,7 @@ impl<'g> AltBound<'g> {
         to: LandmarkTable<'g>,
         scales: &[f32],
         landmark_count: usize,
+        active: usize,
         node_count: usize,
         column: usize,
         targets: &[u32],
@@ -55,6 +68,7 @@ impl<'g> AltBound<'g> {
                 to,
                 scales,
                 landmark_count,
+                active,
                 node_count,
                 column,
                 targets,
@@ -72,6 +86,7 @@ impl<'g> AltBound<'g> {
             from,
             &swapped,
             landmark_count,
+            active,
             node_count,
             column,
             targets,
@@ -79,12 +94,14 @@ impl<'g> AltBound<'g> {
         )
     }
 
+    /// Bounds with the `active` landmarks that bound `origins` best.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         from: LandmarkTable<'g>,
         to: LandmarkTable<'g>,
         scales: &[f32],
         landmark_count: usize,
+        active: usize,
         node_count: usize,
         column: usize,
         targets: &[u32],
@@ -120,7 +137,7 @@ impl<'g> AltBound<'g> {
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         let chosen = scored
             .into_iter()
-            .take(ACTIVE_LANDMARKS)
+            .take(active)
             .map(|(_, index)| index)
             .collect::<Vec<_>>();
         Some(Self::with_landmarks(
@@ -274,7 +291,7 @@ pub(crate) struct GroupBound<'g> {
 
 impl<'g> GroupBound<'g> {
     /// `reversed` bounds d(groups -> node), as [`AltBound::new_directed`].
-    /// The active landmarks are the ones that bound `origins` best towards
+    /// The `active` landmarks are the ones that bound `origins` best towards
     /// the closest group; offsets start at 0 (see [`Self::set_offsets`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -282,6 +299,7 @@ impl<'g> GroupBound<'g> {
         to: LandmarkTable<'g>,
         scales: &[f32],
         landmark_count: usize,
+        active: usize,
         column: usize,
         groups: &[Vec<u32>],
         origins: &[u32],
@@ -327,7 +345,7 @@ impl<'g> GroupBound<'g> {
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         let chosen = scored
             .into_iter()
-            .take(ACTIVE_LANDMARKS)
+            .take(active)
             .map(|(_, index)| index)
             .collect();
         Some(Self::with_landmarks(

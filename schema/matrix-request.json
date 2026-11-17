@@ -891,7 +891,7 @@
       }
     },
     "SarLegalAccess": {
-      "description": "R1. `military` is relaxed only when listed; `private` or `customers`\nlift the destination-only confinement of the whole request (see\n[`lifts_destination_only`]).",
+      "description": "R1. `military` is relaxed only when listed; `private` or `customers`\nlift the destination-only confinement of the whole request (see\n`lifts_destination_only`).",
       "type": "object",
       "properties": {
         "factor": {

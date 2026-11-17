@@ -626,6 +626,69 @@ pub fn profile_bit(profile: MobilityProfile) -> u8 {
     1 << profile_slot(profile)
 }
 
+/// What [`PackageFile::move_into_place`] puts before the unique part of the
+/// name of a package it moved aside.
+const REPLACED_INFIX: &str = ".replaced-";
+
+/// [`PackageFile::move_into_place`] when a rename over `path` failed: moves
+/// the package at `path` aside, `temp` into its place, and deletes the old
+/// one if nothing has it open any more. Puts the old one back if the second
+/// rename fails.
+fn move_into_place_aside(temp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(
+        "{REPLACED_INFIX}{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let aside = PathBuf::from(aside);
+    std::fs::rename(path, &aside)?;
+    if let Err(error) = std::fs::rename(temp, path) {
+        let _ = std::fs::rename(&aside, path);
+        return Err(error);
+    }
+    // Fails while an engine still has it mapped; a later call retries.
+    let _ = std::fs::remove_file(&aside);
+    Ok(())
+}
+
+/// Deletes the packages [`move_into_place_aside`] moved aside from `path`
+/// that nothing has open any more. Best effort: errors are ignored.
+fn remove_replaced(path: &Path) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!("{name}{REPLACED_INFIX}");
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(unique) = file_name
+            .to_str()
+            .and_then(|file_name| file_name.strip_prefix(&prefix))
+        else {
+            continue;
+        };
+        if !unique.is_empty()
+            && unique
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'-')
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// One section's size and hash, as the section table records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingPackageSection {
@@ -656,8 +719,11 @@ impl PackageFile {
     /// `Outdated`.
     pub fn open(path: &Path) -> Result<Self, RoutingPackageError> {
         let file = File::open(path)?;
-        // SAFETY: packages are written atomically (temp file + rename) and
-        // never modified in place; the mapping is validated before any use.
+        // SAFETY: packages are written atomically (temp file + rename, see
+        // `move_into_place`) and never modified in place; the mapping is
+        // validated before any use. `File::open` shares delete access on
+        // Windows, which lets a newer package be moved into place while this
+        // one stays mapped.
         let map = unsafe { Mmap::map(&file)? };
         Self::from_storage(Storage::Mapped(map))
     }
@@ -775,12 +841,42 @@ impl PackageFile {
             let mut file = File::create(&temp)?;
             write(&mut file)?;
             file.sync_all()?;
-            std::fs::rename(&temp, path)
+            Self::move_into_place(&temp, path)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temp);
         }
         Ok(result?)
+    }
+
+    /// Moves a finished package from `temp` onto `path`, replacing the file
+    /// there even while it is open.
+    ///
+    /// A rename does that on Linux, macOS, and Windows on NTFS and ReFS
+    /// (std renames with POSIX semantics there): an engine that has the old
+    /// file open keeps reading it until it closes. Where Windows can't rename
+    /// with POSIX semantics (FAT32, exFAT, some network shares), a rename over
+    /// a memory-mapped package fails with "Access is denied". There the open
+    /// package is renamed aside instead to
+    /// `<name>.replaced-<unique>` (allowed: packages are opened with delete
+    /// sharing, see [`Self::open`]), the new one takes its place, and the old
+    /// one is deleted as soon as nothing has it open: at once if it can be,
+    /// otherwise by the next call for the same `path`. Between the two
+    /// renames `path` is briefly missing, so an open at that moment fails
+    /// with not found. A process that opened the package without delete
+    /// sharing (outside Wayfarer) still blocks the replacement.
+    pub fn move_into_place(temp: &Path, path: &Path) -> std::io::Result<()> {
+        remove_replaced(path);
+        match std::fs::rename(temp, path) {
+            Err(error)
+                if cfg!(windows)
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+                    && path.is_file() =>
+            {
+                move_into_place_aside(temp, path)
+            }
+            result => result,
+        }
     }
 
     fn from_storage(storage: Storage) -> Result<Self, RoutingPackageError> {
@@ -834,9 +930,15 @@ impl PackageFile {
     fn validate(&self) -> Result<(), RoutingPackageError> {
         let invalid = |message: &str| Err(RoutingPackageError::Invalid(message.to_string()));
         let c = self.counts;
-        let expect = |section: Section, elements: usize| {
-            self.sections[section as usize].1 == elements * SECTION_ELEMENT_BYTES[section as usize]
+        // Counts come straight from the header: every size derived from them
+        // is checked arithmetic, and one that overflows matches no section.
+        let expect = |section: Section, elements: Option<usize>| {
+            elements
+                .and_then(|elements| elements.checked_mul(SECTION_ELEMENT_BYTES[section as usize]))
+                == Some(self.sections[section as usize].1)
         };
+        let mul = |a: usize, b: usize| a.checked_mul(b);
+        let plus_one = |a: usize| a.checked_add(1);
         let stored_nodes = if self.layout.node_e7_derived {
             0
         } else {
@@ -854,52 +956,55 @@ impl PackageFile {
             .len()
             .saturating_sub(1);
         let fixed = [
-            (Section::NodeFirstOut, c.node_count + 1),
-            (Section::NodeXyzFixed, c.node_count * 3),
-            (Section::NodeLatE7, stored_nodes),
-            (Section::NodeLngE7, stored_nodes),
-            (Section::EdgeTarget, c.edge_count),
-            (Section::EdgeId, c.edge_count),
-            (Section::EdgeLength, c.edge_count),
-            (Section::EdgeSharedInfo, c.edge_count),
-            (Section::EdgeHeadingStart, c.edge_count),
-            (Section::EdgeFlags, c.edge_count),
-            (Section::EdgeRoadRank, c.edge_count),
-            (Section::EdgeCost, c.edge_count * c.column_count),
-            (Section::EdgeDuration, c.edge_count * c.column_count),
-            (Section::SharedInfoWay, c.shared_info_count),
-            (Section::SharedInfoName, token_rows),
-            (Section::SharedInfoRef, token_rows),
-            (Section::SharedInfoRouteRefStart, token_rows + 1),
-            (Section::SimpleFrom, c.simple_restriction_count),
-            (Section::SimpleTo, c.simple_restriction_count),
-            (Section::SimpleVia, c.simple_restriction_count),
-            (Section::SimpleMask, c.simple_restriction_count),
-            (Section::ComplexTo, c.complex_restriction_count),
-            (Section::ComplexMask, c.complex_restriction_count),
-            (Section::ComplexPrefixStart, c.complex_restriction_count + 1),
-            (Section::EdgeTwin, c.edge_count),
-            (Section::EdgeProfileAccess, c.edge_count),
-            (Section::LandmarkNode, c.column_count * c.landmark_count),
+            (Section::NodeFirstOut, plus_one(c.node_count)),
+            (Section::NodeXyzFixed, mul(c.node_count, 3)),
+            (Section::NodeLatE7, Some(stored_nodes)),
+            (Section::NodeLngE7, Some(stored_nodes)),
+            (Section::EdgeTarget, Some(c.edge_count)),
+            (Section::EdgeId, Some(c.edge_count)),
+            (Section::EdgeLength, Some(c.edge_count)),
+            (Section::EdgeSharedInfo, Some(c.edge_count)),
+            (Section::EdgeHeadingStart, Some(c.edge_count)),
+            (Section::EdgeFlags, Some(c.edge_count)),
+            (Section::EdgeRoadRank, Some(c.edge_count)),
+            (Section::EdgeCost, mul(c.edge_count, c.column_count)),
+            (Section::EdgeDuration, mul(c.edge_count, c.column_count)),
+            (Section::SharedInfoWay, Some(c.shared_info_count)),
+            (Section::SharedInfoName, Some(token_rows)),
+            (Section::SharedInfoRef, Some(token_rows)),
+            (Section::SharedInfoRouteRefStart, plus_one(token_rows)),
+            (Section::SimpleFrom, Some(c.simple_restriction_count)),
+            (Section::SimpleTo, Some(c.simple_restriction_count)),
+            (Section::SimpleVia, Some(c.simple_restriction_count)),
+            (Section::SimpleMask, Some(c.simple_restriction_count)),
+            (Section::ComplexTo, Some(c.complex_restriction_count)),
+            (Section::ComplexMask, Some(c.complex_restriction_count)),
+            (
+                Section::ComplexPrefixStart,
+                plus_one(c.complex_restriction_count),
+            ),
+            (Section::EdgeTwin, Some(c.edge_count)),
+            (Section::EdgeProfileAccess, Some(c.edge_count)),
+            (Section::LandmarkNode, mul(c.column_count, c.landmark_count)),
             (
                 Section::LandmarkScale,
-                c.column_count * c.landmark_count * 2,
+                mul(c.column_count, c.landmark_count).and_then(|n| mul(n, 2)),
             ),
-            (Section::LandmarkFrom, landmark_rows * c.landmark_count),
-            (Section::LandmarkTo, landmark_rows * c.landmark_count),
-            (Section::ComplexFirst, c.complex_restriction_count),
-            (Section::ComplexByFirst, c.complex_restriction_count),
+            (Section::LandmarkFrom, mul(landmark_rows, c.landmark_count)),
+            (Section::LandmarkTo, mul(landmark_rows, c.landmark_count)),
+            (Section::ComplexFirst, Some(c.complex_restriction_count)),
+            (Section::ComplexByFirst, Some(c.complex_restriction_count)),
             (
                 Section::ShapeStart,
-                c.shared_info_count.div_ceil(SHAPE_START_STRIDE) + 1,
+                plus_one(c.shared_info_count.div_ceil(SHAPE_START_STRIDE)),
             ),
-            (Section::SharedInfoCostFlags, cost_rows),
-            (Section::SharedInfoCostClasses, cost_rows),
-            (Section::SharedInfoSpeeds, cost_rows * 3),
-            (Section::EdgeInferredSpeed, c.edge_count),
-            (Section::SharedInfoCostTuple, c.shared_info_count),
-            (Section::SharedInfoLegalReason, c.shared_info_count),
-            (Section::EdgeJunction, c.edge_count),
+            (Section::SharedInfoCostFlags, Some(cost_rows)),
+            (Section::SharedInfoCostClasses, Some(cost_rows)),
+            (Section::SharedInfoSpeeds, mul(cost_rows, 3)),
+            (Section::EdgeInferredSpeed, Some(c.edge_count)),
+            (Section::SharedInfoCostTuple, Some(c.shared_info_count)),
+            (Section::SharedInfoLegalReason, Some(c.shared_info_count)),
+            (Section::EdgeJunction, Some(c.edge_count)),
         ];
         if fixed
             .iter()
@@ -1200,7 +1305,8 @@ impl PackageFile {
         let tail = c.node_count % 64;
         let chain = self.slice::<u64>(Section::PieceChain);
         let tree = self.slice::<u64>(Section::PieceTree);
-        if chain.len() != tree.len() || (!chain.is_empty() && chain.len() != c.column_count * words)
+        if chain.len() != tree.len()
+            || (!chain.is_empty() && Some(chain.len()) != c.column_count.checked_mul(words))
         {
             return Err(invalid());
         }
@@ -1224,7 +1330,9 @@ impl PackageFile {
         let tail = c.node_count % 64;
         // Bits and ranks of one kind: the number of (column, node)s set.
         let counted = |present: &[u64], rank: &[u32]| {
-            if present.len() != c.column_count * words || rank.len() != present.len() {
+            if Some(present.len()) != c.column_count.checked_mul(words)
+                || rank.len() != present.len()
+            {
                 return Err(invalid());
             }
             let mut count = 0usize;
@@ -1541,15 +1649,19 @@ pub fn parse_header(
             "header or section table does not match the root checksum",
         ));
     }
-    let count = |slot: usize| read_u64(HEADER_COUNTS + slot * 8) as usize;
+    // `as usize` would truncate on 32-bit targets.
+    let count = |slot: usize| {
+        usize::try_from(read_u64(HEADER_COUNTS + slot * 8))
+            .map_err(|_| invalid("header count exceeds this target's address space"))
+    };
     let counts = PackageCounts {
-        node_count: count(0),
-        edge_count: count(1),
-        shared_info_count: count(2),
-        simple_restriction_count: count(3),
-        complex_restriction_count: count(4),
-        column_count: count(5),
-        landmark_count: count(6),
+        node_count: count(0)?,
+        edge_count: count(1)?,
+        shared_info_count: count(2)?,
+        simple_restriction_count: count(3)?,
+        complex_restriction_count: count(4)?,
+        column_count: count(5)?,
+        landmark_count: count(6)?,
     };
     let layout = PackageLayout {
         node_e7_derived: read_u32(HEADER_LAYOUT_FLAGS) & LAYOUT_NODE_E7_DERIVED != 0,
@@ -1567,8 +1679,12 @@ pub fn parse_header(
     let mut previous_end = table_end;
     for (index, section) in sections.iter_mut().enumerate() {
         let entry = &table[index * TABLE_ENTRY_BYTES..(index + 1) * TABLE_ENTRY_BYTES];
-        let offset = u64::from_le_bytes(entry[0..8].try_into().unwrap()) as usize;
-        let len = u64::from_le_bytes(entry[8..16].try_into().unwrap()) as usize;
+        let read = |at: usize| {
+            usize::try_from(u64::from_le_bytes(entry[at..at + 8].try_into().unwrap())).ok()
+        };
+        let (Some(offset), Some(len)) = (read(0), read(8)) else {
+            return Err(invalid("section out of bounds or misaligned"));
+        };
         // Sections are laid out in table order, each after the previous one.
         if !offset.is_multiple_of(SECTION_ALIGN)
             || offset < previous_end
@@ -1745,13 +1861,13 @@ impl InEdgeBuffer {
 /// The edges into a node, each with its source, in ascending edge order
 /// ([`Sections::in_edges`]).
 pub enum InEdges {
-    /// At most [`IN_EDGES_INLINE`] in-edges.
+    /// At most `IN_EDGES_INLINE` (8) in-edges.
     Inline {
         items: [(u32, u32); IN_EDGES_INLINE],
         at: usize,
         len: usize,
     },
-    /// Derived, for a node with more than [`IN_EDGES_INLINE`] in-edges.
+    /// Derived, for a node with more than `IN_EDGES_INLINE` (8) in-edges.
     Spilled(std::vec::IntoIter<(u32, u32)>),
 }
 
@@ -3087,5 +3203,95 @@ mod shape_codec_tests {
         }
         assert!(worst <= FIXED_XYZ_MARGIN_M / 1.5, "{worst}");
         assert_eq!(fixed_xyz([1.0, -1.0, 0.0]), [i32::MAX, i32::MIN, 0]);
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The new package takes the path while the old one stays mapped and
+    /// readable; once it is unmapped, the next replacement leaves no file
+    /// behind. Through the rename on Linux and macOS, through the move aside
+    /// on Windows.
+    #[test]
+    fn a_mapped_package_is_replaced_and_keeps_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.mrt");
+        let temp = dir.path().join("routing.mrt.tmp");
+        std::fs::write(&path, b"old package").unwrap();
+        let file = File::open(&path).unwrap();
+        // SAFETY: the test changes the file only by renames.
+        let map = unsafe { Mmap::map(&file) }.unwrap();
+        drop(file);
+
+        std::fs::write(&temp, b"new package").unwrap();
+        PackageFile::move_into_place(&temp, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new package");
+        assert_eq!(&map[..], b"old package");
+
+        drop(map);
+        std::fs::write(&temp, b"newer package").unwrap();
+        PackageFile::move_into_place(&temp, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer package");
+        assert_eq!(names(dir.path()), ["routing.mrt"]);
+    }
+
+    /// The Windows fallback on its own, on any platform: the old file is
+    /// moved aside and deleted, or left for the next call while it is open.
+    #[test]
+    fn moving_aside_replaces_the_package_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.mrt");
+        let temp = dir.path().join("routing.mrt.tmp");
+        std::fs::write(&path, b"old package").unwrap();
+        let file = File::open(&path).unwrap();
+        // SAFETY: the test changes the file only by renames.
+        let map = unsafe { Mmap::map(&file) }.unwrap();
+
+        std::fs::write(&temp, b"new package").unwrap();
+        move_into_place_aside(&temp, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new package");
+        assert_eq!(&map[..], b"old package");
+        assert!(!temp.exists());
+
+        drop(map);
+        drop(file);
+        // Whatever the first call could not delete goes now.
+        std::fs::write(&temp, b"newer package").unwrap();
+        move_into_place_aside(&temp, &path).unwrap();
+        remove_replaced(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer package");
+        assert_eq!(names(dir.path()), ["routing.mrt"]);
+    }
+
+    /// Only names this module made for this path are deleted.
+    #[test]
+    fn cleanup_deletes_only_packages_moved_aside_from_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.mrt");
+        let kept = [
+            "other.mrt.replaced-12-34-0",
+            "routing.mrt.replaced-",
+            "routing.mrt.replaced-notes",
+            "routing.mrt.tmp",
+            "routing.mrt",
+        ];
+        for name in kept.iter().chain(&["routing.mrt.replaced-12-34-0"]) {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        remove_replaced(&path);
+        let mut kept = kept.map(str::to_string).to_vec();
+        kept.sort();
+        assert_eq!(names(dir.path()), kept);
     }
 }

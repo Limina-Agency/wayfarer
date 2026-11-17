@@ -75,9 +75,10 @@ versioned separately:
   `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (1..=1); a
   layout change keeps reading the previous format for at least one release,
   and raising the minimum drops a format.
-- A package records the costing model its stored costs were baked with, and the
-  engine opens only packages of its own model, so a change to stored costs
-  ships the compiler and the engine together.
+- A package records the costing model its stored costs were baked with. An
+  engine re-costs a package of an older model from its stored costing inputs
+  and refuses a newer one, so a change to stored costs ships the compiler and
+  the engine together.
 - The format is little-endian; the crate does not build for big-endian targets.
 - The `request` module is `#[doc(hidden)]`: it is shared with the compiler and
   engine and is not part of the supported API.

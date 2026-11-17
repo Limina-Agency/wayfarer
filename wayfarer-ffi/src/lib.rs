@@ -275,6 +275,28 @@ unsafe fn read_str<'a>(text: *const c_char, what: &str) -> Result<&'a str, Failu
         .map_err(|_| Failure::invalid(format!("{what} is not UTF-8")))
 }
 
+/// A path passed as a NUL-terminated UTF-16 string (`wchar_t` on Windows).
+/// Any sequence of units is a valid Windows path, unpaired surrogates too.
+///
+/// # Safety
+/// `text` is null or a NUL-terminated UTF-16 string.
+#[cfg(windows)]
+unsafe fn read_wide_path(text: *const u16, what: &str) -> Result<std::path::PathBuf, Failure> {
+    use std::os::windows::ffi::OsStringExt;
+    if text.is_null() {
+        return Err(Failure::invalid(format!("{what} is null")));
+    }
+    let mut len = 0;
+    // SAFETY: NUL-terminated per the contract, so every unit up to the NUL
+    // is readable.
+    while unsafe { *text.add(len) } != 0 {
+        len += 1;
+    }
+    // SAFETY: the `len` units before the NUL, read above.
+    let units = unsafe { std::slice::from_raw_parts(text, len) };
+    Ok(std::ffi::OsString::from_wide(units).into())
+}
+
 /// # Safety
 /// `text` is null or a NUL-terminated string.
 unsafe fn read_json<T: for<'de> Deserialize<'de>>(
@@ -360,6 +382,10 @@ pub extern "C" fn wayfarer_versions() -> *mut c_char {
 /// `{"memoryProfile": "desktop" | "mobile"}`. On success `*package` is the new
 /// handle and `*out_json` (if `out_json` is not null) the package info.
 ///
+/// On Windows a C program's `argv` and the Win32 "A" functions use the ANSI
+/// code page, not UTF-8: convert with `WideCharToMultiByte(CP_UTF8, ...)`,
+/// or pass the UTF-16 path to `wayfarer_open_w`.
+///
 /// # Safety
 /// `path` and `options_json` are null or NUL-terminated strings; `package` is
 /// valid for one pointer write; `out_json` is null or valid for one write.
@@ -372,26 +398,61 @@ pub unsafe extern "C" fn wayfarer_open(
 ) -> i32 {
     unsafe {
         respond(out_json, || {
-            if package.is_null() {
-                return Err(Failure::invalid("package out-pointer is null"));
-            }
             let path = read_str(path, "path")?;
-            let options: OpenOptions = if options_json.is_null() {
-                OpenOptions::default()
-            } else {
-                read_json(options_json, "options")?
-            };
-            let opened = RoutingPackage::open_with_profile(Path::new(path), options.memory_profile)
-                .map_err(Failure::package)?;
-            let info = package_info(&opened);
-            let handle = Box::new(WayfarerPackage {
-                engine: RoutingEngine::from_package(Arc::new(opened)),
-            });
-            // SAFETY: checked non-null; valid for one write per the contract.
-            *package = Box::into_raw(handle);
-            Ok(info)
+            open_package(Path::new(path), options_json, package)
         })
     }
+}
+
+/// [`wayfarer_open`] with the path as a NUL-terminated UTF-16 string
+/// (`const wchar_t *`), as Windows hands it to `wmain` and the Win32 "W"
+/// functions. Windows only.
+///
+/// # Safety
+/// `path` is null or a NUL-terminated UTF-16 string; otherwise as
+/// [`wayfarer_open`].
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wayfarer_open_w(
+    path: *const u16,
+    options_json: *const c_char,
+    package: *mut *mut WayfarerPackage,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    unsafe {
+        respond(out_json, || {
+            let path = read_wide_path(path, "path")?;
+            open_package(&path, options_json, package)
+        })
+    }
+}
+
+/// The body of [`wayfarer_open`] once the path is read.
+///
+/// # Safety
+/// As [`wayfarer_open`].
+unsafe fn open_package(
+    path: &Path,
+    options_json: *const c_char,
+    package: *mut *mut WayfarerPackage,
+) -> Result<Value, Failure> {
+    if package.is_null() {
+        return Err(Failure::invalid("package out-pointer is null"));
+    }
+    let options: OpenOptions = if options_json.is_null() {
+        OpenOptions::default()
+    } else {
+        unsafe { read_json(options_json, "options") }?
+    };
+    let opened = RoutingPackage::open_with_profile(path, options.memory_profile)
+        .map_err(Failure::package)?;
+    let info = package_info(&opened);
+    let handle = Box::new(WayfarerPackage {
+        engine: RoutingEngine::from_package(Arc::new(opened)),
+    });
+    // SAFETY: checked non-null; valid for one write per the contract.
+    unsafe { *package = Box::into_raw(handle) };
+    Ok(info)
 }
 
 /// Closes a package handle. Null is ignored.
@@ -422,6 +483,7 @@ pub unsafe extern "C" fn wayfarer_info(
 
 /// Checks a package file end to end (every section against its checksum).
 /// On success `*out_json` holds the dataset hash, length and sections.
+/// `path` is UTF-8, as for [`wayfarer_open`].
 ///
 /// # Safety
 /// `path` is null or a NUL-terminated string; `out_json` is null or valid for
@@ -431,18 +493,39 @@ pub unsafe extern "C" fn wayfarer_verify(path: *const c_char, out_json: *mut *mu
     unsafe {
         respond(out_json, || {
             let path = read_str(path, "path")?;
-            let verification = RoutingPackage::verify(Path::new(path)).map_err(Failure::package)?;
-            Ok(json!({
-                "datasetHash": verification.dataset_hash,
-                "byteLen": verification.byte_len,
-                "sections": verification.sections.iter().map(|section| json!({
-                    "name": section.name,
-                    "byteLen": section.byte_len,
-                    "blake3": section.blake3_hex,
-                })).collect::<Vec<_>>(),
-            }))
+            verify_package(Path::new(path))
         })
     }
+}
+
+/// [`wayfarer_verify`] with the path as a NUL-terminated UTF-16 string
+/// (`const wchar_t *`). Windows only.
+///
+/// # Safety
+/// `path` is null or a NUL-terminated UTF-16 string; `out_json` is null or
+/// valid for one write.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wayfarer_verify_w(path: *const u16, out_json: *mut *mut c_char) -> i32 {
+    unsafe {
+        respond(out_json, || {
+            let path = read_wide_path(path, "path")?;
+            verify_package(&path)
+        })
+    }
+}
+
+fn verify_package(path: &Path) -> Result<Value, Failure> {
+    let verification = RoutingPackage::verify(path).map_err(Failure::package)?;
+    Ok(json!({
+        "datasetHash": verification.dataset_hash,
+        "byteLen": verification.byte_len,
+        "sections": verification.sections.iter().map(|section| json!({
+            "name": section.name,
+            "byteLen": section.byte_len,
+            "blake3": section.blake3_hex,
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 /// Routes `request_json`: a `RouteRequest` (two or more locations, legs,

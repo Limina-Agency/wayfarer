@@ -25,6 +25,24 @@
  *     wayfarer_cancel_token_free, wayfarer_navigation_route_free.
  *     Free functions ignore NULL. On failure no handle is written.
  *
+ * Paths and text. Every char string in and out is UTF-8, paths included.
+ *   On Windows a C program's argv and the Win32 "A" functions use the ANSI
+ *   code page instead, which cannot spell every path: take the arguments
+ *   from wmain and convert them with WideCharToMultiByte(CP_UTF8, ...) (as
+ *   examples/route.c does), or pass UTF-16 paths to wayfarer_open_w and
+ *   wayfarer_verify_w.
+ *
+ * Replacing a package. Packages are written to "<path>.tmp" and moved over
+ *   the old file, so a package can be recompiled or downloaded onto the path
+ *   of one that is open: the open handle keeps reading the old package, and
+ *   the next wayfarer_open gets the new one. Where Windows can't rename
+ *   with POSIX semantics (FAT32, exFAT, some network shares), a rename over
+ *   an open, memory-mapped package fails, so there the old file is renamed
+ *   aside to "<path>.replaced-<unique>" and deleted once no handle has it
+ *   open, at the latest by the next replacement of the same path. A host
+ *   that writes packages itself does the same, or writes each version to a
+ *   new path and opens that.
+ *
  * Thread safety.
  *   - Every function may be called from any thread.
  *   - A package handle, a cancel token and a navigation route may each be used
@@ -56,6 +74,9 @@
 #define WAYFARER_H
 
 #include <stdint.h>
+#ifdef _WIN32
+#include <wchar.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,13 +125,23 @@ uint32_t wayfarer_abi_version(void);
  * [min, max], "costingModel"}. Free with wayfarer_string_free. */
 char *wayfarer_versions(void);
 
-/* Opens the package at `path` (UTF-8). `options_json` is NULL or
- * {"memoryProfile": "desktop" | "mobile"}. On success `*package` is the
- * handle and `*out_json` the package info. */
+/* Opens the package at `path` (UTF-8, also on Windows: see "Paths and
+ * text"). `options_json` is NULL or {"memoryProfile": "desktop" |
+ * "mobile"}. On success `*package` is the handle and `*out_json` the package
+ * info. */
 int32_t wayfarer_open(const char *path,
                               const char *options_json,
                               WayfarerPackage **package,
                               char **out_json);
+
+#ifdef _WIN32
+/* Windows only: wayfarer_open with a UTF-16 path, as wmain and the Win32 "W"
+ * functions give it. */
+int32_t wayfarer_open_w(const wchar_t *path,
+                                const char *options_json,
+                                WayfarerPackage **package,
+                                char **out_json);
+#endif
 
 /* Closes a handle. NULL is ignored. */
 void wayfarer_close(WayfarerPackage *package);
@@ -122,8 +153,14 @@ void wayfarer_close(WayfarerPackage *package);
  * "vehicleOnPathsMinFactor" a request may set). */
 int32_t wayfarer_info(const WayfarerPackage *package, char **out_json);
 
-/* Checks a package file end to end (every section against its checksum). */
+/* Checks a package file end to end (every section against its checksum).
+ * `path` is UTF-8. */
 int32_t wayfarer_verify(const char *path, char **out_json);
+
+#ifdef _WIN32
+/* Windows only: wayfarer_verify with a UTF-16 path. */
+int32_t wayfarer_verify_w(const wchar_t *path, char **out_json);
+#endif
 
 /* Routes a RouteRequest: {"locations": [{"point": GeoPoint, "options":
  * RouteEndpointOptions (optional)}, ...] (2 to 34), "profile", "options":
@@ -245,7 +282,8 @@ typedef struct WayfarerCompileJob WayfarerCompileJob;
  * (ISO code), "memory": "standard" | "low" (memory use and speed, never the
  * package's bytes), "threads"}. `cancel` (may be NULL) stops it, its timeout
  * included; a cancelled or failed compile removes its scratch and partial
- * output and keeps any package that was at "output" before. On success
+ * output and keeps any package that was at "output" before. A package open
+ * at "output" is replaced (see "Replacing a package"). On success
  * `*job` is the handle and `*out_json` the first progress. */
 int32_t wayfarer_compile_start(const char *request_json,
                                        const WayfarerCancelToken *cancel,

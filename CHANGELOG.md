@@ -7,6 +7,22 @@ costing model and the C ABI version a release reads or writes.
 
 ## Unreleased
 
+- **A package that is open can be replaced on any Windows file system.** On
+  NTFS and ReFS the rename already replaced a package an engine had open, as
+  on Linux and macOS. Where Windows can't rename with POSIX semantics
+  (FAT32, exFAT, some network shares), the rename over the open,
+  memory-mapped package fails with "Access is denied". There the open
+  package is now renamed aside to `<name>.replaced-<unique>`, the new one
+  takes its place, and the old file is deleted once nothing has it open (at
+  the latest by the next replacement of the same path).
+  `PackageFile::move_into_place` does this for hosts that write packages.
+- **C ABI: `wayfarer_open_w` and `wayfarer_verify_w` (Windows only)** take
+  a `wchar_t` path, for hosts holding UTF-16 paths. Additive; the C ABI
+  version stays 1. The header and FFI README now say that every path is
+  UTF-8 on Windows too, and the C examples take their arguments from `wmain`
+  and convert them, so paths outside the ANSI code page open.
+- **Docs: static linking on Windows needs `/MD`** (the FFI README), with the
+  system libraries and the `+crt-static` route for `/MT` hosts.
 - **Vehicle matrices are faster.** A strict matrix (destination-only roads
   confined) re-ran the whole matrix relaxed whenever one cell needed it; it
   now searches only the retried cells (pairwise) or the retried sources

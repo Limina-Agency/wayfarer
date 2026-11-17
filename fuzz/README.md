@@ -20,6 +20,11 @@ cargo +nightly fuzz run request fuzz/corpus/request fuzz/seeds/request -- -dict=
 cargo +nightly fuzz run overlay_set fuzz/corpus/overlay_set fuzz/seeds/overlay_set -- -dict=fuzz/overlay_set.dict
 ```
 
+Pass `--debug-assertions` (`-a`) to `fuzz run` as well: it turns on
+overflow checks, which the release-mode build `cargo fuzz` makes by default
+leaves off, so arithmetic on hostile header counts panics instead of wrapping
+silently. Embedders that build with overflow checks would hit the same panic.
+
 Add `--target aarch64-apple-darwin` on Apple silicon if `cargo fuzz` picks
 the x86_64 target. Useful libFuzzer options after `--`: `-max_total_time=<s>`,
 `-timeout=10` (report inputs slower than 10 s), `-rss_limit_mb=4096`, and

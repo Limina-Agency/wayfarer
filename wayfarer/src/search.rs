@@ -110,7 +110,8 @@ impl RoutingEngine {
 
     /// A route through the request's locations, with its overlays applied:
     /// one search per routed leg, stitched into one result (see
-    /// [`RouteRequest`]). A failed leg's failure carries its index.
+    /// [`RouteRequest`](crate::RouteRequest)). A failed leg's failure carries
+    /// its index.
     pub fn route(&self, request: crate::RouteRequest) -> Result<crate::RouteResult, RouteFailure> {
         crate::trip::route(self, request)
     }

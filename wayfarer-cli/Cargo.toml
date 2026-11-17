@@ -13,6 +13,8 @@ categories = ["science::geo", "command-line-utilities"]
 [[bin]]
 name = "wayfarer"
 path = "src/main.rs"
+# Its docs would collide with the `wayfarer` library's (same name).
+doc = false
 
 [lints]
 workspace = true

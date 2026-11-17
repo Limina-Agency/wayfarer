@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RouteStatus, RoutingEngine, RoutingPackage};
 use wayfarer_package::format::{
-    HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, MIN_READ_FORMAT_VERSION, PackageFile,
+    HEADER_COUNTS, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, MIN_READ_FORMAT_VERSION, PackageFile,
     ROUTING_PACKAGE_FORMAT_VERSION, SECTION_COUNT, Section, TABLE_ENTRY_BYTES,
 };
 
@@ -124,5 +124,32 @@ fn a_negative_edge_cost_is_rejected() {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         let error = RoutingPackage::from_bytes(&resigned(bytes.clone())).unwrap_err();
         assert!(error.to_string().contains("edge costs"), "{value}: {error}");
+    }
+}
+
+/// A package whose header counts overflow when multiplied by element sizes is
+/// rejected, not a panic with overflow checks on (found by the `package` fuzz
+/// target with `--debug-assertions`).
+#[test]
+fn overflowing_header_counts_are_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    // Node, edge, shared-info, restriction, column and landmark counts.
+    for slot in 0..7 {
+        for count in [
+            u64::MAX,
+            u64::MAX / 2,
+            u64::from(u32::MAX),
+            (1 << 62) + 1,
+            1 << 40,
+        ] {
+            let mut bytes = bytes.clone();
+            let at = HEADER_COUNTS + slot * 8;
+            bytes[at..at + 8].copy_from_slice(&count.to_le_bytes());
+            assert!(
+                RoutingPackage::from_bytes(&resigned(bytes)).is_err(),
+                "count slot {slot} = {count}"
+            );
+        }
     }
 }
