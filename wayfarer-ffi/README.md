@@ -40,8 +40,8 @@ if (wayfarer_open("routing.mrt", NULL, &package, &text) != WAYFARER_OK) {
 wayfarer_string_free(text);               /* the package info */
 
 const char *request =
-    "{\"origin\": {\"lat\": 43.7397, \"lng\": 7.4275},"
-    " \"destination\": {\"lat\": 43.7290, \"lng\": 7.4160},"
+    "{\"locations\": [{\"point\": {\"lat\": 43.7397, \"lng\": 7.4275}},"
+    " {\"point\": {\"lat\": 43.7290, \"lng\": 7.4160}}],"
     " \"profile\": \"wheeled\"}";
 int32_t status = wayfarer_route(package, request, &text);
 printf("%s\n", text);                              /* route, or error, as JSON */
@@ -103,8 +103,10 @@ Version 0.x for the crate; the C interface is versioned on its own.
   `wayfarer.h` changes incompatibly. Check `wayfarer_abi_version()` against
   the header you built with.
 - **Package format and costing model.** The library opens the formats reported
-  by `wayfarer_versions` (`readableFormats`) and only packages of its
-  own `costingModel`; other packages fail to open with a package error.
+  by `wayfarer_versions` (`readableFormats`), and packages of its own
+  `costingModel` or an older one (an older model's package is re-costed with
+  the library's model, slower until it is recompiled). Other packages fail to
+  open with a package error.
 - The JSON request and result shapes are the engine's types and follow the
   engine's compatibility, not the ABI version.
 
