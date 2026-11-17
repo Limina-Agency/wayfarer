@@ -626,6 +626,69 @@ pub fn profile_bit(profile: MobilityProfile) -> u8 {
     1 << profile_slot(profile)
 }
 
+/// What [`PackageFile::move_into_place`] puts before the unique part of the
+/// name of a package it moved aside.
+const REPLACED_INFIX: &str = ".replaced-";
+
+/// [`PackageFile::move_into_place`] when a rename over `path` failed: moves
+/// the package at `path` aside, `temp` into its place, and deletes the old
+/// one if nothing has it open any more. Puts the old one back if the second
+/// rename fails.
+fn move_into_place_aside(temp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(
+        "{REPLACED_INFIX}{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let aside = PathBuf::from(aside);
+    std::fs::rename(path, &aside)?;
+    if let Err(error) = std::fs::rename(temp, path) {
+        let _ = std::fs::rename(&aside, path);
+        return Err(error);
+    }
+    // Fails while an engine still has it mapped; a later call retries.
+    let _ = std::fs::remove_file(&aside);
+    Ok(())
+}
+
+/// Deletes the packages [`move_into_place_aside`] moved aside from `path`
+/// that nothing has open any more. Best effort: errors are ignored.
+fn remove_replaced(path: &Path) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!("{name}{REPLACED_INFIX}");
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(unique) = file_name
+            .to_str()
+            .and_then(|file_name| file_name.strip_prefix(&prefix))
+        else {
+            continue;
+        };
+        if !unique.is_empty()
+            && unique
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'-')
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// One section's size and hash, as the section table records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingPackageSection {
@@ -656,8 +719,11 @@ impl PackageFile {
     /// `Outdated`.
     pub fn open(path: &Path) -> Result<Self, RoutingPackageError> {
         let file = File::open(path)?;
-        // SAFETY: packages are written atomically (temp file + rename) and
-        // never modified in place; the mapping is validated before any use.
+        // SAFETY: packages are written atomically (temp file + rename, see
+        // `move_into_place`) and never modified in place; the mapping is
+        // validated before any use. `File::open` shares delete access on
+        // Windows, which lets a newer package be moved into place while this
+        // one stays mapped.
         let map = unsafe { Mmap::map(&file)? };
         Self::from_storage(Storage::Mapped(map))
     }
@@ -775,12 +841,42 @@ impl PackageFile {
             let mut file = File::create(&temp)?;
             write(&mut file)?;
             file.sync_all()?;
-            std::fs::rename(&temp, path)
+            Self::move_into_place(&temp, path)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temp);
         }
         Ok(result?)
+    }
+
+    /// Moves a finished package from `temp` onto `path`, replacing the file
+    /// there even while it is open.
+    ///
+    /// A rename does that on Linux, macOS, and Windows on NTFS and ReFS
+    /// (std renames with POSIX semantics there): an engine that has the old
+    /// file open keeps reading it until it closes. Where Windows can't rename
+    /// with POSIX semantics (FAT32, exFAT, some network shares), a rename over
+    /// a memory-mapped package fails with "Access is denied". There the open
+    /// package is renamed aside instead to
+    /// `<name>.replaced-<unique>` (allowed: packages are opened with delete
+    /// sharing, see [`Self::open`]), the new one takes its place, and the old
+    /// one is deleted as soon as nothing has it open: at once if it can be,
+    /// otherwise by the next call for the same `path`. Between the two
+    /// renames `path` is briefly missing, so an open at that moment fails
+    /// with not found. A process that opened the package without delete
+    /// sharing (outside Wayfarer) still blocks the replacement.
+    pub fn move_into_place(temp: &Path, path: &Path) -> std::io::Result<()> {
+        remove_replaced(path);
+        match std::fs::rename(temp, path) {
+            Err(error)
+                if cfg!(windows)
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+                    && path.is_file() =>
+            {
+                move_into_place_aside(temp, path)
+            }
+            result => result,
+        }
     }
 
     fn from_storage(storage: Storage) -> Result<Self, RoutingPackageError> {
@@ -1765,13 +1861,13 @@ impl InEdgeBuffer {
 /// The edges into a node, each with its source, in ascending edge order
 /// ([`Sections::in_edges`]).
 pub enum InEdges {
-    /// At most [`IN_EDGES_INLINE`] in-edges.
+    /// At most `IN_EDGES_INLINE` (8) in-edges.
     Inline {
         items: [(u32, u32); IN_EDGES_INLINE],
         at: usize,
         len: usize,
     },
-    /// Derived, for a node with more than [`IN_EDGES_INLINE`] in-edges.
+    /// Derived, for a node with more than `IN_EDGES_INLINE` (8) in-edges.
     Spilled(std::vec::IntoIter<(u32, u32)>),
 }
 
@@ -3107,5 +3203,95 @@ mod shape_codec_tests {
         }
         assert!(worst <= FIXED_XYZ_MARGIN_M / 1.5, "{worst}");
         assert_eq!(fixed_xyz([1.0, -1.0, 0.0]), [i32::MAX, i32::MIN, 0]);
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The new package takes the path while the old one stays mapped and
+    /// readable; once it is unmapped, the next replacement leaves no file
+    /// behind. Through the rename on Linux and macOS, through the move aside
+    /// on Windows.
+    #[test]
+    fn a_mapped_package_is_replaced_and_keeps_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.mrt");
+        let temp = dir.path().join("routing.mrt.tmp");
+        std::fs::write(&path, b"old package").unwrap();
+        let file = File::open(&path).unwrap();
+        // SAFETY: the test changes the file only by renames.
+        let map = unsafe { Mmap::map(&file) }.unwrap();
+        drop(file);
+
+        std::fs::write(&temp, b"new package").unwrap();
+        PackageFile::move_into_place(&temp, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new package");
+        assert_eq!(&map[..], b"old package");
+
+        drop(map);
+        std::fs::write(&temp, b"newer package").unwrap();
+        PackageFile::move_into_place(&temp, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer package");
+        assert_eq!(names(dir.path()), ["routing.mrt"]);
+    }
+
+    /// The Windows fallback on its own, on any platform: the old file is
+    /// moved aside and deleted, or left for the next call while it is open.
+    #[test]
+    fn moving_aside_replaces_the_package_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.mrt");
+        let temp = dir.path().join("routing.mrt.tmp");
+        std::fs::write(&path, b"old package").unwrap();
+        let file = File::open(&path).unwrap();
+        // SAFETY: the test changes the file only by renames.
+        let map = unsafe { Mmap::map(&file) }.unwrap();
+
+        std::fs::write(&temp, b"new package").unwrap();
+        move_into_place_aside(&temp, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new package");
+        assert_eq!(&map[..], b"old package");
+        assert!(!temp.exists());
+
+        drop(map);
+        drop(file);
+        // Whatever the first call could not delete goes now.
+        std::fs::write(&temp, b"newer package").unwrap();
+        move_into_place_aside(&temp, &path).unwrap();
+        remove_replaced(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer package");
+        assert_eq!(names(dir.path()), ["routing.mrt"]);
+    }
+
+    /// Only names this module made for this path are deleted.
+    #[test]
+    fn cleanup_deletes_only_packages_moved_aside_from_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.mrt");
+        let kept = [
+            "other.mrt.replaced-12-34-0",
+            "routing.mrt.replaced-",
+            "routing.mrt.replaced-notes",
+            "routing.mrt.tmp",
+            "routing.mrt",
+        ];
+        for name in kept.iter().chain(&["routing.mrt.replaced-12-34-0"]) {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        remove_replaced(&path);
+        let mut kept = kept.map(str::to_string).to_vec();
+        kept.sort();
+        assert_eq!(names(dir.path()), kept);
     }
 }

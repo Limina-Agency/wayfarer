@@ -17,6 +17,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check.sh
 
+  deny:
+    # RustSec advisories, licenses (deny.toml, in step with about.toml),
+    # banned crates and sources.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   check-windows:
     # The workspace tests, the C library's compile calls and the Monaco
     # package on Windows: packages must be the same bytes there.

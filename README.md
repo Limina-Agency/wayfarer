@@ -16,9 +16,10 @@ connectivity, on roads that change by the hour.
   The compiler is a library: it runs inside your app's process (from Rust, or
   `wayfarer_compile_*` in the C library), with progress, cancellation, a
   thread budget and a low-memory profile. A region the size of Małopolskie
-  (194 MiB extract) compiles in about 7 s on an Apple-silicon Mac, faster
-  than Valhalla's tile build on the same machine, at a similar memory peak
-  (about 2 GiB).
+  (194 MiB extract) compiles in about 17 s with a memory peak of about
+  1.2 GiB on an 8-core laptop (Ryzen 7 5800H, 16 GB: 16.8–17.5 s and
+  1.13 GiB peak working set on Windows, 18.4 s and 1.17 GiB peak RSS under
+  WSL).
 - **Everything in-process.** No routing server, no sidecar, no tile folder:
   one file, memory-mapped, and one library call per request. The same
   package works on every platform: packages are byte-identical wherever and
@@ -49,7 +50,7 @@ overlap 0.97.
 - **Regions, not continents.** Wayfarer is built and measured on regional
   extracts: a province or a small country. Małopolskie (194 MiB extract,
   1.07 million nodes, 2.56 million edges) gives a 260 MiB package and needs
-  about 2 GiB to compile (`--low-memory` barely changes that at this size).
+  about 1.2 GiB to compile (`--low-memory` barely changes that at this size).
   Packages and compile memory grow with the road network; landmark distances
   are about a third of a package (34% on Małopolskie). Larger extracts are
   untested.
@@ -64,8 +65,13 @@ overlap 0.97.
 - **One region per package**, compiled whole: no incremental updates, no
   traffic data and no departure-time routing (conditional restrictions and
   overlay time windows are evaluated at one time per request).
-- **Windows can't replace an open package.** Compile to a new path and switch
-  the engine over (Linux and macOS replace it in place).
+- **Replacing an open package on FAT32 or exFAT leaves a file for a while.**
+  Where Windows can't rename with POSIX semantics (FAT32, exFAT, some
+  network shares), the open package is renamed aside to
+  `<name>.replaced-<unique>` and deleted once nothing has it open, at the
+  latest by the next replacement of the same path. On NTFS and ReFS, Linux
+  and macOS it is replaced in place. A process that opened the package
+  without delete sharing, outside Wayfarer, still blocks it.
 
 ## Crates
 
@@ -77,7 +83,7 @@ overlap 0.97.
 | `wayfarer-service` | Routing sources, readiness checks and route workflows (waypoints, direct legs) over the engine |
 | `wayfarer-ffi` | The C ABI (`include/wayfarer.h`): JSON requests and results |
 | `wayfarer-compiler` | The compiler library: `compile` a `CompileRequest`, with progress and cancellation, or poll a `CompileJob` |
-| `wayfarer-cli` | The `wayfarer` command line: `compile`, `info`, `verify` |
+| `wayfarer-cli` | The `wayfarer` command line: `compile`, `info`, `verify`, `route`, `matrix`, `isochrone`, `match`, `snap` |
 | `wayfarer-road-graph`, `wayfarer-line-network` | The compiler's road graph and line network |
 
 The compiler reads PBF through [`osm-pbf-ingest`](https://github.com/Limina-Agency/osm-pbf-ingest),
@@ -176,8 +182,11 @@ scripts/check.sh
 ```
 
 runs what CI runs: formatting, clippy (warnings are errors), tests, the Monaco
-package built, verified and described (checked against
-`fixtures/monaco-info.json`), and a route through the C ABI. `benchmarks/gates/` holds the change gates (byte-identical packages, identical
+package built, verified and described with the release CLI (checked against
+`fixtures/monaco-info.json`), a route, matrix and isochrone through the CLI, a
+route and cancelled routes through the C ABI (`wayfarer-ffi/examples/route.c`
+and `cancel.c`), and the Kraków centre regression gate.
+`benchmarks/gates/` holds the change gates (byte-identical packages, identical
 route, matrix and isochrone dumps, timings) on a Małopolskie extract; see
 `benchmarks/README.md`.
 

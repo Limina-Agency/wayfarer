@@ -190,7 +190,7 @@ pub struct RouteSarRelaxations {
 
 /// R1. `military` is relaxed only when listed; `private` or `customers`
 /// lift the destination-only confinement of the whole request (see
-/// [`lifts_destination_only`]).
+/// `lifts_destination_only`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", default)]

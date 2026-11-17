@@ -40,14 +40,55 @@ if (wayfarer_open("routing.mrt", NULL, &package, &text) != WAYFARER_OK) {
 wayfarer_string_free(text);               /* the package info */
 
 const char *request =
-    "{\"origin\": {\"lat\": 43.7397, \"lng\": 7.4275},"
-    " \"destination\": {\"lat\": 43.7290, \"lng\": 7.4160},"
+    "{\"locations\": [{\"point\": {\"lat\": 43.7397, \"lng\": 7.4275}},"
+    " {\"point\": {\"lat\": 43.7290, \"lng\": 7.4160}}],"
     " \"profile\": \"wheeled\"}";
 int32_t status = wayfarer_route(package, request, &text);
 printf("%s\n", text);                              /* route, or error, as JSON */
 wayfarer_string_free(text);
 wayfarer_close(package);
 ```
+
+On Windows, with MSVC (from a Developer Command Prompt), link the DLL's
+import library, or the static library with `/MD`:
+
+```bat
+cargo build --release -p wayfarer-ffi
+rem Against the DLL (wayfarer_ffi.dll next to route.exe at run time):
+cl wayfarer-ffi\examples\route.c /Iwayfarer-ffi\include target\release\wayfarer_ffi.dll.lib
+rem Static:
+cl /MD wayfarer-ffi\examples\route.c /Iwayfarer-ffi\include target\release\wayfarer_ffi.lib ^
+   ws2_32.lib userenv.lib ntdll.lib bcrypt.lib advapi32.lib
+route.exe routing.mrt 43.7397 7.4275 43.7290 7.4160
+```
+
+Link the static library with `/MD` (or `/MDd`), not `cl`'s default `/MT`:
+Rust's MSVC targets build against the DLL C runtime, so `/MT` puts two C
+runtimes in one program. A default build happens to link that way, but one
+that pulls in C code (zstd, through `wayfarer-road-graph`'s `snapshot`
+feature) fails with unresolved `__imp_clock`, `__imp__wassert` and
+`__imp_qsort_s`. A host that has to use `/MT` builds the library with
+`RUSTFLAGS="-C target-feature=+crt-static"`. The system libraries a static
+link needs are printed by
+`cargo rustc --release -p wayfarer-ffi --crate-type staticlib -- --print native-static-libs`.
+
+**Paths are UTF-8, also on Windows.** A Windows C program gets `argv` and
+the Win32 "A" functions' strings in the ANSI code page, which can't spell
+every path, and `wayfarer_open` then fails with "path is not UTF-8". Take
+the arguments from `wmain` and convert them with
+`WideCharToMultiByte(CP_UTF8, ...)`, as the examples do (with MinGW, link
+with `-municode`), or pass a `wchar_t` path to `wayfarer_open_w` or
+`wayfarer_verify_w` (Windows only).
+
+**Replacing a package that is open.** A compile, or any other package write
+through Wayfarer, writes `<path>.tmp` and moves it over the old file: an
+open handle keeps reading the old package and the next `wayfarer_open` gets
+the new one. Where Windows can't rename with POSIX semantics (FAT32,
+exFAT, some network shares), a rename over an open, memory-mapped package
+fails, so there the open package is renamed aside to
+`<path>.replaced-<unique>` and deleted once no handle has it open (at the
+latest by the next replacement). A host that downloads packages itself
+should do the same, or write each version to a new path and open that.
 
 Every string the library returns is freed with `wayfarer_string_free`,
 and a handle is closed only after every call on it has returned.
@@ -62,8 +103,10 @@ Version 0.x for the crate; the C interface is versioned on its own.
   `wayfarer.h` changes incompatibly. Check `wayfarer_abi_version()` against
   the header you built with.
 - **Package format and costing model.** The library opens the formats reported
-  by `wayfarer_versions` (`readableFormats`) and only packages of its
-  own `costingModel`; other packages fail to open with a package error.
+  by `wayfarer_versions` (`readableFormats`), and packages of its own
+  `costingModel` or an older one (an older model's package is re-costed with
+  the library's model, slower until it is recompiled). Other packages fail to
+  open with a package error.
 - The JSON request and result shapes are the engine's types and follow the
   engine's compatibility, not the ABI version.
 
