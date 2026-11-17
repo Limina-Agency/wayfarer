@@ -143,7 +143,7 @@ Each item is grounded in the current code; file paths are as of 0.1.3.
   (`RouteError`, `MobilityProfile`, `RouteManeuverKind`, …) is a breaking
   change waiting to happen. Mark result types and enums `#[non_exhaustive]`;
   build requests through constructors and builders.
-- **Flat root with ~110 re-exports** (`wayfarer/src/lib.rs`). Group into
+- **Flat root with ~125 re-exports** (`wayfarer/src/lib.rs`). Group into
   modules: `route`, `matrix`, `isochrone`, `matching`, `navigation`, `overlay`,
   `sar`, `package`. Keep a small prelude.
 - **`Route*` prefix on everything** (`RouteMatrixRequest`,
