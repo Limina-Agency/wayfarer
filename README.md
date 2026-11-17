@@ -64,8 +64,13 @@ overlap 0.97.
 - **One region per package**, compiled whole: no incremental updates, no
   traffic data and no departure-time routing (conditional restrictions and
   overlay time windows are evaluated at one time per request).
-- **Windows can't replace an open package.** Compile to a new path and switch
-  the engine over (Linux and macOS replace it in place).
+- **Replacing an open package on FAT32 or exFAT leaves a file for a while.**
+  Where Windows can't rename with POSIX semantics (FAT32, exFAT, some
+  network shares), the open package is renamed aside to
+  `<name>.replaced-<unique>` and deleted once nothing has it open, at the
+  latest by the next replacement of the same path. On NTFS and ReFS, Linux
+  and macOS it is replaced in place. A process that opened the package
+  without delete sharing, outside Wayfarer, still blocks it.
 
 ## Crates
 

@@ -1594,7 +1594,8 @@ pub(crate) fn write_package_for_job(
 const WRITE_CHUNK: usize = 4 << 20;
 
 /// Writes `writer` to `path` as [`PackageFile::write_encoded`] does (the same
-/// bytes, through `path.tmp`, synced, then renamed into place), reporting
+/// bytes, through `path.tmp`, synced, then moved into place with
+/// [`PackageFile::move_into_place`], which replaces an open package), reporting
 /// [`CompileStage::WritePackage`] and checking the job between chunks.
 /// On any error or cancel the `.tmp` file is removed and `path` is untouched.
 fn write_file(
@@ -1648,7 +1649,8 @@ fn write_file(
         if job.cancelled() {
             return Err(cancelled_error());
         }
-        std::fs::rename(&temp, path)?;
+        // Replaces a package that is open, on Windows too.
+        PackageFile::move_into_place(&temp, path)?;
         Ok(())
     })();
     if result.is_err() {
