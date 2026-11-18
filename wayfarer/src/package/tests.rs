@@ -7993,18 +7993,9 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
                                     actual.cost
                                 );
                                 assert_eq!(expected.edge_ids, actual.edge_ids, "{context}");
-                                let alternatives = |result: &LegResult| {
-                                    result
-                                        .alternatives
-                                        .iter()
-                                        .map(|alternative| alternative.edge_ids.clone())
-                                        .collect::<Vec<_>>()
-                                };
-                                assert_eq!(
-                                    alternatives(&expected),
-                                    alternatives(&actual),
-                                    "{context}"
-                                );
+                                // Alternatives differ by design: with potentials
+                                // they go through via edges (see
+                                // `via_alternatives_are_valid_routes_within_the_policy`).
                             }
                             (Err(expected), Err(actual)) => {
                                 // Visited counts differ by design.
@@ -8141,4 +8132,82 @@ fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_landmarks() {
         }
     }
     assert!(cells > 1_000, "only {cells} cells");
+}
+
+/// Via-edge alternatives (packages with CCH potentials): every alternative
+/// is a connected path (from any of the endpoints' candidates) that breaks no
+/// restriction, differs from the primary and the other alternatives, and
+/// keeps to the policy's sharing limit and (up to approach costs, which the
+/// policy counts and reported costs leave out) its cost limit.
+#[test]
+fn via_alternatives_are_valid_routes_within_the_policy() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (_, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let view = potentials.route_graph_view().routing_package().view();
+    let points = grid_points()
+        .into_iter()
+        .chain(many_grid_targets().into_iter().step_by(13))
+        .collect::<Vec<_>>();
+    let policy = crate::RouteAlternativePolicy {
+        requested_alternative_count: 2,
+        ..Default::default()
+    }
+    .normalized();
+    let mut found = 0usize;
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        for origin in &points {
+            for destination in &points {
+                if origin == destination {
+                    continue;
+                }
+                let Some(primary) = route(&potentials, *origin, *destination, profile, |request| {
+                    request.options.alternatives = policy;
+                }) else {
+                    continue;
+                };
+                let context = format!("{profile:?} {origin:?} -> {destination:?}");
+                let mut seen = vec![primary.edge_ids.clone()];
+                for alternative in &primary.alternatives {
+                    found += 1;
+                    assert!(
+                        !seen.contains(&alternative.edge_ids),
+                        "{context}: duplicate"
+                    );
+                    seen.push(alternative.edge_ids.clone());
+                    let edges = alternative
+                        .edge_ids
+                        .iter()
+                        .map(|id| view.edge_for_id(*id).expect("package edge"))
+                        .collect::<Vec<_>>();
+                    for pair in edges.windows(2) {
+                        assert_eq!(
+                            view.edge_target[pair[0] as usize],
+                            view.edge_source(pair[1] as usize),
+                            "{context}: not connected"
+                        );
+                    }
+                    assert!(
+                        view.restriction_violations(&edges, profile_bit(profile))
+                            .is_empty(),
+                        "{context}: breaks a restriction"
+                    );
+                    assert!(
+                        alternative.cost
+                            <= policy.max_cost_ratio * primary.cost * (1.0 + 1e-9) + 1.0,
+                        "{context}: cost {} against {}",
+                        alternative.cost,
+                        primary.cost
+                    );
+                    assert!(
+                        alternative.shared_edge_ratio <= policy.max_shared_edge_ratio + 1e-9,
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(found > 20, "only {found} alternatives");
 }

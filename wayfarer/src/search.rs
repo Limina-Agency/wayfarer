@@ -127,9 +127,27 @@ impl RoutingEngine {
             .map_err(|error| RouteFailure::new(error, RouteDiagnostics::default()))?;
         let correlated = self.correlate(&request)?;
         let route = self.search_correlated(&request, &correlated, total_started)?;
+        // The primary's compact edges (alternatives avoid them), for a plain
+        // package route.
+        let primary_compact = route
+            .steps
+            .is_empty()
+            .then(|| {
+                route
+                    .edge_indexes
+                    .iter()
+                    .map(|index| index.and_then(|index| u32::try_from(index).ok()))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
         let mut primary = self.build_result(&request, route, total_started)?;
         primary.alternatives = self
-            .find_alternatives(&request, &correlated, &mut primary)
+            .find_alternatives(
+                &request,
+                &correlated,
+                &mut primary,
+                primary_compact.as_deref(),
+            )
             .map_err(|error| RouteFailure::new(error, primary.diagnostics.clone()))?;
         // Alternatives that stopped are dropped, not reported: the request
         // still fails.
@@ -418,10 +436,17 @@ impl RoutingEngine {
         request: &LegRequest,
         correlated: &Correlated,
         primary: &mut LegResult,
+        primary_compact: Option<&[u32]>,
     ) -> Result<Vec<RouteAlternative>, RouteError> {
         let policy = request.options.alternatives.normalized();
         if policy.requested_alternative_count == 0 {
             return Ok(Vec::new());
+        }
+        if let Some(compact) = primary_compact
+            && let Some(alternatives) =
+                self.via_alternatives(request, correlated, primary, compact, &policy)?
+        {
+            return Ok(alternatives);
         }
 
         let mut alternatives = Vec::new();
@@ -555,6 +580,224 @@ impl RoutingEngine {
         Ok(alternatives)
     }
 
+    /// Alternatives through via edges (see `package::cch::via_candidates`):
+    /// the middles of plateaus, stretches on both the shortest-path tree from
+    /// the origin and the one to the destination, longest first. Each
+    /// candidate is routed as two searches meeting at the middle of its via
+    /// edge (so no turn is made there), then judged as the penalty method's
+    /// candidates are, against the primary and every alternative accepted
+    /// before it. `None` when the request is not a plain package route on a
+    /// package with CCH potentials (overlays, SAR relaxations): the penalty
+    /// method runs instead.
+    fn via_alternatives(
+        &self,
+        request: &LegRequest,
+        correlated: &Correlated,
+        primary: &mut LegResult,
+        primary_compact: &[u32],
+        policy: &RouteAlternativePolicy,
+    ) -> Result<Option<Vec<RouteAlternative>>, RouteError> {
+        /// Plateaus shorter than this share of the shortest distance are not
+        /// locally optimal enough to offer.
+        const MIN_PLATEAU: f64 = 0.15;
+        if request.options.dynamic_overlay.is_some()
+            || request.options.sar.is_some()
+            || primary_compact.len() < 3
+        {
+            return Ok(None);
+        }
+        let package = self.route_view().routing_package();
+        let graph = package.view();
+        let Some(potentials) = graph.cch else {
+            return Ok(None);
+        };
+        let handle =
+            package.request_column_sar(request.profile, &request.options.costing, true, None);
+        let column = handle.column(&graph);
+        let Some(plan) = crate::package::search::potential_plan(
+            graph,
+            &column,
+            &rustc_hash::FxHashMap::default(),
+            false,
+        ) else {
+            return Ok(None);
+        };
+        let source = graph.edge_target[primary_compact[0] as usize];
+        let target = graph.edge_source(primary_compact[primary_compact.len() - 1] as usize);
+        if source == target {
+            return Ok(None);
+        }
+        let excluded = primary_compact.iter().copied().collect();
+        let candidates = crate::package::cch::via_candidates(
+            &graph,
+            &potentials.topology,
+            plan.metric.metric(),
+            plan.metric.costs(),
+            source,
+            target,
+            policy.max_cost_ratio,
+            MIN_PLATEAU,
+            &excluded,
+        );
+
+        let mut alternatives = Vec::<RouteAlternative>::new();
+        let mut accepted_edges = Vec::<BTreeSet<u64>>::new();
+        let primary_edges = primary.edge_ids.iter().copied().collect::<BTreeSet<_>>();
+        let primary_warning_count =
+            warning_edge_count(&primary.edge_ids, &request.options.warning_edge_ids);
+        let total = |cost: f64, origin: &CorrelatedLocation, destination: &CorrelatedLocation| {
+            cost + approach_cost(origin, &correlated.origins)
+                + approach_cost(destination, &correlated.destinations)
+        };
+        let primary_total = total(primary.cost, &primary.origin, &primary.destination);
+        let mut half_request = request.clone();
+        half_request
+            .options
+            .alternatives
+            .requested_alternative_count = 0;
+        // Searches per request; candidates on a route already searched are
+        // skipped (they would find it again).
+        let attempts = policy.requested_alternative_count.saturating_mul(3).max(1) + 2;
+        let mut covered = rustc_hash::FxHashSet::<u32>::default();
+        for candidate in &candidates {
+            if primary.diagnostics.alternative_attempt_count >= attempts {
+                break;
+            }
+            if covered.contains(&candidate.edge) {
+                continue;
+            }
+            primary.diagnostics.alternative_attempt_count += 1;
+            let Some(record) = self
+                .route_view()
+                .edge_record_by_raw_edge_index(candidate.edge as usize)
+            else {
+                continue;
+            };
+            let via = via_location(&record, 0.5);
+            let first = self.search_correlated(
+                &half_request,
+                &Correlated {
+                    origins: correlated.origins.clone(),
+                    destinations: vec![via.clone()],
+                    diagnostics: correlated.diagnostics.clone(),
+                },
+                Instant::now(),
+            );
+            let second = self.search_correlated(
+                &half_request,
+                &Correlated {
+                    origins: vec![via],
+                    destinations: correlated.destinations.clone(),
+                    diagnostics: correlated.diagnostics.clone(),
+                },
+                Instant::now(),
+            );
+            let (Ok(first), Ok(second)) = (first, second) else {
+                primary.diagnostics.rejected_alternative_search_failed_count += 1;
+                continue;
+            };
+            let Some(route) = stitch_at_via(first, second, record.edge.edge_id) else {
+                primary.diagnostics.rejected_alternative_search_failed_count += 1;
+                continue;
+            };
+            // Two searches meeting mid-edge keep no restriction context
+            // across the via edge: drop a route that breaks a complex
+            // restriction there.
+            let compact = route
+                .edge_indexes
+                .iter()
+                .map(|index| index.and_then(|index| u32::try_from(index).ok()))
+                .collect::<Option<Vec<_>>>();
+            if let Some(edges) = &compact {
+                covered.extend(edges.iter().copied());
+            }
+            if compact.is_none_or(|edges| {
+                !graph
+                    .restriction_violations(&edges, crate::package::profile_bit(request.profile))
+                    .is_empty()
+            }) {
+                primary.diagnostics.rejected_alternative_search_failed_count += 1;
+                continue;
+            }
+            if route.edge_ids == primary.edge_ids
+                || alternatives
+                    .iter()
+                    .any(|alternative| alternative.edge_ids == route.edge_ids)
+            {
+                primary.diagnostics.rejected_alternative_duplicate_count += 1;
+                continue;
+            }
+            let pieces = self.traversed_pieces(&route);
+            let shared_edge_ratio = shared_length_ratio(&primary_edges, &pieces);
+            let shared_with_accepted = accepted_edges
+                .iter()
+                .map(|edges| shared_length_ratio(edges, &pieces))
+                .fold(0.0f64, f64::max);
+            let route_total = total(route.cost, &route.origin, &route.destination);
+            let cost_ratio = if primary_total > f64::EPSILON {
+                route_total / primary_total
+            } else {
+                1.0
+            };
+            let candidate_warning_count =
+                warning_edge_count(&route.edge_ids, &request.options.warning_edge_ids);
+            let warning_difference = primary_warning_count.saturating_sub(candidate_warning_count);
+            if shared_edge_ratio.max(shared_with_accepted) > policy.max_shared_edge_ratio {
+                primary.diagnostics.rejected_alternative_shared_edge_count += 1;
+                continue;
+            }
+            if cost_ratio > policy.max_cost_ratio {
+                primary.diagnostics.rejected_alternative_cost_ratio_count += 1;
+                continue;
+            }
+            if warning_difference < policy.minimum_warning_difference {
+                primary
+                    .diagnostics
+                    .rejected_alternative_warning_difference_count += 1;
+                continue;
+            }
+            let label = if candidate_warning_count < primary_warning_count {
+                RouteAlternativeLabel::Safer
+            } else if candidate_warning_count > 0 {
+                RouteAlternativeLabel::WarningBearing
+            } else {
+                RouteAlternativeLabel::Alternative
+            };
+            let (quality_score, quality_reasons) = route_alternative_quality(
+                shared_edge_ratio,
+                cost_ratio,
+                primary_warning_count,
+                candidate_warning_count,
+                warning_difference,
+                policy,
+            );
+            accepted_edges.push(route.edge_ids.iter().copied().collect());
+            let route = self
+                .build_result(request, route, Instant::now())
+                .map_err(|failure| failure.error)?;
+            primary.diagnostics.accepted_alternative_count += 1;
+            alternatives.push(RouteAlternative {
+                label,
+                edge_ids: route.edge_ids,
+                distance_m: route.distance_m,
+                cost: route.cost,
+                duration_s: route.duration_s,
+                shared_edge_ratio,
+                warning_edge_count: candidate_warning_count,
+                quality_score,
+                quality_reasons,
+                geometry: route.geometry,
+                legs: route.legs,
+                maneuvers: route.maneuvers,
+                diagnostics: route.diagnostics,
+            });
+            if alternatives.len() >= policy.requested_alternative_count {
+                break;
+            }
+        }
+        Ok(Some(alternatives))
+    }
+
     /// The pieces a found route traverses: (edge id, compact edge, fraction,
     /// length in metres), connectors with no compact edge.
     fn traversed_pieces(&self, route: &SearchRoute) -> Vec<(u64, Option<u32>, f64, f64)> {
@@ -650,6 +893,74 @@ impl RoutingEngine {
             })
             .sum()
     }
+}
+
+/// A location at `fraction` along a package edge, as a search endpoint (a
+/// via edge's middle).
+fn via_location(record: &GraphViewEdge, fraction: f64) -> CorrelatedLocation {
+    let (a, b) = (
+        GeoPoint::new(record.source.lat, record.source.lng),
+        GeoPoint::new(record.target.lat, record.target.lng),
+    );
+    CorrelatedLocation {
+        edge_id: record.edge.edge_id,
+        compact_edge: crate::types::CompactEdgeHint::of(record.raw_edge_index),
+        shared_edge_info_id: record.edge.shared_edge_info_id,
+        opposing_edge_id: record.edge.opposing_edge_id,
+        road_group_key: None,
+        same_road_candidate_count: 0,
+        source_node_id: record.source.id,
+        target_node_id: record.target.id,
+        snapped_point: GeoPoint::new(
+            a.lat + (b.lat - a.lat) * fraction,
+            a.lng + (b.lng - a.lng) * fraction,
+        ),
+        distance_m: 0.0,
+        fraction_along_edge: fraction,
+        heading_deg: None,
+        heading_delta_deg: None,
+        side: crate::types::CorrelationSide::Unknown,
+        component_size: None,
+        outbound_reach_edge_count: None,
+        inbound_reach_edge_count: None,
+        layer: None,
+        level: None,
+        score: 1.0,
+        score_breakdown: Default::default(),
+        confidence: 1.0,
+    }
+}
+
+/// One route from two searches that meet at the same point of edge `via`
+/// (the first ends there, the second starts there): `None` unless both are
+/// plain package routes through it.
+fn stitch_at_via(first: SearchRoute, second: SearchRoute, via: u64) -> Option<SearchRoute> {
+    if !first.steps.is_empty()
+        || !second.steps.is_empty()
+        || first.edge_ids.last() != Some(&via)
+        || second.edge_ids.first() != Some(&via)
+    {
+        return None;
+    }
+    let mut edge_ids = first.edge_ids;
+    edge_ids.extend_from_slice(&second.edge_ids[1..]);
+    let mut edge_indexes = first.edge_indexes;
+    edge_indexes.extend_from_slice(second.edge_indexes.get(1..)?);
+    let mut diagnostics = first.diagnostics;
+    diagnostics.visited_edge_count += second.diagnostics.visited_edge_count;
+    diagnostics.settled_node_count += second.diagnostics.settled_node_count;
+    diagnostics.search_duration_ns += second.diagnostics.search_duration_ns;
+    Some(SearchRoute {
+        origin: first.origin,
+        destination: second.destination,
+        edge_ids,
+        edge_indexes,
+        steps: Vec::new(),
+        distance_m: first.distance_m + second.distance_m,
+        duration_s: first.duration_s + second.duration_s,
+        cost: first.cost + second.cost,
+        diagnostics,
+    })
 }
 
 /// A route request's correlated endpoints and the diagnostics so far.

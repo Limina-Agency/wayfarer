@@ -83,6 +83,8 @@ pub struct PotentialStats {
 pub(crate) struct CchTopology {
     /// Node → rank.
     rank: Vec<u32>,
+    /// Rank → node.
+    node: Vec<u32>,
     /// By rank: upward arcs `first_up[x]..first_up[x + 1]`, heads by rank in
     /// ascending order.
     first_up: Vec<u32>,
@@ -855,8 +857,13 @@ impl CchTopology {
         stats.elimination_tree_height = depth.iter().copied().max().unwrap_or(0) as usize;
         stats.arc_count = arcs;
         stats.topology_ms = started.elapsed().as_secs_f64() * 1e3;
+        let mut node = vec![0u32; n];
+        for (v, r) in rank.iter().enumerate() {
+            node[*r as usize] = v as u32;
+        }
         let topology = Self {
             rank,
+            node,
             first_up,
             up_head,
             parent,
@@ -872,6 +879,7 @@ impl CchTopology {
 
     fn heap_bytes(&self) -> usize {
         4 * (self.rank.len()
+            + self.node.len()
             + self.first_up.len()
             + self.up_head.len()
             + self.parent.len()
@@ -1578,6 +1586,196 @@ fn exact_offsets(
         }
     }
     Some(offsets)
+}
+
+// -------------------------------------------------------------------------
+// One-to-all distances and via candidates (alternatives)
+// -------------------------------------------------------------------------
+
+impl CchTopology {
+    /// Node-level distances from `node` to every node (`reversed`: from every
+    /// node to `node`), by rank, in metric units (PHAST: the elimination-tree
+    /// search up from `node`, then one sweep down the ranks).
+    pub(crate) fn one_to_all(&self, metric: &CchMetric, node: u32, reversed: bool) -> Vec<f32> {
+        let n = self.rank.len();
+        // Forward: up the tree along arcs low → high (`up`), then down along
+        // high → low (`down`). Backward the other way round.
+        let (up_weights, down_weights) = if reversed {
+            (&metric.down, &metric.up)
+        } else {
+            (&metric.up, &metric.down)
+        };
+        let mut distance = vec![f32::INFINITY; n];
+        let mut space = Vec::new();
+        elimination_search(self, node, up_weights, &mut space);
+        for (x, d) in &space {
+            distance[*x as usize] = *d as f32;
+        }
+        // Every upward neighbour has a higher rank: one sweep down the
+        // ranks, in memory order.
+        for x in (0..n).rev() {
+            let arcs = self.first_up[x] as usize..self.first_up[x + 1] as usize;
+            let mut best = distance[x];
+            for (y, w) in self.up_head[arcs.clone()].iter().zip(&down_weights[arcs]) {
+                let value = distance[*y as usize] + *w;
+                if value < best {
+                    best = value;
+                }
+            }
+            distance[x] = best;
+        }
+        distance
+    }
+}
+
+/// A via edge for an alternative route: the middle of a plateau, a stretch
+/// of edges on both the shortest-path tree from the origin and the one to
+/// the destination (Bader et al.), so that the route through it is locally
+/// optimal over the plateau's length.
+/// Single-edge via candidates after the plateaus (see [`via_candidates`]).
+const VIA_FALLBACK_EDGES: usize = 24;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViaCandidate {
+    pub edge: u32,
+    /// Node-level cost of the route through the plateau (metric units).
+    pub cost: f64,
+    /// The plateau's length (metric units).
+    pub plateau: f64,
+}
+
+/// Via candidates between nodes `source` and `target` on `metric` (customized
+/// from per-edge `costs`), using none of the `excluded` edges, whose route
+/// costs at most `max_ratio * D` (`D` the shortest distance): first the
+/// plateaus at least `min_plateau * D` long, longest first; then, for short
+/// detours a plateau cannot catch (both trees may leave a short branch at
+/// its ends), up to [`VIA_FALLBACK_EDGES`] single edges by the cost of the
+/// route through them (plateau 0).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn via_candidates(
+    g: &Sections<'_>,
+    topology: &CchTopology,
+    metric: &CchMetric,
+    costs: &[f32],
+    source: u32,
+    target: u32,
+    max_ratio: f64,
+    min_plateau: f64,
+    excluded: &rustc_hash::FxHashSet<u32>,
+) -> Vec<ViaCandidate> {
+    let (from, to) = rayon::join(
+        || topology.one_to_all(metric, source, false),
+        || topology.one_to_all(metric, target, true),
+    );
+    let rank = &topology.rank;
+    let total = f64::from(from[rank[target as usize] as usize]);
+    if !total.is_finite() || total <= 0.0 {
+        return Vec::new();
+    }
+    let bound = (max_ratio * total) as f32;
+    // f32 sums along the sweeps: equal within a few ulps of the distance.
+    let tolerance = |value: f32| 1e-5 * value.max(1.0) + 1e-5;
+    let inside = |node: u32| {
+        let r = rank[node as usize] as usize;
+        from[r] + to[r] <= bound
+    };
+    // Plateau edges: (tail, edge, head), on both trees.
+    let plateau = (0..g.node_count)
+        .into_par_iter()
+        .filter(|r| from[*r] + to[*r] <= bound)
+        .filter_map(|ru| {
+            let u = topology.node[ru];
+            (g.first_out[u as usize]..g.first_out[u as usize + 1]).find_map(|e| {
+                let w = g.edge_target[e as usize];
+                let c = costs[e as usize];
+                if w == u || !c.is_finite() || !inside(w) {
+                    return None;
+                }
+                let rw = rank[w as usize] as usize;
+                let on_from = (from[ru] + c - from[rw]).abs() <= tolerance(from[rw]);
+                let on_to = (to[rw] + c - to[ru]).abs() <= tolerance(to[ru]);
+                (on_from && on_to).then_some((u, e, w))
+            })
+        })
+        .collect::<Vec<_>>();
+    let next = plateau
+        .iter()
+        .map(|(u, e, w)| (*u, (*e, *w)))
+        .collect::<FxHashMap<_, _>>();
+    let heads = plateau
+        .iter()
+        .map(|(_, _, w)| *w)
+        .collect::<rustc_hash::FxHashSet<_>>();
+    let mut candidates = Vec::new();
+    let mut seen = rustc_hash::FxHashSet::default();
+    for (start, _, _) in &plateau {
+        if heads.contains(start) || !seen.insert(*start) {
+            continue;
+        }
+        let mut chain = Vec::new();
+        let mut node = *start;
+        while let Some((edge, head)) = next.get(&node) {
+            chain.push((*edge, *head));
+            if !seen.insert(*head) {
+                break;
+            }
+            node = *head;
+        }
+        if chain.iter().any(|(edge, _)| excluded.contains(edge)) {
+            continue;
+        }
+        let rs = rank[*start as usize] as usize;
+        let length = f64::from(from[rank[node as usize] as usize] - from[rs]);
+        if length < min_plateau * total {
+            continue;
+        }
+        let middle = f64::from(from[rs]) + length / 2.0;
+        let edge = chain
+            .iter()
+            .find(|(_, head)| f64::from(from[rank[*head as usize] as usize]) >= middle)
+            .map_or(chain[0].0, |(edge, _)| *edge);
+        candidates.push(ViaCandidate {
+            edge,
+            cost: f64::from(from[rs] + to[rs]),
+            plateau: length,
+        });
+    }
+    candidates.sort_by(|a, b| {
+        b.plateau
+            .total_cmp(&a.plateau)
+            .then(a.cost.total_cmp(&b.cost))
+            .then(a.edge.cmp(&b.edge))
+    });
+    // Single edges: the cheapest routes through an edge off the primary.
+    let mut singles = (0..g.node_count)
+        .into_par_iter()
+        .filter(|r| from[*r] + to[*r] <= bound)
+        .flat_map_iter(|ru| {
+            let u = topology.node[ru];
+            let (from, to) = (&from, &to);
+            (g.first_out[u as usize]..g.first_out[u as usize + 1]).filter_map(move |e| {
+                let w = g.edge_target[e as usize];
+                let c = costs[e as usize];
+                if w == u || !c.is_finite() || excluded.contains(&e) {
+                    return None;
+                }
+                let cost = from[ru] + c + to[rank[w as usize] as usize];
+                (cost <= bound).then_some((cost, e))
+            })
+        })
+        .collect::<Vec<_>>();
+    let keep = VIA_FALLBACK_EDGES.min(singles.len());
+    if keep > 0 && keep < singles.len() {
+        singles.select_nth_unstable_by(keep - 1, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        singles.truncate(keep);
+    }
+    singles.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    candidates.extend(singles.into_iter().map(|(cost, edge)| ViaCandidate {
+        edge,
+        cost: f64::from(cost),
+        plateau: 0.0,
+    }));
+    candidates
 }
 
 /// Compares the potentials of every stored column, both directions, from

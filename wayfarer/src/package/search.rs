@@ -96,14 +96,14 @@ impl<'g> PotentialPlan<'g> {
 }
 
 impl PlanMetric<'_> {
-    fn metric(&self) -> &CchMetric {
+    pub(crate) fn metric(&self) -> &CchMetric {
         match self {
             Self::Stored(metric, _) => metric,
             Self::Own(own) => &own.metric,
         }
     }
 
-    fn costs(&self) -> &[f32] {
+    pub(crate) fn costs(&self) -> &[f32] {
         match self {
             Self::Stored(_, costs) => costs,
             Self::Own(own) => &own.costs,
@@ -182,10 +182,10 @@ pub(crate) fn potential_plan<'g>(
 
 /// How the CCH potentials bound a query (see [`potential_plan`]).
 pub(crate) struct PotentialPlan<'g> {
-    potentials: &'g CchPotentials,
-    metric: PlanMetric<'g>,
+    pub potentials: &'g CchPotentials,
+    pub metric: PlanMetric<'g>,
     /// Scales the stored column's metric to the query's costs.
-    factor: f64,
+    pub factor: f64,
     /// Whether the query's discount gates join the potentials.
     gated: bool,
     /// With gates: every edge costs at least `floor` times the scaled metric
