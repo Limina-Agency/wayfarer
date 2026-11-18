@@ -6,7 +6,7 @@
 //! (`build.rs`): global dense node and edge indexes, CSR adjacency in spatial
 //! (Hilbert) order, per-profile edge costs and durations precomputed with the
 //! costing policy for default options, the raw costing inputs every other
-//! option set is derived from (`columns.rs`), restrictions, landmarks, edge
+//! option set is derived from (`columns.rs`), restrictions, the CCH order, edge
 //! shapes, and the request sections endpoint correlation and route legs read
 //! (`request.rs`). Queries read it in place and decode nothing per request.
 //!
@@ -27,8 +27,6 @@
 pub(crate) mod cch;
 pub(crate) mod columns;
 pub(crate) mod destination;
-pub(crate) mod landmarks;
-pub(crate) mod profile_landmarks;
 pub(crate) mod request;
 pub(crate) mod restrictions;
 pub(crate) mod search;
@@ -82,15 +80,6 @@ impl RoutePackageMemoryProfile {
         }
     }
 
-    /// Landmark sets of derived metrics kept (`profile_landmarks`; about
-    /// 8 bytes per landmark and node each).
-    pub fn profile_landmark_capacity(self) -> usize {
-        match self {
-            Self::Desktop => 2,
-            Self::Mobile => 1,
-        }
-    }
-
     /// Threads a matrix searches its cells on; `None` uses the global pool.
     pub fn matrix_threads(self) -> Option<usize> {
         match self {
@@ -109,8 +98,6 @@ pub struct RoutingPackage {
     memory: RoutePackageMemoryProfile,
     state_pool: Mutex<Vec<SearchState>>,
     derived_columns: columns::DerivedColumnCache,
-    /// Landmarks of derived metrics (Emergency, Tracked), built on first use.
-    profile_landmarks: columns::ProfileLandmarkCache,
     /// Per profile slot, built on first use (see `restrictions`).
     complex_automata: [OnceLock<restrictions::ComplexAutomata>; PROFILE_SLOTS],
     /// The matrix thread pool of a bounded memory profile, built on first use.
@@ -121,8 +108,8 @@ pub struct RoutingPackage {
     recost: bool,
     /// Per profile slot, grouped on first use (see `destination`).
     destination_pockets: [OnceLock<destination::DestinationPockets>; PROFILE_SLOTS],
-    /// CCH lower-bound potentials, once [`RoutingPackage::prepare_potentials`]
-    /// built them.
+    /// CCH lower-bound potentials, built on first use (or by
+    /// [`RoutingPackage::prepare_potentials`]).
     cch: cch::CchCache,
 }
 
@@ -189,7 +176,7 @@ impl RoutingPackage {
         self.file.is_ready()
     }
     /// The SAR relaxations requests may use on this package, with the
-    /// least factors its landmark metric allows
+    /// least factors its bound metric allows
     /// (`RoutingPackageMetadata::sar`).
     pub fn sar_capability(&self) -> crate::sar::RouteSarCapability {
         crate::sar::RouteSarCapability::with_package_data(self.file.metadata().sar)
@@ -244,9 +231,6 @@ impl RoutingPackage {
             derived_columns: columns::DerivedColumnCache::with_capacity(
                 memory.derived_column_capacity(),
             ),
-            profile_landmarks: columns::ProfileLandmarkCache::with_capacity(
-                memory.profile_landmark_capacity(),
-            ),
             complex_automata: Default::default(),
             matrix_pool: OnceLock::new(),
             recost: model < wayfarer_costing::COSTING_MODEL_VERSION,
@@ -284,23 +268,21 @@ impl RoutingPackage {
         bytes
     }
 
-    /// Builds CCH lower-bound potentials for the stored cost columns: a
-    /// node order by nested dissection, its topology, and one metric per
-    /// stored column. Route searches use them in place of the landmarks
-    /// wherever a stored column bounds the request: the stored columns
-    /// themselves, the strict destination-only pass of a default drive, and
-    /// costing options that only raise or remove edges. Elsewhere (discounts,
-    /// opened edges, SAR openings, metrics of their own) they keep the
-    /// landmarks. Routes do not change: both bounds are exact, so only the
-    /// work a search does changes (visited and settled counts).
+    /// Builds the CCH lower-bound potentials route, matrix and overlay
+    /// searches bound with, if the first search has not already: the
+    /// topology of the package's stored node order and one metric per
+    /// stored cost column (profiles' own metrics are customized on first
+    /// use). Hosts call it, or [`Self::prefetch`], after opening a package
+    /// so that the first request does not wait for it.
     ///
-    /// This takes seconds on a regional package (about 3 s for Małopolskie,
-    /// 1.07 M nodes, on 16 threads) and holds the topology and metrics in
-    /// memory (about 135 MB there). Every pooled search state that uses them
+    /// This takes about 0.7 s on a regional package (Małopolskie, 1.07 M
+    /// nodes, on 16 threads) and holds the topology and metrics in memory
+    /// (about 135 MB there). Every pooled search state that uses them
     /// allocates 8 bytes per node of scratch on first use (16 with discount
-    /// gates; about 9 MB there). Searches running while it
-    /// builds use the landmarks. Later calls return at once. `None` when the
-    /// node graph is too large for the potentials' 31-bit arc ids.
+    /// gates; about 9 MB there). Later calls return at once. `None` when the
+    /// package stores no node order (written without one) or the node graph
+    /// is too large for the potentials' 31-bit arc ids: searches then bound
+    /// with the straight line alone.
     pub fn prepare_potentials(&self) -> Option<cch::PotentialStats> {
         let sections = self.file.view();
         self.cch
@@ -311,13 +293,10 @@ impl RoutingPackage {
     /// The sections, with the complex-restriction automata the searches build.
     pub(crate) fn view(&self) -> SearchGraph<'_> {
         let sections = self.file.view();
-        let cch = match crate::debug::potential() {
-            crate::debug::Potential::Alt => None,
-            // A package that stores its order (format 2) builds the
-            // potentials on first use; otherwise only once prepared.
-            crate::debug::Potential::Auto if sections.cch_rank.is_empty() => self.cch.get(),
-            crate::debug::Potential::Auto => self.cch.prepare(&sections),
-            crate::debug::Potential::Cch => self.cch.prepare(&sections),
+        let cch = if crate::debug::potentials_off() {
+            None
+        } else {
+            self.cch.prepare(&sections)
         };
         SearchGraph {
             sections,
@@ -374,9 +353,10 @@ pub(crate) struct SearchGraph<'g> {
     complex_automata: &'g [OnceLock<restrictions::ComplexAutomata>; PROFILE_SLOTS],
     /// A request's transition costs (barriers, a SAR request's R2 entry and
     /// R4 barriers), which [`SearchGraph::turn_cost`] adds; `None` outside a
-    /// request (landmarks, map matching).
+    /// request (map matching).
     pub(crate) transitions: Option<crate::transitions::Transitions>,
-    /// The package's CCH potentials, if prepared.
+    /// The package's CCH potentials (`None`: no stored order, or turned
+    /// off for a harness).
     pub(crate) cch: Option<&'g cch::CchPotentials>,
 }
 

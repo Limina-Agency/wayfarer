@@ -12,7 +12,6 @@ use crate::package::search::analysis::{
     overlay_split_costs, override_bounds, request_cost_overrides, request_duration_overrides,
     resolve_edge_id, resolve_location,
 };
-use crate::package::search::many_to_many::{ManyToManyInput, ManyToManyTuning, many_to_many};
 use crate::package::search::patch::{
     PatchCosts, PatchCounters, PatchGraph, PatchOutcome, PatchPath, PatchQuery, analysis_overlay,
     matrix_row as patch_row, run as run_patch,
@@ -207,9 +206,8 @@ impl RoutingEngine {
     /// row), only towards their flagged targets: each target's path is exact
     /// whatever the others, though between paths of exactly equal cost a
     /// differently focused expansion could label another first (none did in
-    /// the Krakow and Malopolskie matrices measured). Buckets size every
-    /// backward search from all the sources and search every row. The mode
-    /// is chosen from the whole matrix either way.
+    /// the Krakow and Malopolskie matrices measured). The mode is chosen
+    /// from the whole matrix either way.
     fn matrix_cells(
         &self,
         request: &RouteMatrixRequest,
@@ -331,19 +329,15 @@ impl RoutingEngine {
             }
             None => FxHashMap::default(),
         };
-        // Discounted edges and fragments become gates of the landmark bounds.
+        // Discounted edges and fragments become gates of the potentials.
         let bounds = override_bounds(view, column, &cost_overrides, &split_cost);
-        let (heuristic_cost_per_m, use_landmarks) =
-            (bounds.heuristic_cost_per_m, bounds.use_landmarks);
-        // Landmark bounds scaled for the overrides (the fallback only).
-        let column = bounds.column(column);
+        let heuristic_cost_per_m = bounds.heuristic_cost_per_m;
         let query = AnalysisQuery {
             column,
             profile_bit: profile_bit(request.profile),
             max_visited_edge_count: request.options.max_visited_edge_count,
             cancellation: &request.options.cancellation,
             cost_overrides,
-            use_landmarks,
             gates: bounds.gates.clone(),
             restriction_penalty: crate::sar::restriction_penalty(&request.options),
         };
@@ -366,9 +360,6 @@ impl RoutingEngine {
             },
             // The scaled fallback does not cover the patch's bounds at
             // virtual points, which go along edges at column cost.
-            landmarks: column
-                .landmarks
-                .filter(|_| use_landmarks && !bounds.fell_back()),
             potentials: !bounds.fell_back(),
             gates: &bounds.gates,
             profile_bit: profile_bit(request.profile),
@@ -471,60 +462,13 @@ impl RoutingEngine {
                 })
                 .collect::<Vec<_>>()
         };
-        let searchable_sources = sources.iter().filter(|points| !points.is_empty()).count();
         let mode = matrix_mode(
             request.profile,
-            searchable_sources,
             searchable_targets,
-            patch.is_some(),
-            query.restriction_penalty.is_some(),
             view.cch.is_some() && query.column.potential.is_some(),
         );
-        let rows = if mode == MatrixMode::Buckets {
-            // Many sources and targets: bounded backward searches from every
-            // target fill per-edge buckets, then one forward search per
-            // source joins them (`package::search::many_to_many`).
-            let input = ManyToManyInput {
-                sources: source_candidates,
-                source_points: &sources,
-                targets: target_candidates,
-                target_points: &targets,
-                connected: &connected,
-            };
-            let (rows, backward) = many_to_many(
-                graph,
-                view,
-                &query,
-                heuristic_cost_per_m,
-                &input,
-                ManyToManyTuning::from_env(),
-            );
-            let mut first = true;
-            rows.into_iter()
-                .map(|row| {
-                    row.map(|row| {
-                        // The backward searches count towards the first row.
-                        let (extra_visited, extra_settled) = if first {
-                            first = false;
-                            (backward.visited_edge_count, backward.settled_edge_count)
-                        } else {
-                            (0, 0)
-                        };
-                        MatrixRowCells {
-                            paths: row
-                                .paths
-                                .into_iter()
-                                .map(|path| path.map(compact_path))
-                                .collect(),
-                            budget_exceeded: row.budget_exceeded,
-                            visited_edge_count: row.counters.visited_edge_count + extra_visited,
-                            settled_edge_count: row.counters.settled_edge_count + extra_settled,
-                        }
-                    })
-                })
-                .collect::<Vec<_>>()
-        } else if mode == MatrixMode::Pairwise {
-            // Few targets: one bidirectional ALT search per cell. Each explores
+        let rows = if mode == MatrixMode::Pairwise {
+            // Few targets: one bidirectional A* search per cell. Each explores
             // little beyond the corridor between its two points, where a shared
             // one-to-many expansion has to cover a disc as wide as the costliest
             // target. Cells run in parallel.
@@ -748,8 +692,8 @@ impl RoutingEngine {
 ///
 /// Driving, a strict pass's cells also slow down as the matrix grows: every
 /// endpoint's destination-only pocket is unblocked for every cell, and each
-/// unblocked edge is a discount gate weakening the landmark bounds. Measured
-/// 2026-11-17 (square matrices of random road points, 16 threads, visited
+/// unblocked edge is a discount gate weakening the bounds. Measured
+/// 2026-11-17 with landmark bounds, which packages no longer have (square matrices of random road points, 16 threads, visited
 /// edges, rows with unreachable targets skipped): across Malopolskie rows
 /// and pairwise visit about as much at 50 points (305M and 292M) and rows a
 /// quarter as much at 64 (384M and 1,486M; 23 s and 62 s) and 80 (33 s and
@@ -764,23 +708,17 @@ const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 50;
 /// (`RoutingPackage::prepare_potentials`): a cell then searches a corridor,
 /// while a row still floods towards its farthest target. Measured
 /// 2026-11-18 on Malopolskie (16 threads, potentials prepared): pairwise
-/// against rows 0.66 s and 30 s at 50x50 (rows at 50: landmarks), 2.2 s and
+/// against rows 0.66 s and 30 s at 50x50, 2.2 s and
 /// 16 s at 100x100, 15.6 s and about 90 s at 250x250, and with Krakow points
 /// 0.53 s and 4.1 s at 100x100. On the small Krakow centre package rows stay
 /// a little cheaper (0.17 s and 0.22 s at 100, 1.1 s and 1.4 s at 250).
 const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE_POTENTIALS: usize = 400;
 
 /// The pairwise cut-off for `profile` (`potentials`: CCH potentials bound
-/// the cells); `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS` overrides it for every
-/// profile (for benchmarking).
+/// the cells); [`crate::debug::matrix_pairwise_max_targets`] overrides it
+/// for every profile.
 fn matrix_pairwise_max_targets(profile: MobilityProfile, potentials: bool) -> usize {
-    static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    let configured = *OVERRIDE.get_or_init(|| {
-        std::env::var("WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-    });
-    configured.unwrap_or(match profile {
+    crate::debug::matrix_pairwise_max_targets().unwrap_or(match profile {
         MobilityProfile::OnFoot | MobilityProfile::Legged => MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT,
         MobilityProfile::Default
         | MobilityProfile::Wheeled
@@ -801,75 +739,26 @@ pub(crate) enum MatrixMode {
     Pairwise,
     /// One shared expansion per source row.
     Rows,
-    /// Bucket-based many-to-many.
-    Buckets,
 }
 
-/// Vehicle matrices with at least this many searchable sources and more than
-/// this many targets use buckets (`package::search::many_to_many`).
-///
-/// Measured on Malopolskie (`examples/analysis_parity.rs`, process CPU, full
-/// matrices, 2026-10-09, load average 7-12): driving in Krakow, buckets take
-/// 24 s at 100x100 against 46 s pairwise and 111 s in rows, and 8.3 s at
-/// 50x50 against 11 s and 34 s, but 6.0 s at 25x25 against 3.2 s pairwise;
-/// across the region, 125 s at 100x100 against 176 s and 126 s, and 60 s at
-/// 50x50 against 58 s and 54 s. On foot rows stay cheapest (Krakow 50x50:
-/// 5.7 s rows, 7.5 s buckets, 25 s pairwise).
-const MATRIX_BUCKETS_MIN_SOURCES: usize = 32;
-const MATRIX_BUCKETS_MIN_TARGETS: usize = 32;
-/// Buckets are opt-in (`WAYFARER_MATRIX_MODE=buckets`) until every bucket
-/// cell is proven equal to its pairwise route. With labels per restriction
-/// state both are exact under complex restrictions (package landmark bounds
-/// are consistent, which makes the pairwise search's default stop exact),
-/// and on 2026-10-28 the Malopolskie region 100x100 drive matrix agreed on
-/// all 10,000 cells.
-const MATRIX_BUCKETS_BY_DEFAULT: bool = false;
-
-/// The search mode for a matrix; `WAYFARER_MATRIX_MODE`
-/// (`pairwise`/`rows`/`buckets`) forces one (for benchmarking; overlays never
-/// use buckets).
-/// `forward_only`: the request charges restriction penalties (SAR
-/// `turn_restrictions`), which the bucket joins do not, so it runs in rows
-/// like an overlay matrix.
-fn matrix_mode(
-    profile: MobilityProfile,
-    sources: usize,
-    targets: usize,
-    overlay: bool,
-    forward_only: bool,
-    potentials: bool,
-) -> MatrixMode {
-    static FORCED: std::sync::OnceLock<Option<MatrixMode>> = std::sync::OnceLock::new();
-    let forced =
-        *FORCED.get_or_init(
-            || match std::env::var("WAYFARER_MATRIX_MODE").ok()?.as_str() {
-                "pairwise" => Some(MatrixMode::Pairwise),
-                "rows" => Some(MatrixMode::Rows),
-                "buckets" => Some(MatrixMode::Buckets),
-                _ => None,
-            },
-        );
+/// The search mode for a matrix of `targets` searchable targets
+/// (`potentials`: CCH potentials bound the cells);
+/// [`crate::debug::matrix_mode`] forces one.
+fn matrix_mode(profile: MobilityProfile, targets: usize, potentials: bool) -> MatrixMode {
+    let forced = crate::debug::matrix_mode().and_then(|name| match name.as_str() {
+        "pairwise" => Some(MatrixMode::Pairwise),
+        "rows" => Some(MatrixMode::Rows),
+        _ => None,
+    });
     #[cfg(test)]
     let forced = test_mode::get().or(forced);
-    let vehicle = !matches!(profile, MobilityProfile::OnFoot | MobilityProfile::Legged);
-    let mode = forced.unwrap_or(
-        if MATRIX_BUCKETS_BY_DEFAULT
-            && vehicle
-            && sources >= MATRIX_BUCKETS_MIN_SOURCES
-            && targets > MATRIX_BUCKETS_MIN_TARGETS
-        {
-            MatrixMode::Buckets
-        } else if targets <= matrix_pairwise_max_targets(profile, potentials) {
+    forced.unwrap_or(
+        if targets <= matrix_pairwise_max_targets(profile, potentials) {
             MatrixMode::Pairwise
         } else {
             MatrixMode::Rows
         },
-    );
-    if (overlay || forward_only) && mode == MatrixMode::Buckets {
-        MatrixMode::Rows
-    } else {
-        mode
-    }
+    )
 }
 
 /// Tests: force a matrix mode on the current thread.

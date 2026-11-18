@@ -20,7 +20,7 @@
       "$ref": "#/$defs/CompileStage"
     },
     "stageFraction": {
-      "description": "The share of this stage done, 0 to 1, when the stage's size is known:\nblobs read in the ingest, steps of the graph and package builds,\nDijkstras for landmarks, bytes written.",
+      "description": "The share of this stage done, 0 to 1, when the stage's size is known:\nblobs read in the ingest, steps of the graph and package builds,\nbytes written.",
       "type": [
         "number",
         "null"
@@ -54,14 +54,14 @@
           "const": "finalize_graph"
         },
         {
-          "description": "Edge costs and the package's sections other than landmarks.",
+          "description": "Edge costs and the package's sections other than the node order.",
           "type": "string",
           "const": "build_package"
         },
         {
-          "description": "ALT landmarks for each profile column (none by default), then the\nnode order of CCH potentials.",
+          "description": "The node order of CCH potentials (nested dissection).",
           "type": "string",
-          "const": "landmarks"
+          "const": "cch_order"
         },
         {
           "description": "Checksums, the file written and synced, then reopened.",

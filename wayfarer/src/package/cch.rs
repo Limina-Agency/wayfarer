@@ -1,19 +1,12 @@
 //! CCH lower-bound potentials ("CH-potentials", Strasser and Zeitz) for the
 //! edge-based A* of `package::search`.
 //!
-//! Opt-in and built from an open package, with no format change
+//! Built from an open package on first use
 //! ([`RoutingPackage::prepare_potentials`](super::RoutingPackage::prepare_potentials)):
 //!
-//! 1. **Order.** The node-level graph (one undirected arc per node pair any
-//!    edge joins) loses its nodes of degree ≤ 2 first, iteratively (chains
-//!    and trees, each eliminated node adds at most one arc); the core left is
-//!    ordered by nested dissection with inertial flow (4 directions, 25 %
-//!    sources and sinks, unit-capacity max flow by Dinic, node separator from
-//!    the smaller side of the cut edges' endpoints), down to cells of
-//!    [`LEAF_CELL`] nodes ordered by minimum degree. Ties break on node ids,
-//!    so the order is deterministic on one platform. It uses floating-point
-//!    projections, so another platform may order differently: that changes
-//!    how many edges a search visits, never a route's cost.
+//! 1. **Order.** The package stores the node order (`Section::CchRank`, by
+//!    nested dissection of the node graph; see `wayfarer_package::cch_order`,
+//!    which the compiler runs).
 //! 2. **Topology.** For each node by rank, its lowest upward neighbour `u`
 //!    inherits its other upward neighbours; `u` is its elimination-tree
 //!    parent. Arcs are stored once (lower → higher rank) with a weight per
@@ -42,7 +35,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use wayfarer_package::cch_order::{NodeGraph, elimination_order, is_permutation};
+use wayfarer_package::cch_order::{NodeGraph, is_permutation};
 
 use super::Sections;
 use super::columns::MetricKey;
@@ -60,14 +53,6 @@ pub(crate) const POTENTIAL_MARGIN: f64 = 1.0 - 1e-9;
 #[non_exhaustive]
 pub struct PotentialStats {
     pub node_count: usize,
-    /// Whether the order came from the package (format 2) rather than being
-    /// computed at preparation.
-    pub stored_order: bool,
-    /// Nodes eliminated before the nested dissection (degree ≤ 2; 0 with a
-    /// stored order).
-    pub degree2_eliminated: usize,
-    /// The largest separator's node count.
-    pub top_separator: usize,
     pub arc_count: usize,
     /// Elimination-tree height: the largest upward search space.
     pub elimination_tree_height: usize,
@@ -169,18 +154,13 @@ impl CchPotentials {
     }
 }
 
-/// A package's potentials, once prepared.
+/// A package's potentials, built on first use.
 #[derive(Default)]
 pub(crate) struct CchCache {
     ready: OnceLock<Option<Arc<CchPotentials>>>,
 }
 
 impl CchCache {
-    /// The potentials, if prepared (and they fit: see [`CchTopology::build`]).
-    pub(crate) fn get(&self) -> Option<&Arc<CchPotentials>> {
-        self.ready.get().and_then(Option::as_ref)
-    }
-
     /// Builds the potentials on the first call; later calls return them.
     pub(crate) fn prepare(&self, g: &Sections<'_>) -> Option<&Arc<CchPotentials>> {
         self.ready
@@ -221,8 +201,9 @@ impl CchPotentials {
 // -------------------------------------------------------------------------
 
 impl CchTopology {
-    /// The order and topology of `g`'s node graph; `None` when the arcs
-    /// outgrow the 31-bit arc ids (far beyond a regional package).
+    /// The topology of `g`'s node graph in its stored order; `None` without
+    /// a stored order, or when the arcs outgrow the 31-bit arc ids (far
+    /// beyond a regional package).
     pub(crate) fn build(g: &Sections<'_>) -> Option<(Self, PotentialStats)> {
         let mut stats = PotentialStats {
             node_count: g.node_count,
@@ -230,20 +211,13 @@ impl CchTopology {
         };
         let started = Instant::now();
         let graph = NodeGraph::new(g.first_out, g.edge_target);
-        // The stored order (format 2), else one computed now.
-        let order = if g.cch_rank.len() == g.node_count && is_permutation(g.cch_rank) {
-            let mut order = vec![0u32; g.node_count];
-            for (node, r) in g.cch_rank.iter().enumerate() {
-                order[*r as usize] = node as u32;
-            }
-            stats.stored_order = true;
-            order
-        } else {
-            let (order, order_stats) = elimination_order(&graph, g.node_xyz_fixed);
-            stats.degree2_eliminated = order_stats.degree2_eliminated;
-            stats.top_separator = order_stats.top_separator;
-            order
-        };
+        if g.cch_rank.len() != g.node_count || !is_permutation(g.cch_rank) {
+            return None;
+        }
+        let mut order = vec![0u32; g.node_count];
+        for (node, r) in g.cch_rank.iter().enumerate() {
+            order[*r as usize] = node as u32;
+        }
         stats.order_ms = started.elapsed().as_secs_f64() * 1e3;
 
         let started = Instant::now();
@@ -782,8 +756,8 @@ pub(crate) struct PotentialGate {
 }
 
 /// CCH potentials for a request with discount gates (edges it makes cheaper
-/// than the stored metric bounds, or usable where it is not), as
-/// `search::gates` does for the landmarks.
+/// than the stored metric bounds, or usable where it is not; see
+/// `search::gates`).
 ///
 /// A path to the targets either uses no gate, and costs at least `pot(v)`,
 /// or reaches a first gate `e` at its node `u` through edges the metric

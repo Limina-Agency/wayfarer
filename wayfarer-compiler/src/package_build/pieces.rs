@@ -8,9 +8,8 @@
 //! its nodes of degree three or more are *junctions*. Removing the junctions
 //! splits the other nodes into *pieces*: a dead-end tree hanging off one
 //! junction, or a chain of degree-2 core nodes with the trees hanging off it,
-//! whose ends attach to one or two junctions (its *anchors*). This is the
-//! landmark classification (`landmarks::ColumnGraph`) on the stored column's
-//! own arcs rather than the landmark metric's.
+//! whose ends attach to one or two junctions (its *anchors*), over the stored
+//! column's own arcs.
 //!
 //! The search walks through a piece without queueing labels inside, which
 //! is exact where turning back inside it costs at least a U-turn and nothing

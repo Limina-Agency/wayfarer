@@ -130,7 +130,7 @@ The child writes one JSON object per line on stdout; every event carries
 | `event` | Fields | When |
 |---|---|---|
 | `ingest` | `stage` (the ingest pass: `ingest_pass1_index`, `ingest_pass2_ways`, `ingest_pass2_relations`), `batchesRead`, `objectsRead`, `message`, `fraction` (of the pass, or `null`), `percent` | While reading the extract |
-| `graph_progress` | `stage` (`finalize_graph`, `build_package`, `landmarks`, `write_package`), `rowsWritten`, `message`, `fraction` (of the stage, or `null`), `percent` | While building the graph and the package |
+| `graph_progress` | `stage` (`finalize_graph`, `build_package`, `cch_order`, `write_package`), `rowsWritten`, `message`, `fraction` (of the stage, or `null`), `percent` | While building the graph and the package |
 | `complete` | `graphNodeCount`, `directedEdgeCount`, `packageBytes`, `packageDatasetHash` | Last, on success (exit status 0) |
 | `error` | `message` | Last, on failure (exit status 1, or 130 when cancelled) |
 

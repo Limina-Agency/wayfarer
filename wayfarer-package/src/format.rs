@@ -17,28 +17,23 @@ compile_error!("the routing package format assumes a little-endian target");
 pub const MAGIC: &[u8; 8] = b"MRRPKG\0\x01";
 /// Bump whenever the layout or the meaning of any section changes.
 ///
-/// Format 2 adds [`Section::CchRank`], the node order of CCH potentials, at
-/// the end of the section table; format 1 packages (one section fewer, no
-/// order) still open.
+/// Format 2 added [`Section::CchRank`], the node order of CCH potentials, at
+/// the end of the section table, and stores no landmarks: format 1's
+/// landmark sections are [`Section::Reserved1`] to [`Section::Reserved12`],
+/// as a package without landmarks wrote them.
 pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 2;
 /// The oldest format this build still opens. A layout change bumps
 /// [`ROUTING_PACKAGE_FORMAT_VERSION`] and keeps reading the previous format
-/// for at least one release; raising this drops a format, which the release
-/// notes must say.
-pub const MIN_READ_FORMAT_VERSION: u32 = 1;
+/// for at least one release once packages are in use; raising this drops a
+/// format, which the release notes must say. Format 1 (landmark distances,
+/// no CCH order) is no longer read.
+pub const MIN_READ_FORMAT_VERSION: u32 = 2;
 pub const HEADER_FIXED_BYTES: usize = 256;
 pub const TABLE_ENTRY_BYTES: usize = 48;
 pub const SECTION_ALIGN: usize = 64;
 pub const PROFILE_SLOTS: usize = 6;
 pub const NO_COLUMN: u8 = u8::MAX;
 
-/// Unreachable (in the static graph, which only over-approximates reachability).
-pub const LANDMARK_INFINITY: u32 = u32::MAX;
-/// Finite but beyond the quantized range: the stored value is
-/// `min(D, LANDMARK_SATURATED)`, and bounds use it as a number. Landmark
-/// distances are `u32` whole quanta over `floor(c / q)` arcs, which makes the
-/// bounds consistent (see [`LandmarkTable`]).
-pub const LANDMARK_SATURATED: u32 = u32::MAX - 1;
 /// [`Section::EdgeTwin`] of an edge without a twin.
 pub const NO_TWIN: u32 = u32::MAX;
 
@@ -118,10 +113,17 @@ pub enum Section {
     ComplexPrefixStart,
     ComplexPrefixPool,
     EdgeProfileAccess,
-    LandmarkNode,
-    LandmarkScale,
-    LandmarkFrom,
-    LandmarkTo,
+    /// Reserved: held format 1's landmark distances. In format 2,
+    /// [`RESERVED_ZERO_SECTIONS`] hold `column_count * ceil(node_count / 64)`
+    /// zeros (the row bits and ranks of a package without landmarks) and the
+    /// other reserved sections are empty. A later format drops the slots.
+    Reserved1,
+    /// Reserved, empty (see [`Section::Reserved1`]).
+    Reserved2,
+    /// Reserved, empty (see [`Section::Reserved1`]).
+    Reserved3,
+    /// Reserved, empty (see [`Section::Reserved1`]).
+    Reserved4,
     ComplexFirst,
     ComplexByFirst,
     ShapeStart,
@@ -163,12 +165,10 @@ pub enum Section {
     /// Per edge, [`junction::encode`] of what a vehicle meets at the edge's
     /// end (traffic controls and priority).
     EdgeJunction,
-    /// `[column][node / 64]` bits, set where `LandmarkFrom` and `LandmarkTo`
-    /// store the node's row (see [`LandmarkRows`]).
-    LandmarkRowPresent,
-    /// `[column][node / 64]` rows stored before the word (all columns
-    /// counted).
-    LandmarkRowRank,
+    /// Reserved, zeros (see [`Section::Reserved1`]).
+    Reserved5,
+    /// Reserved, zeros (see [`Section::Reserved1`]).
+    Reserved6,
     /// The sorted nodes whose exact position `NodeLatLng` holds (the nodes
     /// that are not their E7 value).
     NodeLatLngNodes,
@@ -190,23 +190,18 @@ pub enum Section {
     BarrierClass,
     /// Their [`crate::barrier::BarrierAccess`] bits.
     BarrierAccess,
-    /// `[column][node / 64]` bits, set where the node's landmark distances
-    /// derive from one anchor's row (see [`LandmarkRows`]).
-    LandmarkOneAnchorPresent,
-    /// `[column][node / 64]` one-anchor records before the word (all columns
-    /// counted).
-    LandmarkOneAnchorRank,
-    /// Per one-anchor (column, node), `[anchor row, offset from the anchor,
-    /// offset to the anchor]` in whole quanta.
-    LandmarkOneAnchor,
-    /// As [`Section::LandmarkOneAnchorPresent`], for nodes whose distances
-    /// derive from two anchors.
-    LandmarkTwoAnchorPresent,
-    /// Two-anchor records before each word.
-    LandmarkTwoAnchorRank,
-    /// Per two-anchor (column, node), `[row a, row b, from a, to a, from b,
-    /// to b]`.
-    LandmarkTwoAnchor,
+    /// Reserved, zeros (see [`Section::Reserved1`]).
+    Reserved7,
+    /// Reserved, zeros (see [`Section::Reserved1`]).
+    Reserved8,
+    /// Reserved, empty (see [`Section::Reserved1`]).
+    Reserved9,
+    /// Reserved, zeros (see [`Section::Reserved1`]).
+    Reserved10,
+    /// Reserved, zeros (see [`Section::Reserved1`]).
+    Reserved11,
+    /// Reserved, empty (see [`Section::Reserved1`]).
+    Reserved12,
     /// Per node, its unit vector in fixed point ([`fixed_xyz`]).
     NodeXyzFixed,
     /// `[column][node / 64]` bits, set at the stored column's marked chain
@@ -229,22 +224,23 @@ pub enum Section {
     /// The end headings of the `LoneInEdge` edges, in its order.
     LoneHeadingEnd,
     /// Per node, its rank in the CCH elimination order
-    /// ([`crate::cch_order`]); empty when the package has no order (format
-    /// 1). Format 2 only.
+    /// ([`crate::cch_order`]); empty when the package was written without
+    /// one (searches then have no potentials).
     CchRank,
 }
 
 pub const SECTION_COUNT: usize = Section::CchRank as usize + 1;
 
-/// The sections a package of `version` lists: format 1 ends before
-/// [`Section::CchRank`].
-pub fn section_count(version: u32) -> usize {
-    if version >= 2 {
-        SECTION_COUNT
-    } else {
-        Section::CchRank as usize
-    }
-}
+/// The reserved sections format 2 fills with `column_count *
+/// ceil(node_count / 64)` zeros (see [`Section::Reserved1`]).
+pub const RESERVED_ZERO_SECTIONS: [Section; 6] = [
+    Section::Reserved5,
+    Section::Reserved6,
+    Section::Reserved7,
+    Section::Reserved8,
+    Section::Reserved10,
+    Section::Reserved11,
+];
 
 /// The [`Section::EdgeJunction`] byte: bits 0-2 the [`TrafficControl`] a
 /// vehicle meets on the edge before leaving it at its end, bit 3 set when the
@@ -298,10 +294,10 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     4, // ComplexPrefixStart
     4, // ComplexPrefixPool
     1, // EdgeProfileAccess (bit per profile slot: mobility mode mask overlap)
-    4, // LandmarkNode [column][landmark]
-    4, // LandmarkScale [column][landmark][from|to]
-    4, // LandmarkFrom [stored row][landmark] (rows: see LandmarkRows)
-    4, // LandmarkTo [stored row][landmark] (likewise)
+    4, // Reserved1 (empty)
+    4, // Reserved2 (empty)
+    4, // Reserved3 (empty)
+    4, // Reserved4 (empty)
     4, // ComplexFirst: first prefix edge per row of ComplexByFirst order
     4, // ComplexByFirst: complex rows sorted by first prefix edge
     4, // ShapeStart: byte offset of every SHAPE_START_STRIDEth shared-info shape in ShapeBytes, then its length
@@ -340,8 +336,8 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     4, // ModeMaskExceptions: (edge, mode mask) where profile bits do not rebuild it
     4, // TierExceptions: (edge, tier code) where the edge's tier is not its shared info's
     1, // EdgeJunction: `junction::encode` per edge
-    8, // LandmarkRowPresent: [column][node / 64] bits
-    4, // LandmarkRowRank: [column][node / 64] rows before the word
+    8, // Reserved5 (zeros)
+    4, // Reserved6 (zeros)
     4, // NodeLatLngNodes: sorted nodes with an exact position in NodeLatLng
     2, // SharedInfoCostTuple: costing tuple per shared info
     4, // SharedInfoWayWideShared: sorted shared infos with a wide way id
@@ -350,12 +346,12 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     4, // BarrierNode: sorted barrier nodes
     1, // BarrierClass: their `sar::SarBarrierClass` codes, 0 for none
     2, // BarrierAccess: their `barrier::BarrierAccess` bits
-    8, // LandmarkOneAnchorPresent: [column][node / 64] bits
-    4, // LandmarkOneAnchorRank: [column][node / 64] records before the word
-    4, // LandmarkOneAnchor: [record][anchor row, from offset, to offset]
-    8, // LandmarkTwoAnchorPresent: likewise for two anchors
-    4, // LandmarkTwoAnchorRank
-    4, // LandmarkTwoAnchor: [record][row a, row b, from a, to a, from b, to b]
+    8, // Reserved7 (zeros)
+    4, // Reserved8 (zeros)
+    4, // Reserved9 (empty)
+    8, // Reserved10 (zeros)
+    4, // Reserved11 (zeros)
+    4, // Reserved12 (empty)
     4, // NodeXyzFixed: [node][x, y, z] unit vector times 2^31
     8, // PieceChain: [column][node / 64] marked chain nodes
     8, // PieceTree: [column][node / 64] marked tree nodes
@@ -395,10 +391,10 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "ComplexPrefixStart",
     "ComplexPrefixPool",
     "EdgeProfileAccess",
-    "LandmarkNode",
-    "LandmarkScale",
-    "LandmarkFrom",
-    "LandmarkTo",
+    "Reserved1",
+    "Reserved2",
+    "Reserved3",
+    "Reserved4",
     "ComplexFirst",
     "ComplexByFirst",
     "ShapeStart",
@@ -437,8 +433,8 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "ModeMaskExceptions",
     "TierExceptions",
     "EdgeJunction",
-    "LandmarkRowPresent",
-    "LandmarkRowRank",
+    "Reserved5",
+    "Reserved6",
     "NodeLatLngNodes",
     "SharedInfoCostTuple",
     "SharedInfoWayWideShared",
@@ -447,12 +443,12 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "BarrierNode",
     "BarrierClass",
     "BarrierAccess",
-    "LandmarkOneAnchorPresent",
-    "LandmarkOneAnchorRank",
-    "LandmarkOneAnchor",
-    "LandmarkTwoAnchorPresent",
-    "LandmarkTwoAnchorRank",
-    "LandmarkTwoAnchor",
+    "Reserved7",
+    "Reserved8",
+    "Reserved9",
+    "Reserved10",
+    "Reserved11",
+    "Reserved12",
     "NodeXyzFixed",
     "PieceChain",
     "PieceTree",
@@ -509,7 +505,8 @@ pub struct RoutingPackageMetadata<Q = PackageQuality> {
     /// (`wayfarer_costing::COSTING_MODEL_VERSION`).
     pub costing_model_version: u32,
     /// The package's SAR data (the physical graph, legal reasons and barrier
-    /// nodes, see [`crate::sar`]): the landmark metric's minimum surcharges.
+    /// nodes, see [`crate::sar`]): the minimum factors of the SAR
+    /// relaxations, which the bound metrics of SAR columns use.
     pub sar: crate::sar::SarPackageInfo,
 }
 
@@ -579,7 +576,6 @@ pub struct PackageCounts {
     pub simple_restriction_count: usize,
     pub complex_restriction_count: usize,
     pub column_count: usize,
-    pub landmark_count: usize,
 }
 
 /// How derivable per-element data is stored; kept in the header.
@@ -596,6 +592,8 @@ pub struct PackageLayout {
 // Header layout (little endian).
 pub const HEADER_VERSION: usize = 8;
 pub const HEADER_SECTION_COUNT: usize = 12;
+/// Six counts as u64 (see [`PackageCounts`]), then a reserved u64 (format
+/// 1's landmark count), zero.
 pub const HEADER_COUNTS: usize = 16; // 7 x u64
 pub const HEADER_LAYOUT_FLAGS: usize = 72;
 pub const HEADER_EDGE_ID_BASE: usize = 80;
@@ -966,7 +964,6 @@ impl PackageFile {
         };
         let lat_lng = self.slice::<f64>(Section::NodeLatLng).len();
         self.check_piece_kinds()?;
-        let landmark_rows = self.landmark_rows_stored()?;
         // Costing inputs per costing tuple.
         let cost_rows = self.slice::<u8>(Section::SharedInfoCostFlags).len();
         // Name and ref tokens per attribute class (classes are checked
@@ -975,6 +972,7 @@ impl PackageFile {
             .slice::<u32>(Section::AttrClassStart)
             .len()
             .saturating_sub(1);
+        let reserved_words = c.column_count.checked_mul(c.node_count.div_ceil(64));
         let fixed = [
             (Section::NodeFirstOut, plus_one(c.node_count)),
             (Section::NodeXyzFixed, mul(c.node_count, 3)),
@@ -1005,13 +1003,18 @@ impl PackageFile {
             ),
             (Section::EdgeTwin, Some(c.edge_count)),
             (Section::EdgeProfileAccess, Some(c.edge_count)),
-            (Section::LandmarkNode, mul(c.column_count, c.landmark_count)),
-            (
-                Section::LandmarkScale,
-                mul(c.column_count, c.landmark_count).and_then(|n| mul(n, 2)),
-            ),
-            (Section::LandmarkFrom, mul(landmark_rows, c.landmark_count)),
-            (Section::LandmarkTo, mul(landmark_rows, c.landmark_count)),
+            (Section::Reserved1, Some(0)),
+            (Section::Reserved2, Some(0)),
+            (Section::Reserved3, Some(0)),
+            (Section::Reserved4, Some(0)),
+            (Section::Reserved5, reserved_words),
+            (Section::Reserved6, reserved_words),
+            (Section::Reserved7, reserved_words),
+            (Section::Reserved8, reserved_words),
+            (Section::Reserved9, Some(0)),
+            (Section::Reserved10, reserved_words),
+            (Section::Reserved11, reserved_words),
+            (Section::Reserved12, Some(0)),
             (Section::ComplexFirst, Some(c.complex_restriction_count)),
             (Section::ComplexByFirst, Some(c.complex_restriction_count)),
             (
@@ -1031,6 +1034,14 @@ impl PackageFile {
             .any(|(section, count)| !expect(*section, *count))
         {
             return invalid("section length does not match header counts");
+        }
+        if RESERVED_ZERO_SECTIONS.iter().any(|section| {
+            let (offset, len) = self.sections[*section as usize];
+            self.storage.bytes()[offset..offset + len]
+                .iter()
+                .any(|byte| *byte != 0)
+        }) {
+            return invalid("reserved section is not zero");
         }
         let nodes = self.slice::<u32>(Section::NodeLatLngNodes);
         if lat_lng != nodes.len() * 2
@@ -1154,19 +1165,9 @@ impl PackageFile {
         if !non_negative(Section::EdgeCost)
             || !non_negative(Section::EdgeDuration)
             || !finite(Section::EdgeLength)
-            || !finite(Section::LandmarkScale)
             || !self.heuristic_cost_per_m.iter().all(|v| *v >= 0.0)
         {
             return invalid("edge costs, durations, lengths or bound factors are invalid");
-        }
-        // Engines index node arrays with the landmark nodes (a profile's own
-        // landmarks are searched from them at query time).
-        if self
-            .slice::<u32>(Section::LandmarkNode)
-            .iter()
-            .any(|v| *v >= n)
-        {
-            return invalid("landmark node out of range");
         }
         // The lookup is built on first use: the ids must be distinct, and
         // span no more than the compiler allows.
@@ -1413,101 +1414,6 @@ impl PackageFile {
         Ok(())
     }
 
-    /// Landmark rows: checks the presence bits and their rank
-    /// counts, the anchored nodes' bits, ranks and records (disjoint from the
-    /// stored rows and each other, anchors among the column's stored rows),
-    /// and returns how many rows `LandmarkFrom` and `LandmarkTo` hold.
-    fn landmark_rows_stored(&self) -> Result<usize, RoutingPackageError> {
-        let c = self.counts;
-        let invalid = || RoutingPackageError::Invalid("landmark rows are invalid".into());
-        let words = c.node_count.div_ceil(64);
-        let tail = c.node_count % 64;
-        // Bits and ranks of one kind: the number of (column, node)s set.
-        let counted = |present: &[u64], rank: &[u32]| {
-            if Some(present.len()) != c.column_count.checked_mul(words)
-                || rank.len() != present.len()
-            {
-                return Err(invalid());
-            }
-            let mut count = 0usize;
-            for (index, (bits, before)) in present.iter().zip(rank).enumerate() {
-                let last = index % words == words - 1;
-                if *before as usize != count || (last && tail != 0 && bits >> tail != 0) {
-                    return Err(invalid());
-                }
-                count += bits.count_ones() as usize;
-            }
-            if count > u32::MAX as usize {
-                return Err(invalid());
-            }
-            Ok(count)
-        };
-        let present = self.slice::<u64>(Section::LandmarkRowPresent);
-        let rows = counted(present, self.slice::<u32>(Section::LandmarkRowRank))?;
-        let one_present = self.slice::<u64>(Section::LandmarkOneAnchorPresent);
-        let two_present = self.slice::<u64>(Section::LandmarkTwoAnchorPresent);
-        let one = self.slice::<u32>(Section::LandmarkOneAnchor);
-        let two = self.slice::<u32>(Section::LandmarkTwoAnchor);
-        let ones = counted(
-            one_present,
-            self.slice::<u32>(Section::LandmarkOneAnchorRank),
-        )?;
-        let twos = counted(
-            two_present,
-            self.slice::<u32>(Section::LandmarkTwoAnchorRank),
-        )?;
-        if one.len() != ones * ONE_ANCHOR_WORDS || two.len() != twos * TWO_ANCHOR_WORDS {
-            return Err(invalid());
-        }
-        if present
-            .iter()
-            .zip(one_present)
-            .zip(two_present)
-            .any(|((a, b), c)| a & b != 0 || a & c != 0 || b & c != 0)
-        {
-            return Err(invalid());
-        }
-        // Anchors are stored rows of the record's own column (or none).
-        let rank = self.slice::<u32>(Section::LandmarkRowRank);
-        let column_start =
-            |column: usize| rank.get(column * words).map_or(rows, |rank| *rank as usize);
-        let (mut one_at, mut two_at) = (0usize, 0usize);
-        for column in 0..c.column_count {
-            let range = column_start(column)..column_start(column + 1);
-            let anchor_ok = |row: u32| row == NO_ANCHOR_ROW || range.contains(&(row as usize));
-            let words = column * words..(column + 1) * words;
-            let column_ones = one_present[words.clone()]
-                .iter()
-                .map(|bits| bits.count_ones() as usize)
-                .sum::<usize>();
-            let column_twos = two_present[words]
-                .iter()
-                .map(|bits| bits.count_ones() as usize)
-                .sum::<usize>();
-            for record in one[one_at * ONE_ANCHOR_WORDS..(one_at + column_ones) * ONE_ANCHOR_WORDS]
-                .as_chunks::<ONE_ANCHOR_WORDS>()
-                .0
-                .iter()
-            {
-                if !anchor_ok(record[0]) {
-                    return Err(invalid());
-                }
-            }
-            for record in two[two_at * TWO_ANCHOR_WORDS..(two_at + column_twos) * TWO_ANCHOR_WORDS]
-                .as_chunks::<TWO_ANCHOR_WORDS>()
-                .0
-                .iter()
-            {
-                if !anchor_ok(record[0]) || !anchor_ok(record[1]) {
-                    return Err(invalid());
-                }
-            }
-            one_at += column_ones;
-            two_at += column_twos;
-        }
-        Ok(rows)
-    }
-
     /// The format version in the file's header.
     pub fn format_version(&self) -> u32 {
         self.format_version
@@ -1612,10 +1518,6 @@ impl PackageFile {
             lone_in_present: self.slice(Section::LoneInPresent),
             lone_in_edge: self.slice(Section::LoneInEdge),
             edge_profile_access: self.slice(Section::EdgeProfileAccess),
-            landmark_node: self.slice(Section::LandmarkNode),
-            landmark_scale: self.slice(Section::LandmarkScale),
-            landmark_from: self.landmark_table(Section::LandmarkFrom),
-            landmark_to: self.landmark_table(Section::LandmarkTo),
             shape_start: self.slice(Section::ShapeStart),
             shape_bytes: self.slice(Section::ShapeBytes),
             exact_shape_shared: self.slice(Section::ExactShapeShared),
@@ -1642,7 +1544,6 @@ impl PackageFile {
             conditional_pool: self.slice(Section::ConditionalPool),
             string_start: self.slice(Section::StringStart),
             string_bytes: self.slice(Section::StringBytes),
-            landmark_count: self.counts.landmark_count,
             node_count: self.counts.node_count,
             edge_count: self.counts.edge_count,
         }
@@ -1652,26 +1553,6 @@ impl PackageFile {
         ClassTokens {
             tokens: self.slice(section),
             class: self.slice(Section::SharedAttrClass),
-        }
-    }
-
-    fn landmark_table(&self, section: Section) -> LandmarkTable<'_> {
-        LandmarkTable {
-            values: self.slice(section),
-            rows: LandmarkRows {
-                present: self.slice(Section::LandmarkRowPresent),
-                rank: self.slice(Section::LandmarkRowRank),
-                node_count: self.counts.node_count,
-                one_present: self.slice(Section::LandmarkOneAnchorPresent),
-                one_rank: self.slice(Section::LandmarkOneAnchorRank),
-                one: self.slice(Section::LandmarkOneAnchor),
-                two_present: self.slice(Section::LandmarkTwoAnchorPresent),
-                two_rank: self.slice(Section::LandmarkTwoAnchorRank),
-                two: self.slice(Section::LandmarkTwoAnchor),
-            },
-            landmark_count: self.counts.landmark_count,
-            first_row: 0,
-            direction: usize::from(section == Section::LandmarkTo),
         }
     }
 
@@ -1724,7 +1605,7 @@ pub fn parse_header(
             "routing package format {version}, this build reads formats {readable:?}"
         )));
     }
-    let listed = section_count(version);
+    let listed = SECTION_COUNT;
     if read_u32(HEADER_SECTION_COUNT) as usize != listed {
         return Err(invalid("unexpected section count"));
     }
@@ -1757,8 +1638,10 @@ pub fn parse_header(
         simple_restriction_count: count(3)?,
         complex_restriction_count: count(4)?,
         column_count: count(5)?,
-        landmark_count: count(6)?,
     };
+    if read_u64(HEADER_COUNTS + 6 * 8) != 0 {
+        return Err(invalid("reserved header count is not zero"));
+    }
     let layout = PackageLayout {
         node_e7_derived: read_u32(HEADER_LAYOUT_FLAGS) & LAYOUT_NODE_E7_DERIVED != 0,
         edge_id_base: read_u64(HEADER_EDGE_ID_BASE),
@@ -1864,11 +1747,6 @@ pub struct Sections<'g> {
     /// Their end headings.
     pub lone_heading_end: &'g [u16],
     pub edge_profile_access: &'g [u8],
-    /// `[column][landmark]`: the landmarks' nodes, in selection order.
-    pub landmark_node: &'g [u32],
-    pub landmark_scale: &'g [f32],
-    pub landmark_from: LandmarkTable<'g>,
-    pub landmark_to: LandmarkTable<'g>,
     /// Byte offsets of every [`SHAPE_START_STRIDE`]th shape in
     /// `shape_bytes`, then its length.
     pub shape_start: &'g [u32],
@@ -1901,7 +1779,6 @@ pub struct Sections<'g> {
     pub conditional_pool: &'g [u32],
     pub string_start: &'g [u32],
     pub string_bytes: &'g [u8],
-    pub landmark_count: usize,
     pub node_count: usize,
     pub edge_count: usize,
 }
@@ -2128,32 +2005,6 @@ fn chain_node_is_valid(
     true
 }
 
-/// `u32`s per record of [`Section::LandmarkOneAnchor`].
-pub const ONE_ANCHOR_WORDS: usize = 3;
-/// `u32`s per record of [`Section::LandmarkTwoAnchor`].
-pub const TWO_ANCHOR_WORDS: usize = 6;
-/// An anchor whose row is not stored (unreachable from and to every
-/// landmark), or the second anchor of a one-anchor node.
-pub const NO_ANCHOR_ROW: u32 = u32::MAX;
-
-/// A derived landmark distance: the least over the anchors of the anchor's
-/// stored distance plus the offset in the same direction, clamped to
-/// [`LANDMARK_SATURATED`]; [`LANDMARK_INFINITY`] when no anchor gives a
-/// finite one. `values` and `offsets` are per anchor (an unused anchor has
-/// an infinite value or offset). This is the value the compiler's floor
-/// Dijkstra stores (see [`LandmarkRows`]).
-#[inline]
-pub fn derived_landmark_value(values: [u32; 2], offsets: [u32; 2]) -> u32 {
-    let mut best = LANDMARK_INFINITY;
-    for (value, offset) in values.into_iter().zip(offsets) {
-        if value != LANDMARK_INFINITY && offset != LANDMARK_INFINITY {
-            let sum = (u64::from(value) + u64::from(offset)).min(u64::from(LANDMARK_SATURATED));
-            best = best.min(sum as u32);
-        }
-    }
-    best
-}
-
 /// A token per shared info, read as `tokens[shared]`: stored per attribute
 /// class (a shared info's name and ref are part of its class's key, so the
 /// class determines them).
@@ -2191,235 +2042,6 @@ impl<'g> RouteRefs<'g> {
         let row = self.class[shared] as usize;
         let (start, end) = (self.start[row] as usize, self.start[row + 1] as usize);
         &self.pool[start..end]
-    }
-}
-
-/// A landmark distance section: one row of `landmark_count` `u32` values per
-/// stored (column, node) row ([`LandmarkRows`]). A row that is not stored
-/// reads as [`LANDMARK_INFINITY`] for every landmark.
-/// An anchored row ([`LandmarkRow::Anchored`]) reads as
-/// [`derived_landmark_value`] of its anchors' rows in this table.
-#[derive(Clone, Copy)]
-pub struct LandmarkTable<'g> {
-    values: &'g [u32],
-    rows: LandmarkRows<'g>,
-    landmark_count: usize,
-    /// The row `values` starts at: 0 for a package section, the column's
-    /// first row for [`LandmarkTable::column_values`].
-    first_row: usize,
-    /// 0 for distances from the landmarks (`LandmarkFrom`), 1 towards them
-    /// (`LandmarkTo`): which offset of an anchored row applies.
-    direction: usize,
-}
-
-/// Where a (column, node)'s landmark distances are, from
-/// [`LandmarkRows::row`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LandmarkRow {
-    /// Not stored: unreachable from and to every landmark.
-    Absent,
-    /// A stored row of `LandmarkFrom` and `LandmarkTo`.
-    Stored(usize),
-    /// Derived from the stored rows of up to two anchors:
-    /// `rows` are the anchors' rows ([`NO_ANCHOR_ROW`] for none), and
-    /// `offsets[anchor][direction]` the whole quanta from the anchor to the
-    /// node (direction 0) and from the node to the anchor (1).
-    Anchored {
-        rows: [u32; 2],
-        offsets: [[u32; 2]; 2],
-    },
-}
-
-impl LandmarkRow {
-    /// The stored row, if the distances are stored.
-    #[inline]
-    pub fn stored(self) -> Option<usize> {
-        match self {
-            Self::Stored(row) => Some(row),
-            _ => None,
-        }
-    }
-
-    /// Whether the node has distances (stored or anchored).
-    #[inline]
-    pub fn is_present(self) -> bool {
-        self != Self::Absent
-    }
-}
-
-/// Which (column, node) rows the landmark tables store, shared by
-/// `LandmarkFrom` and `LandmarkTo`: only the rows of nodes that some landmark of the column reaches or is reached from: a landmark lies in
-/// its column's largest strongly connected component, so a node's row is
-/// finite for all landmarks or for none (the compiler checks it), and the
-/// rows infinite for all, in both directions, are left out. A bit per
-/// (column, node) marks the stored rows, and a rank count per 64-bit word
-/// gives a stored row's position with one popcount.
-///
-/// The tables also leave out the rows of nodes off the column's junctions
-/// (dead-end trees and degree-2 chains of the undirected graph of usable
-/// arcs): every path between such a node and a landmark outside its piece
-/// passes through one of the piece's at most two attachment junctions, its
-/// *anchors*, so the floor Dijkstra's distance is the least anchor distance
-/// plus the shortest floor path inside the piece. Bits per kind (one anchor or two) mark those
-/// nodes, and records hold the anchors' stored rows and the offsets.
-#[derive(Clone, Copy)]
-pub struct LandmarkRows<'g> {
-    /// `[column][node / 64]`.
-    present: &'g [u64],
-    /// `[column][node / 64]`: stored rows before the word.
-    rank: &'g [u32],
-    node_count: usize,
-    /// Anchored nodes (empty for rows held outside the package): bits,
-    /// ranks and records per kind, laid out as `present` and `rank`.
-    one_present: &'g [u64],
-    one_rank: &'g [u32],
-    one: &'g [u32],
-    two_present: &'g [u64],
-    two_rank: &'g [u32],
-    two: &'g [u32],
-}
-
-impl<'g> LandmarkRows<'g> {
-    /// Sparse rows held outside the package (a derived metric's own
-    /// landmarks), laid out as the package's: `present` and `rank` are
-    /// `[column][node / 64]`, `rank` counting the stored rows before each
-    /// word. No anchored nodes.
-    pub fn sparse(present: &'g [u64], rank: &'g [u32], node_count: usize) -> Self {
-        debug_assert_eq!(present.len(), rank.len());
-        Self {
-            present,
-            rank,
-            node_count,
-            one_present: &[],
-            one_rank: &[],
-            one: &[],
-            two_present: &[],
-            two_rank: &[],
-            two: &[],
-        }
-    }
-}
-
-impl LandmarkRows<'_> {
-    /// The rows of `column`: a column's stored rows are contiguous.
-    pub fn column_rows(&self, column: usize) -> std::ops::Range<usize> {
-        let words = self.node_count.div_ceil(64);
-        let start = |column: usize| match self.rank.get(column * words) {
-            Some(rank) => *rank as usize,
-            // Past the last column: the rows stored in all of them.
-            None => self
-                .rank
-                .last()
-                .zip(self.present.last())
-                .map_or(0, |(rank, bits)| {
-                    *rank as usize + bits.count_ones() as usize
-                }),
-        };
-        start(column)..start(column + 1)
-    }
-
-    /// Where (column, node)'s distances are: a stored row, anchors, or
-    /// nowhere (unreachable from and to every landmark).
-    #[inline]
-    pub fn row(&self, column: usize, node: u32) -> LandmarkRow {
-        let node = node as usize;
-        let word = column * self.node_count.div_ceil(64) + node / 64;
-        let bit = 1u64 << (node % 64);
-        let below = bit - 1;
-        let bits = self.present[word];
-        if bits & bit != 0 {
-            return LandmarkRow::Stored(
-                self.rank[word] as usize + (bits & below).count_ones() as usize,
-            );
-        }
-        if self.one_present.is_empty() {
-            return LandmarkRow::Absent;
-        }
-        let bits = self.one_present[word];
-        if bits & bit != 0 {
-            let at = (self.one_rank[word] as usize + (bits & below).count_ones() as usize)
-                * ONE_ANCHOR_WORDS;
-            let record = &self.one[at..at + ONE_ANCHOR_WORDS];
-            return LandmarkRow::Anchored {
-                rows: [record[0], NO_ANCHOR_ROW],
-                offsets: [[record[1], record[2]], [LANDMARK_INFINITY; 2]],
-            };
-        }
-        let bits = self.two_present[word];
-        if bits & bit != 0 {
-            let at = (self.two_rank[word] as usize + (bits & below).count_ones() as usize)
-                * TWO_ANCHOR_WORDS;
-            let record = &self.two[at..at + TWO_ANCHOR_WORDS];
-            return LandmarkRow::Anchored {
-                rows: [record[0], record[1]],
-                offsets: [[record[2], record[3]], [record[4], record[5]]],
-            };
-        }
-        LandmarkRow::Absent
-    }
-}
-
-impl<'g> LandmarkTable<'g> {
-    /// A table held outside the package for `column` only, over the
-    /// package's row layout: `values` holds `landmark_count` values per row
-    /// of [`LandmarkRows::column_rows`], in row order. Rows of other columns
-    /// must not be read through it.
-    pub fn column_values(
-        values: &'g [u32],
-        rows: LandmarkRows<'g>,
-        column: usize,
-        landmark_count: usize,
-    ) -> Self {
-        let range = rows.column_rows(column);
-        debug_assert_eq!(values.len(), range.len() * landmark_count);
-        Self {
-            values,
-            rows,
-            landmark_count,
-            first_row: range.start,
-            direction: 0,
-        }
-    }
-
-    /// The table's rows (the same for `LandmarkFrom` and `LandmarkTo`).
-    #[inline]
-    pub fn rows(&self) -> LandmarkRows<'g> {
-        self.rows
-    }
-
-    /// Landmark `landmark`'s value in stored row `row`.
-    #[inline]
-    fn stored(&self, row: usize, landmark: usize) -> u32 {
-        self.values[(row - self.first_row) * self.landmark_count + landmark]
-    }
-
-    /// Landmark `landmark`'s value at `row` (from [`LandmarkRows::row`]);
-    /// [`LANDMARK_INFINITY`] for a row that is not stored.
-    #[inline]
-    pub fn get(&self, row: LandmarkRow, landmark: usize) -> u32 {
-        match row {
-            LandmarkRow::Stored(row) => self.stored(row, landmark),
-            LandmarkRow::Absent => LANDMARK_INFINITY,
-            LandmarkRow::Anchored { rows, offsets } => {
-                let value = |anchor: u32| {
-                    if anchor == NO_ANCHOR_ROW {
-                        LANDMARK_INFINITY
-                    } else {
-                        self.stored(anchor as usize, landmark)
-                    }
-                };
-                derived_landmark_value(
-                    [value(rows[0]), value(rows[1])],
-                    [offsets[0][self.direction], offsets[1][self.direction]],
-                )
-            }
-        }
-    }
-
-    /// Landmark `landmark`'s value at `node` in `column`.
-    #[inline]
-    pub fn value(&self, column: usize, node: u32, landmark: usize) -> u32 {
-        self.get(self.rows.row(column, node), landmark)
     }
 }
 
@@ -3097,7 +2719,8 @@ impl PackageWriter {
             counts.simple_restriction_count,
             counts.complex_restriction_count,
             counts.column_count,
-            counts.landmark_count,
+            // Reserved (format 1's landmark count).
+            0,
         ];
         for (index, value) in values.iter().enumerate() {
             let at = HEADER_COUNTS + index * 8;
@@ -3117,11 +2740,19 @@ impl PackageWriter {
             let at = HEADER_HEURISTIC + slot * 8;
             header[at..at + 8].copy_from_slice(&value.to_le_bytes());
         }
-        Self {
+        let mut writer = Self {
             header,
             sections: (0..SECTION_COUNT).map(|_| None).collect(),
             sealed: OnceLock::new(),
+        };
+        let words = counts.column_count * counts.node_count.div_ceil(64);
+        for section in RESERVED_ZERO_SECTIONS {
+            match SECTION_ELEMENT_BYTES[section as usize] {
+                8 => writer.put(section, vec![0u64; words]),
+                _ => writer.put(section, vec![0u32; words]),
+            }
         }
+        writer
     }
 
     pub fn put<T: Pod + Send + Sync>(&mut self, section: Section, data: Vec<T>) {

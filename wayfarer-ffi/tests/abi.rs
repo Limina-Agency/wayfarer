@@ -50,8 +50,8 @@ fn versions_describe_the_library() {
     assert_eq!(wayfarer_abi_version(), 1);
     let versions = take(wayfarer_versions());
     assert_eq!(versions["abi"], 1);
-    assert_eq!(versions["readableFormats"][0], 1);
-    assert_eq!(versions["readableFormats"][1], 2);
+    // [min, max].
+    assert_eq!(versions["readableFormats"], serde_json::json!([2, 2]));
     assert_eq!(versions["costingModel"], 1);
 }
 

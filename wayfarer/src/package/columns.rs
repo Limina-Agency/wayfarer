@@ -13,21 +13,21 @@
 //! share one column. Columns are kept in a small LRU (its capacity is set by
 //! the package's memory profile).
 //!
-//! Landmarks stay lower bounds by scaling: with `r = min_e derived_e / base_e`
-//! over the edges the derived column can use, every derived path costs at
-//! least `r` times its base-column cost, so `r` times a base landmark bound
-//! is admissible (and consistent, since turn costs are unchanged). The bound
-//! is dropped when some edge is usable in the derived column but not in the
-//! base column, because landmark reachability would then be wrong.
+//! CCH potentials stay lower bounds by scaling: with `r = min_e derived_e /
+//! base_e` over the edges the derived column can use, every derived path
+//! costs at least `r` times its base-column cost, so `r` times a potential of
+//! the base column is admissible (and consistent, since turn costs are
+//! unchanged). The stored column cannot bound a derived column that can use
+//! an edge it cannot.
 //!
 //! Where that ratio is poor (Emergency and Tracked, whose tracks cost a
-//! fraction of Wheeled's), or the bound is dropped because a SAR column
-//! with R5 can use paths the stored landmarks were not built on, the
-//! column instead gets landmarks of its own metric, measured at first use
-//! from the same landmark nodes (`profile_landmarks`) and shared by every
-//! column of the same profile and costing options (the strict
-//! destination-only pass, SAR columns; R5 columns share a metric of their
-//! own, with every path at R5's package minimum factor).
+//! fraction of Wheeled's), or the stored column cannot bound the column at
+//! all (SAR relaxations open edges it cannot use), the column is bounded by
+//! potentials of its profile's own metric instead (see [`metric_costs`]),
+//! customized at first use and shared by every column of the same profile
+//! and costing options (the strict destination-only pass, SAR columns; R5
+//! columns share a metric of their own, with every path at R5's package
+//! minimum factor).
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -35,15 +35,13 @@ use std::time::Instant;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use super::landmarks::active_landmarks;
-use super::profile_landmarks::ProfileLandmarks;
 use super::{RoutingPackage, SearchGraph, chord_m, profile_bit, road_type_from_rank};
 use crate::costing::{
     CostingPolicy, EdgeCostClasses, EdgeCostDecision, EdgeCostFlags, EdgeCostInputs, JunctionDelay,
 };
 use crate::types::{MobilityProfile, RouteCostingOptions, RouteOptions};
 use wayfarer_package::RoadType;
-use wayfarer_package::format::{ColumnPieceKinds, LandmarkTable, PieceKind, PieceKinds};
+use wayfarer_package::format::{ColumnPieceKinds, PieceKind, PieceKinds};
 use wayfarer_package::sar::{
     ACCESS_VEHICLE_PHYSICAL, ACCESS_WRONG_WAY, LegalValue, SarEdgeRelaxations, SarPathClass,
     SarPathRelaxation,
@@ -52,17 +50,12 @@ use wayfarer_package::sar::{
 /// The SAR bits of an `EdgeProfileAccess` byte.
 const SAR_ACCESS_BITS: u8 = ACCESS_VEHICLE_PHYSICAL | ACCESS_WRONG_WAY;
 
-/// Safety margin on the landmark scale against rounding in f32 weights.
-const LANDMARK_SCALE_MARGIN: f64 = 1.0 - 1e-6;
+/// Safety margin on potential factors against rounding in f32 weights.
+const FACTOR_MARGIN: f64 = 1.0 - 1e-6;
 
-/// A derived column whose stored landmarks would be scaled below this gets
-/// landmarks of its own metric (see `profile_landmarks`).
-const OWN_LANDMARKS_BELOW_SCALE: f64 = 0.9;
-
-/// Landmarks measured for a derived metric: the first of the stored column's
-/// (they are kept in maxCover order). Measuring them is per-request work, so
-/// fewer than the package stores.
-pub(crate) const PROFILE_LANDMARK_COUNT: usize = 6;
+/// A derived column whose stored column's potentials would be scaled below
+/// this is bounded by its own metric's (see [`metric_costs`]).
+const OWN_METRIC_BELOW_FACTOR: f64 = 0.9;
 
 /// Borrowed view of one cost column, as the searches read it.
 #[derive(Clone, Copy)]
@@ -73,8 +66,6 @@ pub(crate) struct CostColumn<'c> {
     /// evaluated at the request's time; costs go through the searches' cost
     /// overrides).
     pub duration_overrides: Option<&'c FxHashMap<u32, f32>>,
-    /// Landmark tables usable as lower bounds for this column, if any.
-    pub landmarks: Option<LandmarkColumn<'c>>,
     /// Admissible cost per metre of straight-line distance.
     pub heuristic_cost_per_m: f64,
     /// The profile's junction delay model; `None` for walking profiles (see
@@ -94,22 +85,6 @@ pub(crate) enum PotentialBase {
     /// A profile's own metric (see [`metric_costs`]), customized on first
     /// use.
     Metric(MetricKey),
-}
-
-/// A landmark column: its tables (the package's, or a derived metric's over
-/// the package's rows of `column`) and per-(landmark, direction) quanta,
-/// already multiplied by the column's landmark scale.
-#[derive(Clone, Copy)]
-pub(crate) struct LandmarkColumn<'c> {
-    pub column: usize,
-    pub scales: &'c [f32],
-    pub from: LandmarkTable<'c>,
-    pub to: LandmarkTable<'c>,
-    /// Landmarks per row.
-    pub count: usize,
-    /// Landmarks a query bounds with: all of them for vehicles, fewer for
-    /// walkers (see `landmarks::active_landmarks`).
-    pub active: usize,
 }
 
 impl<'c> CostColumn<'c> {
@@ -140,26 +115,18 @@ impl<'c> CostColumn<'c> {
 pub(crate) struct DerivedColumn {
     cost: Vec<f32>,
     duration: Vec<f32>,
-    landmark_column: Option<usize>,
-    landmark_scales: Vec<f32>,
-    /// Whether the column's profile walks (see [`LandmarkColumn::active`]).
-    walking: bool,
-    /// Landmarks of the column's own metric, replacing the stored column's.
-    own_landmarks: Option<Arc<ProfileLandmarks>>,
     heuristic_cost_per_m: f64,
     junction: Option<JunctionDelay>,
-    /// Ratio by which landmark bounds are scaled (diagnostics).
-    pub landmark_scale: Option<f64>,
     /// Time spent deriving the column (diagnostics).
     pub build_ms: f64,
     /// The piece kinds the route search walks with (see [`ColumnMarks`]).
     marks: Option<ColumnMarks>,
     /// See [`CostColumn::potential`].
-    potential: Option<(PotentialBase, f64)>,
+    pub(crate) potential: Option<(PotentialBase, f64)>,
 }
 
 /// The piece kinds valid for a derived column: those of the stored column
-/// its landmarks come from (wheeled for vehicles, on-foot for walkers), less
+/// that bounds it (wheeled for vehicles, on-foot for walkers), less
 /// every piece that an edge the derived column opens touches.
 ///
 /// The walks (`search::Run::walk_forward`) rely only on what a marked node
@@ -244,8 +211,6 @@ pub(crate) enum ColumnHandle {
         column: usize,
         heuristic_cost_per_m: f64,
         junction: Option<JunctionDelay>,
-        /// Whether the profile walks (see [`LandmarkColumn::active`]).
-        walking: bool,
     },
     Derived(Arc<DerivedColumn>),
 }
@@ -257,21 +222,12 @@ impl ColumnHandle {
                 column,
                 heuristic_cost_per_m,
                 junction,
-                walking,
             } => {
                 let range = column * view.edge_count..(column + 1) * view.edge_count;
                 CostColumn {
                     cost: &view.edge_cost[range.clone()],
                     duration: &view.edge_duration[range],
                     duration_overrides: None,
-                    landmarks: (view.landmark_count > 0).then_some(LandmarkColumn {
-                        column: *column,
-                        scales: view.landmark_scale,
-                        from: view.landmark_from,
-                        to: view.landmark_to,
-                        count: view.landmark_count,
-                        active: active_landmarks(*walking, view.landmark_count),
-                    }),
                     heuristic_cost_per_m: *heuristic_cost_per_m,
                     junction: *junction,
                     potential: Some((PotentialBase::Stored(*column), 1.0)),
@@ -281,23 +237,6 @@ impl ColumnHandle {
                 cost: &derived.cost,
                 duration: &derived.duration,
                 duration_overrides: None,
-                landmarks: derived.landmark_column.map(|column| {
-                    let (from, to, count) = match &derived.own_landmarks {
-                        Some(own) => {
-                            let (from, to) = own.tables();
-                            (from, to, own.count)
-                        }
-                        None => (view.landmark_from, view.landmark_to, view.landmark_count),
-                    };
-                    LandmarkColumn {
-                        column,
-                        scales: &derived.landmark_scales,
-                        from,
-                        to,
-                        count,
-                        active: active_landmarks(derived.walking, count),
-                    }
-                }),
                 heuristic_cost_per_m: derived.heuristic_cost_per_m,
                 junction: derived.junction,
                 potential: derived.potential,
@@ -393,9 +332,9 @@ impl DerivedColumnCache {
     }
 }
 
-/// The metric a set of [`ProfileLandmarks`] was measured on: a profile under
-/// normalized costing options (without the evaluation time), with or without
-/// the paths R5 opens.
+/// A profile's own metric (see [`metric_costs`]): a profile under normalized
+/// costing options (without the evaluation time), with or without the paths
+/// R5 opens.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MetricKey {
     profile: MobilityProfile,
@@ -415,52 +354,6 @@ impl ColumnKey {
     }
 }
 
-/// Landmarks of derived metrics, least recently used first. A failed build
-/// (`None`) is kept too, so that it is not retried on every column.
-pub(crate) struct ProfileLandmarkCache {
-    entries: Mutex<Vec<(MetricKey, Option<Arc<ProfileLandmarks>>)>>,
-    capacity: usize,
-}
-
-impl ProfileLandmarkCache {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            entries: Mutex::new(Vec::new()),
-            capacity,
-        }
-    }
-
-    fn get(&self, key: &MetricKey) -> Option<Option<Arc<ProfileLandmarks>>> {
-        let mut entries = self.entries.lock().ok()?;
-        let position = entries.iter().position(|(entry, _)| entry == key)?;
-        let entry = entries.remove(position);
-        let landmarks = entry.1.clone();
-        entries.push(entry);
-        Some(landmarks)
-    }
-
-    fn insert(
-        &self,
-        key: MetricKey,
-        landmarks: Option<Arc<ProfileLandmarks>>,
-    ) -> Option<Arc<ProfileLandmarks>> {
-        let Ok(mut entries) = self.entries.lock() else {
-            return landmarks;
-        };
-        if let Some(existing) = entries.iter().find(|(entry, _)| *entry == key) {
-            return existing.1.clone();
-        }
-        if self.capacity == 0 {
-            return landmarks;
-        }
-        if entries.len() >= self.capacity {
-            entries.remove(0);
-        }
-        entries.push((key, landmarks.clone()));
-        landmarks
-    }
-}
-
 fn canonical(profile: MobilityProfile) -> MobilityProfile {
     match profile {
         MobilityProfile::Default => MobilityProfile::Wheeled,
@@ -468,14 +361,8 @@ fn canonical(profile: MobilityProfile) -> MobilityProfile {
     }
 }
 
-/// Whether `profile` walks: its queries bound with fewer landmarks (see
-/// [`LandmarkColumn::active`]).
-fn walking(profile: MobilityProfile) -> bool {
-    landmark_profile(profile) == MobilityProfile::OnFoot
-}
-
-/// The stored column whose landmarks a derived column of `profile` borrows.
-fn landmark_profile(profile: MobilityProfile) -> MobilityProfile {
+/// The profile whose stored column bounds a derived column of `profile`.
+fn bound_profile(profile: MobilityProfile) -> MobilityProfile {
     match canonical(profile) {
         MobilityProfile::OnFoot | MobilityProfile::Legged => MobilityProfile::OnFoot,
         _ => MobilityProfile::Wheeled,
@@ -529,67 +416,25 @@ impl RoutingPackage {
                 column,
                 heuristic_cost_per_m: self.file().heuristic_cost_per_m(profile),
                 junction: JunctionDelay::for_profile(profile),
-                walking: walking(profile),
             };
         }
         if let Some(column) = self.derived_columns.get(&key) {
             return ColumnHandle::Derived(column);
         }
-        let mut derived = derive_column(
-            &view,
-            key,
-            self.file().column_for(landmark_profile(profile)),
-        );
-        if wants_own_landmarks(&derived, key)
-            && let Some(own) = self.profile_landmarks(&view, key)
-        {
-            derived.adopt(&view, key, own);
-        }
+        let derived = derive_column(&view, key, self.file().column_for(bound_profile(profile)));
         if crate::debug::trace() {
             eprintln!(
-                "compact: derived {:?} column in {:.1} ms (landmark scale {:?}, own landmarks {}, k={:.4})",
-                key.profile,
-                derived.build_ms,
-                derived.landmark_scale,
-                derived.own_landmarks.is_some(),
-                derived.heuristic_cost_per_m
+                "compact: derived {:?} column in {:.1} ms (potentials {:?}, k={:.4})",
+                key.profile, derived.build_ms, derived.potential, derived.heuristic_cost_per_m
             );
         }
         ColumnHandle::Derived(self.derived_columns.insert(key, Arc::new(derived)))
     }
 
-    /// The landmarks of `key`'s metric, measured on a miss.
-    fn profile_landmarks(
-        &self,
-        view: &SearchGraph<'_>,
-        key: ColumnKey,
-    ) -> Option<Arc<ProfileLandmarks>> {
-        let metric = key.metric();
-        if let Some(landmarks) = self.profile_landmarks.get(&metric) {
-            return landmarks;
-        }
-        let column = self.file().column_for(landmark_profile(key.profile))?;
-        let costs = metric_costs(view, metric);
-        let landmarks =
-            ProfileLandmarks::build(view, &costs, column, PROFILE_LANDMARK_COUNT).map(Arc::new);
-        if crate::debug::trace()
-            && let Some(landmarks) = &landmarks
-        {
-            eprintln!(
-                "compact: {:?} landmarks ({}) in {:.1} ms, {:.1} MiB",
-                key.profile,
-                landmarks.count,
-                landmarks.build_ms,
-                landmarks.byte_len() as f64 / (1 << 20) as f64
-            );
-        }
-        self.profile_landmarks.insert(metric, landmarks)
-    }
-
     /// Diagnostics for parity harnesses: derives the column for `profile`
     /// under `costing` from the attribute sections (bypassing the cache and
-    /// the stored columns) and reports its build time, its landmark scale
-    /// and, when the profile has a stored column for these options, how many
+    /// the stored columns) and reports its build time, how CCH potentials
+    /// bound it and, when the profile has a stored column for these options, how many
     /// edges' f32 cost or duration bits differ from it.
     #[doc(hidden)]
     pub fn derived_column_probe(
@@ -604,19 +449,7 @@ impl RoutingPackage {
             allow_destination_only: true,
             sar: None,
         };
-        let mut derived = derive_column(
-            &view,
-            key,
-            self.file().column_for(landmark_profile(profile)),
-        );
-        let stored_scale = derived.landmark_scale;
-        let mut own = None;
-        if wants_own_landmarks(&derived, key)
-            && let Some(landmarks) = self.profile_landmarks(&view, key)
-        {
-            own = Some((landmarks.count, landmarks.build_ms, landmarks.byte_len()));
-            derived.adopt(&view, key, landmarks);
-        }
+        let derived = derive_column(&view, key, self.file().column_for(bound_profile(profile)));
         let stored = (key.costing == RouteCostingOptions::default().normalized())
             .then(|| self.file().column_for(profile))
             .flatten()
@@ -634,9 +467,8 @@ impl RoutingPackage {
             });
         Some(DerivedColumnProbe {
             build_ms: derived.build_ms,
-            landmark_scale: derived.landmark_scale,
-            stored_landmark_scale: stored_scale,
-            own_landmarks: own,
+            potential_factor: derived.potential.map(|(_, factor)| factor),
+            own_metric: matches!(derived.potential, Some((PotentialBase::Metric(_), _))),
             heuristic_cost_per_m: derived.heuristic_cost_per_m,
             usable_edge_count: derived.cost.iter().filter(|cost| cost.is_finite()).count(),
             stored_mismatch_count: stored,
@@ -649,12 +481,12 @@ impl RoutingPackage {
 #[derive(Debug, Clone)]
 pub struct DerivedColumnProbe {
     pub build_ms: f64,
-    pub landmark_scale: Option<f64>,
-    /// The scale of the stored column's landmarks, before any own landmarks.
-    pub stored_landmark_scale: Option<f64>,
-    /// Own landmarks (`profile_landmarks`): count, the time their first use
-    /// took to build them (ms), and their heap bytes.
-    pub own_landmarks: Option<(usize, f64, usize)>,
+    /// The factor CCH potentials are scaled by for the column (`None`: they
+    /// cannot bound it).
+    pub potential_factor: Option<f64>,
+    /// Whether the potentials are of the profile's own metric (else of the
+    /// stored column's).
+    pub own_metric: bool,
     pub heuristic_cost_per_m: f64,
     pub usable_edge_count: usize,
     /// Cost or duration values differing from the stored column (default
@@ -701,25 +533,6 @@ impl SearchGraph<'_> {
         }
     }
 
-    /// The Wheeled landmark metric's cost of `edge` where the stored column
-    /// cannot use it (`SarPackageInfo`): its default cost with legal access
-    /// times the minimum factors of the relaxations it needs, as the
-    /// compiler computed it. `None` when the edge is not physically
-    /// drivable.
-    pub(crate) fn sar_metric_cost(&self, edge: u32, policy: &CostingPolicy<'_>) -> Option<f64> {
-        let sar = self.sar;
-        let mask = MobilityProfile::Wheeled.mobility_mode_mask();
-        let mut inputs = self.cost_inputs(edge, profile_bit(MobilityProfile::Wheeled), mask);
-        let factor = sar.landmark_factor(inputs.sar_facts())?;
-        inputs.mobility_mode_mask = mask;
-        match policy.edge_cost_inputs(&inputs) {
-            EdgeCostDecision::Allowed(costed) => Some(f64::from(
-                wayfarer_package::sar::sar_metric_cost(costed.cost, factor),
-            )),
-            _ => None,
-        }
-    }
-
     /// The request's costing of `edge` from the package's raw costing inputs,
     /// conditional tags included: exactly the costing of the road graph's
     /// record under `policy` (for a profile with `profile_bit` and mode mask
@@ -744,13 +557,10 @@ impl SearchGraph<'_> {
 
 #[derive(Clone, Copy)]
 struct ColumnStats {
-    /// min derived / base over edges usable in the derived column.
-    ratio: f64,
-    /// Every edge usable in the derived column is usable in the base column.
-    subset: bool,
-    /// As `ratio` and `subset`, against the stored column alone (the base
-    /// of the CCH potentials), without the landmark metric's SAR costs.
+    /// min derived / stored over edges usable in the derived column.
     stored_ratio: f64,
+    /// Every edge usable in the derived column is usable in the stored
+    /// column.
     stored_subset: bool,
     /// min cost per metre of span.
     cost_per_m: f64,
@@ -758,8 +568,6 @@ struct ColumnStats {
 
 impl ColumnStats {
     const IDENTITY: Self = Self {
-        ratio: f64::INFINITY,
-        subset: true,
         stored_ratio: f64::INFINITY,
         stored_subset: true,
         cost_per_m: f64::INFINITY,
@@ -767,8 +575,6 @@ impl ColumnStats {
 
     fn merge(self, other: Self) -> Self {
         Self {
-            ratio: self.ratio.min(other.ratio),
-            subset: self.subset && other.subset,
             stored_ratio: self.stored_ratio.min(other.stored_ratio),
             stored_subset: self.stored_subset && other.stored_subset,
             cost_per_m: self.cost_per_m.min(other.cost_per_m),
@@ -779,7 +585,7 @@ impl ColumnStats {
 pub(super) fn derive_column(
     view: &SearchGraph<'_>,
     key: ColumnKey,
-    landmark_column: Option<usize>,
+    bound_column: Option<usize>,
 ) -> DerivedColumn {
     let started = Instant::now();
     let options = RouteOptions {
@@ -824,16 +630,8 @@ pub(super) fn derive_column(
         }
     }
 
-    let stored = landmark_column
-        .map(|column| &view.edge_cost[column * edge_count..(column + 1) * edge_count]);
-    let base = stored.filter(|_| view.landmark_count > 0);
-    // The Wheeled landmarks were built on the landmark metric (`SarPackageInfo`):
-    // where the stored column cannot use an edge, the metric's cost is the
-    // bound's base, so a SAR column keeps its landmarks.
-    let metric_options = RouteOptions::default();
-    let metric_policy = CostingPolicy::new(MobilityProfile::Wheeled, &metric_options);
-    let metric =
-        (landmark_profile(key.profile) == MobilityProfile::Wheeled).then_some(&metric_policy);
+    let stored =
+        bound_column.map(|column| &view.edge_cost[column * edge_count..(column + 1) * edge_count]);
     let stats = cost
         .par_chunks(CHUNK)
         .enumerate()
@@ -851,21 +649,6 @@ pub(super) fn derive_column(
                         stats.stored_subset = false;
                     } else if stored > 0.0 {
                         stats.stored_ratio = stats.stored_ratio.min(cost / stored);
-                    }
-                }
-                if let Some(base) = base {
-                    let mut base = f64::from(base[edge]);
-                    if !base.is_finite()
-                        && let Some(policy) = metric
-                    {
-                        base = view
-                            .sar_metric_cost(edge as u32, policy)
-                            .unwrap_or(f64::INFINITY);
-                    }
-                    if !base.is_finite() {
-                        stats.subset = false;
-                    } else if base > 0.0 {
-                        stats.ratio = stats.ratio.min(cost / base);
                     }
                 }
                 let span = f64::from(view.edge_length[edge]).max(chord_m(
@@ -886,32 +669,13 @@ pub(super) fn derive_column(
     } else {
         0.0
     };
-    let landmark_scale = base
-        .filter(|_| stats.subset)
-        .map(|_| {
-            if stats.ratio.is_finite() {
-                stats.ratio * LANDMARK_SCALE_MARGIN
-            } else {
-                // No usable edge: nothing is reachable, any scale is valid.
-                1.0
-            }
-        })
-        .filter(|scale| *scale > 0.0);
-    let landmark_scales = landmark_scale
-        .map(|scale| {
-            view.landmark_scale
-                .iter()
-                .map(|quantum| (f64::from(*quantum) * scale) as f32)
-                .collect()
-        })
-        .unwrap_or_default();
     // The stored column bounds this one through its CCH potentials when it
-    // can use every edge this one can (scaled as the landmarks are).
-    let potential = landmark_column
+    // can use every edge this one can, scaled by the least cost ratio.
+    let potential = bound_column
         .filter(|_| stats.stored_subset)
         .map(|column| {
             let factor = if stats.stored_ratio.is_finite() {
-                stats.stored_ratio * LANDMARK_SCALE_MARGIN
+                stats.stored_ratio * FACTOR_MARGIN
             } else {
                 1.0
             };
@@ -919,11 +683,11 @@ pub(super) fn derive_column(
         })
         .filter(|(_, factor)| *factor > 0.0);
     // Where the stored column bounds it poorly (scaled below
-    // `OWN_LANDMARKS_BELOW_SCALE`: Emergency, Tracked) or not at all (SAR
+    // `OWN_METRIC_BELOW_FACTOR`: Emergency, Tracked) or not at all (SAR
     // relaxations open edges it cannot use), the profile's own metric does,
     // when the package has potentials to customize it with.
     let potential = match potential {
-        Some((base, factor)) if factor >= OWN_LANDMARKS_BELOW_SCALE => Some((base, factor)),
+        Some((base, factor)) if factor >= OWN_METRIC_BELOW_FACTOR => Some((base, factor)),
         stored if view.cch.is_some() => {
             let metric = key.metric();
             let costs = metric_costs(view, metric);
@@ -937,14 +701,9 @@ pub(super) fn derive_column(
     DerivedColumn {
         potential,
         duration,
-        landmark_column: landmark_scale.and(landmark_column),
-        landmark_scales,
-        walking: walking(key.profile),
-        own_landmarks: None,
         heuristic_cost_per_m,
         junction: JunctionDelay::for_profile(key.profile),
-        landmark_scale,
-        marks: landmark_column.and_then(|column| ColumnMarks::new(view, &cost, column)),
+        marks: bound_column.and_then(|column| ColumnMarks::new(view, &cost, column)),
         build_ms: started.elapsed().as_secs_f64() * 1e3,
         cost,
     }
@@ -970,34 +729,22 @@ fn own_metric_factor(cost: &[f32], metric: &[f32]) -> Option<f64> {
         })
         .reduce(|| (f64::INFINITY, true), |a, b| (a.0.min(b.0), a.1 && b.1));
     let factor = if ratio.is_finite() {
-        ratio * LANDMARK_SCALE_MARGIN
+        ratio * FACTOR_MARGIN
     } else {
         1.0
     };
     (subset && factor > 0.0).then_some(factor)
 }
 
-/// Whether `derived` should get landmarks of its own metric: its stored
-/// landmarks would be scaled below [`OWN_LANDMARKS_BELOW_SCALE`], or it is an
-/// R5 column, which the stored landmarks cannot bound at all (paths are not
-/// in their metric).
-fn wants_own_landmarks(derived: &DerivedColumn, key: ColumnKey) -> bool {
-    match derived.landmark_scale {
-        Some(scale) => scale < OWN_LANDMARKS_BELOW_SCALE,
-        None => key.metric().paths,
-    }
-}
-
 /// The SAR relaxations of a metric (see [`metric_costs`]): R1 with every
 /// denying value and R2, at the package's minimum factors, for a vehicle
 /// profile; and for an R5 metric, every path
 /// class at every width at R5's minimum factor, so that any R5 column costs
-/// each edge at least this. Without the paths, R5 stays out, as it does of
-/// the stored landmarks.
+/// each edge at least this. Without the paths, R5 stays out.
 fn metric_policy_sar(view: &SearchGraph<'_>, metric: MetricKey) -> Option<SarEdgeRelaxations> {
     let sar = view.sar;
     let profile = metric.profile;
-    (landmark_profile(profile) == MobilityProfile::Wheeled).then(|| SarEdgeRelaxations {
+    (bound_profile(profile) == MobilityProfile::Wheeled).then(|| SarEdgeRelaxations {
         legal_access: Some((
             LegalValue::ALL
                 .into_iter()
@@ -1016,8 +763,9 @@ fn metric_policy_sar(view: &SearchGraph<'_>, metric: MetricKey) -> Option<SarEdg
     })
 }
 
-/// The metric of a profile's own landmarks (see `profile_landmarks`): the
-/// profile's costs under its options with destination-only edges allowed,
+/// A profile's own metric, whose CCH potentials bound its derived columns
+/// where the stored column bounds them poorly or not at all: the profile's
+/// costs under its options with destination-only edges allowed,
 /// and, for a vehicle profile, every edge the
 /// SAR relaxations R1 and R2 can open at its cost times their package
 /// minimum factors (and for an R5 metric every path too, at R5's). Every
@@ -1040,53 +788,4 @@ pub(crate) fn metric_costs(view: &SearchGraph<'_>, metric: MetricKey) -> Vec<f32
             },
         )
         .collect()
-}
-
-impl DerivedColumn {
-    /// Whether the column is bounded by landmarks of its own metric.
-    #[cfg(test)]
-    pub(crate) fn has_own_landmarks(&self) -> bool {
-        self.own_landmarks.is_some()
-    }
-
-    /// Bounds this column with `own`, its metric's landmarks, when they are
-    /// valid for it (every edge it can use is in the metric) and scale less.
-    fn adopt(&mut self, view: &SearchGraph<'_>, key: ColumnKey, own: Arc<ProfileLandmarks>) {
-        let metric = metric_costs(view, key.metric());
-        let (ratio, subset) = self
-            .cost
-            .par_iter()
-            .zip(&metric)
-            .map(|(cost, base)| {
-                if !cost.is_finite() {
-                    (f64::INFINITY, true)
-                } else if !base.is_finite() {
-                    (f64::INFINITY, false)
-                } else if *base > 0.0 {
-                    (f64::from(*cost) / f64::from(*base), true)
-                } else {
-                    (f64::INFINITY, true)
-                }
-            })
-            .reduce(|| (f64::INFINITY, true), |a, b| (a.0.min(b.0), a.1 && b.1));
-        if !subset {
-            return;
-        }
-        let scale = if ratio.is_finite() {
-            ratio * LANDMARK_SCALE_MARGIN
-        } else {
-            1.0
-        };
-        if scale <= self.landmark_scale.unwrap_or(0.0) {
-            return;
-        }
-        self.landmark_scales = own
-            .scales
-            .iter()
-            .map(|quantum| (f64::from(*quantum) * scale) as f32)
-            .collect();
-        self.landmark_column = Some(own.column);
-        self.landmark_scale = Some(scale);
-        self.own_landmarks = Some(own);
-    }
 }

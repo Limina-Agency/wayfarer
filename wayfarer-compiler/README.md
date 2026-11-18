@@ -4,9 +4,9 @@ Compiles an OpenStreetMap `.osm.pbf` extract into an offline routing package
 (`routing.mrt`): a single memory-mappable file that the routing engine opens
 and queries. It ingests the PBF, builds and enhances the road graph, bakes the
 default edge costs for the wheeled and on-foot profiles (the engine derives
-the others), orders the nodes for the engine's CCH potentials (format 2;
-landmark distances on request), and writes the package. This crate is the library; the command
-line is the `wayfarer` binary (crate `wayfarer-cli`):
+the others), orders the nodes for the engine's CCH potentials, and writes the
+package. This crate is the library; the command line is the `wayfarer` binary
+(crate `wayfarer-cli`):
 
 ```sh
 wayfarer compile monaco.osm.pbf -o routing.mrt --country MC
@@ -64,15 +64,13 @@ worker process can be started):
 
 - **Progress.** `on_progress` gets a `CompileProgress` per step, the ingest's
   included: a stage (`CompileStage`: `index_nodes`, `collect_roads`,
-  `finalize_graph`, `build_package`, `landmarks`, `write_package`, in that
-  order; the ids are stable), the stage's `stage_fraction` where its size is
-  known (blobs read, build steps, landmark Dijkstras, bytes written), an
-  `overall` share of the compile and an English diagnostic `message` (objects
-  read so far, in the ingest). Fractions never go back within a stage; a
+  `finalize_graph`, `build_package`, `cch_order`, `write_package`, in that
+  order), the stage's `stage_fraction` where its size is known (blobs read,
+  build steps, bytes written), an `overall` share of the compile and an
+  English diagnostic `message` (objects read so far, in the ingest). Fractions never go back within a stage; a
   successful compile ends with `write_package` at 1.
-- **Cancel.** The `CancelToken` is checked in every stage, inside the
-  landmark Dijkstras and between 4 MiB writes; once it is cancelled the call
-  returns `CompileError::Cancelled`. A request that cannot run is
+- **Cancel.** The `CancelToken` is checked in every stage and between 4 MiB
+  writes; once it is cancelled the call returns `CompileError::Cancelled`. A request that cannot run is
   `CompileError::InvalidRequest`, any other failure `CompileError::Failed`;
   `code()` gives a stable id for each (`invalid_request`, `cancelled`,
   `failed`), and the error serializes as `{"code", "message"}`.

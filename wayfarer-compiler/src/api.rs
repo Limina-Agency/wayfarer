@@ -185,7 +185,7 @@ pub struct CompileProgress {
     pub stage: CompileStage,
     /// The share of this stage done, 0 to 1, when the stage's size is known:
     /// blobs read in the ingest, steps of the graph and package builds,
-    /// Dijkstras for landmarks, bytes written.
+    /// bytes written.
     pub stage_fraction: Option<f64>,
     /// The share of the whole compile done, 0 to 1 (stages weighted by their
     /// usual share of the time).
@@ -236,7 +236,7 @@ pub struct CompileResult {
     /// Nodes and directed edges in the package.
     pub node_count: u64,
     pub edge_count: u64,
-    /// What the package build stored (restrictions, shapes, landmarks, ...)
+    /// What the package build stored (restrictions, shapes, pieces, ...)
     /// and its timings.
     pub report: PackageBuildReport,
     /// The road graph's own manifest: counts before the package build and its

@@ -654,7 +654,7 @@ fn plain_requests_leave_the_edge_id_lookup_unbuilt() {
             let routed = route(&engine, *origin, *destination, profile, |_| {});
             assert!(routed.is_some_and(|route| !route.edge_ids.is_empty()));
         }
-        // Pairwise cells, rows and buckets.
+        // Pairwise cells and rows, few and many sources.
         let cells = matrix(&engine, grid_points(), grid_points(), profile);
         assert!(cells.cells.iter().any(|cell| cell.cost.is_some()));
         let rows = matrix(
@@ -664,8 +664,8 @@ fn plain_requests_leave_the_edge_id_lookup_unbuilt() {
             profile,
         );
         assert!(rows.cells.iter().any(|cell| cell.cost.is_some()));
-        let buckets = matrix(&engine, many_targets.clone(), many_targets.clone(), profile);
-        assert!(buckets.cells.iter().any(|cell| cell.cost.is_some()));
+        let square = matrix(&engine, many_targets.clone(), many_targets.clone(), profile);
+        assert!(square.cells.iter().any(|cell| cell.cost.is_some()));
         let limits = isochrone_limits(profile);
         let isochrone = engine
             .isochrone(grid_isochrone_request(profile, limits))
@@ -903,7 +903,8 @@ fn grid_edge(graph: &RoadGraph, from: (usize, usize), to: (usize, usize)) -> u64
 }
 
 /// Blocks, avoids and multiplies grid edges, whole and by range, including
-/// multipliers below 1 (which void landmark bounds). Returns the blocked edges.
+/// multipliers below 1 (which become discount gates). Returns the blocked
+/// edges.
 fn apply_per_edge_options(graph: &RoadGraph, options: &mut crate::RouteOptions) -> Vec<u64> {
     let blocked = vec![
         grid_edge(graph, (2, 1), (2, 2)),
@@ -1276,7 +1277,7 @@ fn destination_only_pockets_match_the_reference() {
             }
         }
         let expected = matrix(&oracle, grid_points(), grid_points(), profile);
-        for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+        for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
             test_mode::set(Some(mode));
             let actual = matrix(&compact, grid_points(), grid_points(), profile);
             test_mode::set(None);
@@ -1336,7 +1337,7 @@ fn the_relaxed_matrix_pass_searches_only_retried_cells() {
         test_mode::set(None);
         result
     };
-    for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+    for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
         let only = run(mode, false);
         let full = run(mode, true);
         assert_eq!(only.cells, full.cells, "{mode:?}");
@@ -1350,16 +1351,11 @@ fn the_relaxed_matrix_pass_searches_only_retried_cells() {
         }
         let strict = sources.len();
         assert_eq!(full.source_expansion_count, 2 * strict, "{mode:?}");
-        match mode {
-            MatrixMode::Buckets => assert_eq!(only.source_expansion_count, 2 * strict),
-            _ => {
-                assert_eq!(only.source_expansion_count, strict + 1, "{mode:?}");
-                assert!(
-                    only.visited_edge_count < full.visited_edge_count,
-                    "{mode:?}"
-                );
-            }
-        }
+        assert_eq!(only.source_expansion_count, strict + 1, "{mode:?}");
+        assert!(
+            only.visited_edge_count < full.visited_edge_count,
+            "{mode:?}"
+        );
     }
 }
 
@@ -1833,9 +1829,7 @@ fn derived_default_columns_equal_stored_columns() {
         let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(stored.cost), bits(derived.cost), "{profile:?}");
         assert_eq!(bits(stored.duration), bits(derived.duration), "{profile:?}");
-        // Same costs: landmarks unscaled (up to the safety margin), same factor.
-        let scale = derived.landmarks.unwrap().scales[0] / stored.landmarks.unwrap().scales[0];
-        assert!((scale - 1.0).abs() < 1e-5, "{profile:?} {scale}");
+        // Same costs, same factor.
         assert_eq!(stored.heuristic_cost_per_m, derived.heuristic_cost_per_m);
     }
 }
@@ -2447,7 +2441,7 @@ fn package_overlay_connects_offroad_endpoints() {
 
 /// Random overlays (partial and full blocks, edge-to-edge connectors and
 /// endpoint connectors with random costs): the goal-directed patch search
-/// (straight-line and connector-aware landmark bounds) finds exactly the
+/// (straight-line and connector-aware potential bounds) finds exactly the
 /// costs plain Dijkstra over the same patch finds.
 #[test]
 fn overlay_patch_bounds_are_admissible() {
@@ -2551,114 +2545,6 @@ fn overlay_patch_bounds_are_admissible() {
     }
     assert!(compared > 200, "{compared}");
     assert!(used_connector > 20, "{used_connector}");
-}
-
-/// The bucket many-to-many matrix against pairwise cells (the route search
-/// per cell): same status and cost for every cell.
-fn assert_buckets_match_pairwise(
-    engine: &RoutingEngine,
-    request: &crate::RouteMatrixRequest,
-    context: &str,
-) -> usize {
-    use crate::matrix::{MatrixMode, test_mode};
-    let run = |mode| {
-        test_mode::set(Some(mode));
-        let result = engine.matrix(request.clone());
-        test_mode::set(None);
-        result
-    };
-    let (pairwise, buckets) = (run(MatrixMode::Pairwise), run(MatrixMode::Buckets));
-    let mut reachable = 0;
-    for (expected, actual) in pairwise.cells.iter().zip(&buckets.cells) {
-        let cell = (expected.source_index, expected.target_index);
-        assert_eq!(expected.status, actual.status, "{context} {cell:?}");
-        let (Some(expected), Some(actual)) = (expected.cost, actual.cost) else {
-            continue;
-        };
-        assert!(
-            (expected - actual).abs() <= 1e-9 * expected.max(1.0),
-            "{context} {cell:?}: pairwise {expected} vs buckets {actual}"
-        );
-        reachable += 1;
-    }
-    reachable
-}
-
-/// Bucket many-to-many cells equal pairwise cells: plain and with per-edge
-/// options (which void landmarks), few and many targets (so forward
-/// searches both finish and hand their last targets to cell searches), and
-/// on a junction with simple and complex restrictions.
-#[test]
-fn bucket_matrix_cells_equal_pairwise_cells() {
-    let dir = tempdir().unwrap();
-    let graph = grid_graph();
-    let reader = persist(&graph, &dir.path().join("grid.mrt"));
-    let (_, compact) = engines(&reader);
-    let mut compared = 0;
-    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
-        for (sources, targets) in [
-            (grid_points(), grid_points()),
-            (grid_points()[..3].to_vec(), many_grid_targets()),
-            (many_grid_targets()[..40].to_vec(), many_grid_targets()),
-        ] {
-            for options in [false, true] {
-                let mut request =
-                    crate::RouteMatrixRequest::new(sources.clone(), targets.clone(), profile);
-                request.options.max_correlation_distance_m = 60;
-                if options {
-                    apply_per_edge_options(&graph, &mut request.options);
-                }
-                let context = format!(
-                    "grid {profile:?} {}x{} {options}",
-                    sources.len(),
-                    targets.len()
-                );
-                compared += assert_buckets_match_pairwise(&compact, &request, &context);
-            }
-        }
-    }
-    let mut junction = junction_graph();
-    let w_j = edge_between(&junction, 1, 10, 11);
-    let j_n = edge_between(&junction, 3, 11, 13);
-    let j_e = edge_between(&junction, 2, 11, 12);
-    let e_ne = edge_between(&junction, 4, 12, 14);
-    junction.set_resolved_restrictions(vec![
-        ResolvedEdgeRestriction::Simple {
-            relation_id: 77,
-            restriction: "no_left_turn".into(),
-            from_edge_id: w_j,
-            to_edge_id: j_n,
-            via_node_id: 11,
-            osm_mode_mask: OsmMode::MOTOR_VEHICLE,
-            mobility_mode_mask: MobilityMode::WHEELED,
-        },
-        ResolvedEdgeRestriction::Complex {
-            relation_id: 78,
-            restriction: "no_straight_on".into(),
-            from_edge_id: w_j,
-            to_edge_id: e_ne,
-            via_edge_ids: vec![j_e],
-            osm_mode_mask: OsmMode::MOTOR_VEHICLE,
-            mobility_mode_mask: MobilityMode::WHEELED,
-        },
-    ]);
-    let reader = persist(&junction, &dir.path().join("junction.mrt"));
-    let (_, compact) = engines(&reader);
-    let points = vec![
-        GeoPoint::new(0.0, 0.0004),
-        GeoPoint::new(0.0016, 0.002),
-        GeoPoint::new(0.002, 0.0031),
-        GeoPoint::new(0.0, 0.0037),
-        GeoPoint::new(0.0008, 0.004),
-        GeoPoint::new(0.0, 0.001),
-    ];
-    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
-        let mut request = crate::RouteMatrixRequest::new(points.clone(), points.clone(), profile);
-        request.options.max_correlation_distance_m = 60;
-        compared +=
-            assert_buckets_match_pairwise(&compact, &request, &format!("junction {profile:?}"));
-    }
-    assert!(compared > 5000, "{compared}");
 }
 
 /// Partial blocks with bypass connectors, a cross-country connector and a
@@ -3442,7 +3328,7 @@ fn restriction_states_keep_a_dearer_legal_continuation() {
     .unwrap();
     assert!(!walk.edge_ids.contains(&y_a) && !walk.edge_ids.contains(&b_d));
 
-    // Matrices, with enough points that buckets join rather than hand off.
+    // Matrices, with enough points to search in rows.
     let points = (0..36)
         .map(|index| GeoPoint::new(0.00002, 0.0001 + 0.0048 * f64::from(index) / 35.0))
         .chain([origin, destination])
@@ -3456,7 +3342,7 @@ fn restriction_states_keep_a_dearer_legal_continuation() {
         .find(|cell| cell.source_index == 36 && cell.target_index == 37)
         .unwrap();
     assert!((cell.cost.unwrap() - expected.cost).abs() <= 1e-6 * expected.cost);
-    for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+    for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
         test_mode::set(Some(mode));
         let actual = compact.matrix(request.clone());
         test_mode::set(None);
@@ -3698,7 +3584,7 @@ fn package_searches_are_exact_under_random_complex_restrictions() {
                 request.options.dynamic_overlay = Some(overlay.clone());
             }
             let reference = exact.matrix(request.clone());
-            for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+            for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
                 test_mode::set(Some(mode));
                 let actual = compact.matrix(request.clone());
                 test_mode::set(None);
@@ -3993,71 +3879,85 @@ fn far_candidates_pay_their_approach() {
     assert_isochrone_parity(&expected, &actual, "approach");
 }
 
-/// Across every usable edge `u -> v` of a column, the landmark bound towards
-/// a target set drops by at most the edge's cost, and the bound from it rises
-/// by at most that: the bounds are consistent, which the default
+/// Asserts that `bound` is consistent on every edge of `costs` (forward, or
+/// `reversed`): it drops by at most the edge's cost. Returns the edges checked.
+fn assert_consistent(
+    g: &SearchGraph<'_>,
+    costs: &[f64],
+    reversed: bool,
+    bound: impl Fn(u32) -> f64,
+    context: &str,
+) -> usize {
+    let mut checked = 0;
+    for (edge, cost) in costs.iter().enumerate() {
+        if !cost.is_finite() {
+            continue;
+        }
+        let (mut from, mut to) = (g.edge_source(edge), g.edge_target[edge]);
+        if reversed {
+            std::mem::swap(&mut from, &mut to);
+        }
+        let (high, low) = (bound(from), bound(to));
+        // An infinite bound proves the node useless.
+        if high.is_finite() {
+            assert!(
+                high <= low + cost + 1e-6 * high.max(1.0),
+                "{context} edge {edge} {reversed}: {high} > {low} + {cost}"
+            );
+            checked += 1;
+        }
+    }
+    checked
+}
+
+/// Across every usable edge `u -> v` of a column, the CCH potential towards
+/// a target set drops by at most the edge's cost, and the potential from it
+/// rises by at most that: the bounds are consistent, which the default
 /// bidirectional stop needs to be exact.
 #[test]
-fn landmark_bounds_are_consistent() {
+fn cch_potentials_are_consistent() {
     let dir = tempdir().unwrap();
+    let none = rustc_hash::FxHashMap::default();
     for (name, graph) in [("grid", grid_graph()), ("costing", costing_grid_graph())] {
         let reader = persist(&graph, &dir.path().join(format!("{name}.mrt")));
         let g = reader.package.view();
-        assert!(g.landmark_count > 0, "{name}");
-        let columns = g.landmark_scale.len() / (2 * g.landmark_count);
         let nodes = (0..g.node_count as u32).collect::<Vec<_>>();
         let mut checked = 0;
-        for column in 0..columns {
-            let costs = &g.edge_cost[column * g.edge_count..(column + 1) * g.edge_count];
+        for profile in ALL_TEST_PROFILES {
+            let handle = reader
+                .package
+                .request_column(profile, &Default::default(), true);
+            let column = handle.column(&g);
+            let Some(plan) = search::potential_plan(g, &column, &none, false) else {
+                continue;
+            };
+            let costs = (0..g.edge_count as u32)
+                .map(|edge| f64::from(column.cost(edge)))
+                .collect::<Vec<_>>();
+            let scratch = <[std::cell::RefCell<cch::PotentialScratch>; 2]>::default();
             for (targets, reversed) in nodes
                 .chunks(3)
                 .flat_map(|targets| [(targets, false), (targets, true)])
             {
-                let bound = landmarks::AltBound::new_directed(
-                    g.landmark_from,
-                    g.landmark_to,
-                    g.landmark_scale,
-                    g.landmark_count,
-                    g.landmark_count,
-                    g.node_count,
-                    column,
-                    targets,
-                    &nodes[..1],
-                    reversed,
-                )
-                .unwrap();
-                for (edge, cost) in costs.iter().enumerate() {
-                    let cost = f64::from(*cost);
-                    if !cost.is_finite() {
-                        continue;
-                    }
-                    let (mut from, mut to) = (g.edge_source(edge), g.edge_target[edge]);
-                    if reversed {
-                        std::mem::swap(&mut from, &mut to);
-                    }
-                    let (high, low) = (bound.bound(from), bound.bound(to));
-                    // An infinite bound proves the node useless.
-                    if high.is_finite() {
-                        assert!(
-                            high <= low + cost + 1e-9 * high.max(1.0),
-                            "{name} column {column} edge {edge} {targets:?} {reversed}: \
-                             {high} > {low} + {cost}"
-                        );
-                        checked += 1;
-                    }
+                let potential = plan.potential(targets, reversed, &[], &scratch[0], &scratch[1]);
+                for target in targets {
+                    assert_eq!(potential.get(*target), 0.0);
                 }
+                let context = format!("{name} {profile:?} {targets:?}");
+                checked +=
+                    assert_consistent(&g, &costs, reversed, |node| potential.get(node), &context);
             }
         }
         assert!(checked > 1_000, "{name}: {checked}");
     }
 }
 
-/// Gated landmark bounds (see `search::gates`) under random discounts and
+/// Gated CCH potentials (see `search::gates`) under random discounts and
 /// opened edges stay consistent on every edge at its request cost, forward
 /// and backward, and vanish at their targets.
 #[test]
 fn discount_gate_bounds_are_consistent() {
-    use super::search::gates::{DiscountGate, GatedAlt};
+    use super::search::gates::DiscountGate;
     let dir = tempdir().unwrap();
     let graph = costing_grid_graph();
     let reader = persist(&graph, &dir.path().join("gates.mrt"));
@@ -4069,13 +3969,13 @@ fn discount_gate_bounds_are_consistent() {
         seed ^= seed << 17;
         (seed >> 11) as f64 / (1u64 << 53) as f64
     };
+    let scratch = <[std::cell::RefCell<cch::PotentialScratch>; 2]>::default();
     let mut checked = 0;
     for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
         let handle = reader
             .package
             .request_column(profile, &Default::default(), true);
         let column = handle.column(&g);
-        let landmarks = column.landmarks.expect("landmarks");
         for round in 0..8 {
             // Discounts on a random share of the edges, and every edge the
             // column cannot use opened at a random cost per metre.
@@ -4084,6 +3984,7 @@ fn discount_gate_bounds_are_consistent() {
                 .map(|edge| f64::from(column.cost(edge)))
                 .collect::<Vec<_>>();
             let mut gates = Vec::new();
+            let mut overrides = rustc_hash::FxHashMap::default();
             for edge in 0..g.edge_count as u32 {
                 let base = f64::from(column.cost(edge));
                 let cost = if base.is_finite() {
@@ -4096,7 +3997,10 @@ fn discount_gate_bounds_are_consistent() {
                 } else {
                     continue;
                 };
+                // The bounds see the cost the search reads.
+                let cost = f64::from(cost as f32);
                 request_cost[edge as usize] = cost;
+                overrides.insert(edge, cost as f32);
                 gates.push(DiscountGate {
                     edge,
                     source: g.edge_source(edge as usize),
@@ -4105,47 +4009,24 @@ fn discount_gate_bounds_are_consistent() {
                     ratio: if base.is_finite() { cost / base } else { 0.0 },
                 });
             }
+            let plan = search::potential_plan(g, &column, &overrides, true).expect("gated plan");
             for reversed in [false, true] {
                 let targets = (0..3)
                     .map(|_| (next() * g.node_count as f64) as u32)
                     .collect::<Vec<_>>();
-                let seeds = [(next() * g.node_count as f64) as u32];
-                let base = landmarks::AltBound::new_directed(
-                    g.landmark_from,
-                    g.landmark_to,
-                    landmarks.scales,
-                    g.landmark_count,
-                    landmarks.active,
-                    g.node_count,
-                    landmarks.column,
-                    &targets,
-                    &seeds,
-                    reversed,
-                )
-                .unwrap();
-                let bound = GatedAlt::new(landmarks, vec![base], &seeds, reversed, &gates)
-                    .expect("gated bound");
+                let potential =
+                    plan.potential(&targets, reversed, &gates, &scratch[0], &scratch[1]);
                 for target in &targets {
-                    assert_eq!(bound.bound(*target), 0.0);
+                    assert_eq!(potential.get(*target), 0.0);
                 }
-                for (edge, cost) in request_cost.iter().enumerate() {
-                    if !cost.is_finite() {
-                        continue;
-                    }
-                    let (mut from, mut to) = (g.edge_source(edge), g.edge_target[edge]);
-                    if reversed {
-                        std::mem::swap(&mut from, &mut to);
-                    }
-                    let (high, low) = (bound.bound(from), bound.bound(to));
-                    if high.is_finite() {
-                        assert!(
-                            high <= low + cost + 1e-9 * high.max(1.0),
-                            "{profile:?} round {round} edge {edge} {reversed}: \
-                             {high} > {low} + {cost}"
-                        );
-                        checked += 1;
-                    }
-                }
+                let context = format!("{profile:?} round {round}");
+                checked += assert_consistent(
+                    &g,
+                    &request_cost,
+                    reversed,
+                    |node| potential.get(node),
+                    &context,
+                );
             }
         }
     }
@@ -4324,11 +4205,11 @@ fn assert_routes_match_reference(
     assert!(compared > 100, "{compared}");
 }
 
-/// Overrides that lower costs become discount gates: the landmarks keep
+/// Overrides that lower costs become discount gates: the potentials keep
 /// their scale and the straight-line factor drops to the least cost per
 /// metre of the gates. Past the gate limit, the fallback scales the bounds by
-/// the least ratio (not the product of all ratios) and keeps the landmarks,
-/// scaled.
+/// the least ratio (not the product of all ratios), and so does the
+/// potential plan.
 #[test]
 fn lowered_costs_become_gates_or_scale_the_bounds_by_the_least_ratio() {
     let dir = tempdir().unwrap();
@@ -4349,7 +4230,7 @@ fn lowered_costs_become_gates_or_scale_the_bounds_by_the_least_ratio() {
     let none = rustc_hash::FxHashMap::default();
 
     let gated = super::search::analysis::override_bounds(view, column, &overrides, &none);
-    assert!(gated.use_landmarks && !gated.fell_back());
+    assert!(!gated.fell_back());
     let mut gate_edges = gated.gates.iter().map(|gate| gate.edge).collect::<Vec<_>>();
     gate_edges.sort_unstable();
     let mut expected = lowered.iter().map(|(edge, _)| *edge).collect::<Vec<_>>();
@@ -4360,30 +4241,20 @@ fn lowered_costs_become_gates_or_scale_the_bounds_by_the_least_ratio() {
     }
     assert!(gated.heuristic_cost_per_m <= column.heuristic_cost_per_m);
     assert!(gated.heuristic_cost_per_m >= column.heuristic_cost_per_m * 0.3 * (1.0 - 1e-6));
-    let unscaled = gated.column(column);
-    assert_eq!(
-        unscaled.landmarks.expect("landmarks").scales,
-        column.landmarks.expect("landmarks").scales
-    );
+    let plain = search::potential_plan(view, &column, &none, false).expect("plan");
+    let gated_plan = search::potential_plan(view, &column, &overrides, true).expect("plan");
+    assert_eq!(gated_plan.factor, plain.factor);
 
     let bounds =
         super::search::analysis::override_bounds_with_limit(view, column, &overrides, &none, 1);
-    assert!(bounds.use_landmarks && bounds.fell_back() && bounds.gates.is_empty());
+    assert!(bounds.fell_back() && bounds.gates.is_empty());
     let least = 0.3 * (1.0 - 1e-6);
     assert!(
         (bounds.heuristic_cost_per_m - column.heuristic_cost_per_m * least).abs()
             <= 1e-6 * column.heuristic_cost_per_m
     );
-    let scaled = bounds.column(column);
-    let (before, after) = (
-        column.landmarks.expect("landmarks").scales,
-        scaled.landmarks.expect("landmarks").scales,
-    );
-    for (before, after) in before.iter().zip(after) {
-        assert!(
-            (f64::from(*after) - f64::from(*before) * least).abs() <= 1e-6 * f64::from(*before)
-        );
-    }
+    let scaled = search::potential_plan(view, &column, &overrides, false).expect("plan");
+    assert!((scaled.factor - plain.factor * least).abs() <= 1e-6 * plain.factor);
 }
 
 fn resolve(view: &SearchGraph<'_>, edge_id: u64) -> u32 {
@@ -4991,7 +4862,7 @@ fn sar_restriction_penalties_match_the_reference() {
                 request.options.dynamic_overlay = Some(overlay.clone());
             }
             let reference = exact.matrix(request.clone());
-            for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+            for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
                 test_mode::set(Some(mode));
                 let actual = compact.matrix(request.clone());
                 test_mode::set(None);
@@ -5988,7 +5859,7 @@ fn sar_physical_relaxations_match_the_reference() {
         request.options.max_correlation_distance_m = 60;
         request.options.sar = Some(sar.clone());
         let reference = oracle.matrix(request.clone());
-        for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+        for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
             test_mode::set(Some(mode));
             let actual = compact.matrix(request.clone());
             test_mode::set(None);
@@ -6017,7 +5888,7 @@ fn sar_physical_relaxations_match_the_reference() {
 }
 
 /// Exact node-level distances over `costs` to `targets` (`reversed`: from
-/// them), without turn costs: what a landmark bound may not exceed.
+/// them), without turn costs: what a potential may not exceed.
 fn exact_node_distances(
     g: &SearchGraph<'_>,
     costs: &[f32],
@@ -6078,14 +5949,13 @@ fn exact_node_distances(
 }
 
 /// Emergency and Tracked columns (plain, at override strength 1, the strict
-/// destination-only pass, and with SAR R1 and R2) get landmarks of their own
-/// metric (`profile_landmarks`) at scale 1 where the Wheeled landmarks would
-/// be scaled below 0.9, and so do Wheeled R5 columns, which the stored
-/// landmarks cannot bound. Those bounds are consistent on every edge the
-/// column can use and never exceed the exact distance, towards and from
-/// every target set.
+/// destination-only pass, and with SAR R1 and R2) get potentials of their own
+/// metric where the stored column's would be scaled below 0.9, and so do
+/// Wheeled R5 columns, which the stored column cannot bound. Those
+/// potentials are consistent on every edge the column can use and never
+/// exceed the exact distance, towards and from every target set.
 #[test]
-fn profile_landmark_bounds_are_consistent_and_admissible() {
+fn own_metric_potentials_are_consistent_and_admissible() {
     let dir = tempdir().unwrap();
     let override_one = crate::RouteCostingOptions {
         emergency_override_strength: 1.0,
@@ -6159,61 +6029,39 @@ fn profile_landmark_bounds_are_consistent_and_admissible() {
             let columns::ColumnHandle::Derived(derived) = &handle else {
                 panic!("{context}: a derived column");
             };
-            let scale = derived.landmark_scale.unwrap();
-            if !derived.has_own_landmarks() {
-                // The Wheeled landmarks bound it well enough as they are.
-                assert!(scale >= 0.9, "{context}: scale {scale}");
+            let Some((base, factor)) = derived.potential else {
+                panic!("{context}: no potentials");
+            };
+            if !matches!(base, columns::PotentialBase::Metric(_)) {
+                // The stored column bounds it well enough as it is.
+                assert!(factor >= 0.9, "{context}: factor {factor}");
                 continue;
             }
-            assert!(scale > 0.9999, "{context}: scale {scale}");
+            assert!(factor > 0.9999, "{context}: factor {factor}");
             adopted.push(context.clone());
             let column = handle.column(&g);
-            let landmarks = column.landmarks.expect("landmarks");
-            assert_eq!(
-                landmarks.count,
-                columns::PROFILE_LANDMARK_COUNT.min(g.landmark_count)
-            );
+            let none = rustc_hash::FxHashMap::default();
+            let plan = search::potential_plan(g, &column, &none, false).expect("plan");
+            let costs = column
+                .cost
+                .iter()
+                .map(|cost| f64::from(*cost))
+                .collect::<Vec<_>>();
+            let scratch = <[std::cell::RefCell<cch::PotentialScratch>; 2]>::default();
             let mut checked = 0;
             for (targets, reversed) in nodes
                 .chunks(4)
                 .flat_map(|targets| [(targets, false), (targets, true)])
             {
-                let bound = landmarks::AltBound::new_directed(
-                    landmarks.from,
-                    landmarks.to,
-                    landmarks.scales,
-                    landmarks.count,
-                    landmarks.active,
-                    g.node_count,
-                    landmarks.column,
-                    targets,
-                    &nodes[..1],
-                    reversed,
-                )
-                .unwrap();
-                for (edge, cost) in column.cost.iter().enumerate() {
-                    let cost = f64::from(*cost);
-                    if !cost.is_finite() {
-                        continue;
-                    }
-                    let (mut from, mut to) = (g.edge_source(edge), g.edge_target[edge]);
-                    if reversed {
-                        std::mem::swap(&mut from, &mut to);
-                    }
-                    let (high, low) = (bound.bound(from), bound.bound(to));
-                    if high.is_finite() {
-                        assert!(
-                            high <= low + cost + 1e-9 * high.max(1.0),
-                            "{context} edge {edge} {targets:?} {reversed}: {high} > {low} + {cost}"
-                        );
-                        checked += 1;
-                    }
-                }
+                let potential = plan.potential(targets, reversed, &[], &scratch[0], &scratch[1]);
+                let bound = |node: u32| potential.get(node);
+                let at = format!("{context} {targets:?}");
+                checked += assert_consistent(&g, &costs, reversed, bound, &at);
                 let exact = exact_node_distances(&g, column.cost, targets, reversed);
                 for node in &nodes {
-                    let (bound, exact) = (bound.bound(*node), exact[*node as usize]);
+                    let (bound, exact) = (bound(*node), exact[*node as usize]);
                     assert!(
-                        bound <= exact + 1e-9 * exact.max(1.0),
+                        bound <= exact + 1e-6 * exact.max(1.0),
                         "{context} node {node} {targets:?} {reversed}: bound {bound} > exact {exact}"
                     );
                 }
@@ -6221,7 +6069,7 @@ fn profile_landmark_bounds_are_consistent_and_admissible() {
             assert!(checked > 500, "{context}: {checked}");
         }
     }
-    eprintln!("own landmarks: {adopted:#?}");
+    eprintln!("own metrics: {adopted:#?}");
     assert!(adopted.len() >= 16, "{adopted:#?}");
     assert_eq!(
         adopted
@@ -6236,7 +6084,7 @@ fn profile_landmark_bounds_are_consistent_and_admissible() {
 /// SAR on Emergency and Tracked (R1, R2 and R4, alone and combined, with R3)
 /// against the reference oracle: routes (bidirectional and forward only),
 /// matrices in every mode and isochrones have its costs, bounded by the
-/// profiles' own landmarks.
+/// potentials of the profiles' own metrics.
 #[test]
 fn sar_on_emergency_and_tracked_matches_the_reference() {
     use super::search::patch::dijkstra;
@@ -6284,7 +6132,7 @@ fn sar_on_emergency_and_tracked_matches_the_reference() {
             request.options.max_correlation_distance_m = 60;
             request.options.sar = Some(sar.clone());
             let reference = oracle.matrix(request.clone());
-            for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+            for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
                 test_mode::set(Some(mode));
                 let actual = compact.matrix(request.clone());
                 test_mode::set(None);
@@ -6779,9 +6627,9 @@ fn sar_stage2_sets() -> Vec<(&'static str, crate::RouteSarOptions)> {
 
 /// R5 against the reference oracle: routes (bidirectional and forward
 /// only), matrices in every mode and isochrones have its costs. Paths stay
-/// out of the stored Wheeled landmark metric, so an R5 column drops the
-/// stored landmarks and is bounded by landmarks of its own metric (paths at
-/// R5's minimum factor), and an R1 column keeps the stored ones.
+/// out of the stored Wheeled column, so an R5 column is bounded by
+/// potentials of its own metric (paths at R5's minimum factor), and an R1
+/// column by the stored column's.
 #[test]
 fn sar_vehicle_on_paths_matches_the_reference() {
     use super::search::patch::dijkstra;
@@ -6845,7 +6693,7 @@ fn sar_vehicle_on_paths_matches_the_reference() {
         request.options.max_correlation_distance_m = 60;
         request.options.sar = Some(sar.clone());
         let reference = oracle.matrix(request.clone());
-        for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+        for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
             test_mode::set(Some(mode));
             let actual = compact.matrix(request.clone());
             test_mode::set(None);
@@ -6881,10 +6729,19 @@ fn sar_vehicle_on_paths_matches_the_reference() {
             key,
             package.file().column_for(MobilityProfile::Wheeled),
         )
-        .landmark_scale
+        .potential
     };
-    assert_eq!(scale(r#"{"relaxations":{"vehicle_on_paths":{}}}"#), None);
-    let legal = scale(r#"{"relaxations":{"legal_access":{}}}"#).expect("landmarks kept");
+    // The stored column cannot use the paths: the profile's own metric
+    // bounds R5.
+    assert!(matches!(
+        scale(r#"{"relaxations":{"vehicle_on_paths":{}}}"#),
+        Some((super::columns::PotentialBase::Metric(_), _))
+    ));
+    let Some((super::columns::PotentialBase::Stored(_), legal)) =
+        scale(r#"{"relaxations":{"legal_access":{}}}"#)
+    else {
+        panic!("the stored column bounds R1");
+    };
     assert!(legal > 0.99 && legal <= 1.0, "{legal}");
 }
 
@@ -7885,17 +7742,16 @@ fn derived_column_walks_match_where_the_column_opens_an_edge_at_a_marked_node() 
     );
 }
 
-/// Engines over the fixture's graph: one package with landmarks and no CCH
-/// order (format 1's bounds), one with the order and no landmarks (what the
-/// compiler writes by default), its potentials prepared.
-fn landmark_and_potential_engines(
+/// Engines over the fixture's graph: one package without a CCH order (bounded
+/// by the straight line alone), one with it (what the compiler writes by
+/// default), its potentials prepared.
+fn straight_line_and_potential_engines(
     fixture: &Fixture,
     path: &Path,
 ) -> (RoutingEngine, RoutingEngine) {
-    let build = |name: &str, landmark_count: usize, cch_order: bool| {
+    let build = |name: &str, cch_order: bool| {
         let file = path.with_file_name(name);
         let options = PackageBuildOptions {
-            landmark_count,
             cch_order,
             ..PackageBuildOptions::default()
         };
@@ -7903,18 +7759,17 @@ fn landmark_and_potential_engines(
             .unwrap();
         RoutingPackage::open(&file).unwrap()
     };
-    let landmarks = build("landmarks.mrt", 16, false);
-    assert!(landmarks.file.view().cch_rank.is_empty());
-    let potentials = build("potentials.mrt", 0, true);
-    assert_eq!(potentials.file.view().landmark_count, 0);
+    let straight = build("straight-line.mrt", false);
+    assert!(straight.file.view().cch_rank.is_empty());
+    assert!(straight.prepare_potentials().is_none());
+    let potentials = build("potentials.mrt", true);
     let stats = potentials.prepare_potentials().expect("potentials");
-    assert!(stats.stored_order);
     assert_eq!(
         stats.column_count,
         potentials.file.view().edge_cost.len() / potentials.counts().edge_count
     );
     (
-        RoutingEngine::from_package(Arc::new(landmarks)),
+        RoutingEngine::from_package(Arc::new(straight)),
         RoutingEngine::from_package(Arc::new(potentials)),
     )
 }
@@ -7940,12 +7795,12 @@ fn cch_potentials_are_exact_node_distances() {
 }
 
 #[test]
-fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
+fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_the_straight_line() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("costing.mrt");
     let graph = costing_grid_graph();
     let fixture = persist(&graph, &path);
-    let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let (straight, potentials) = straight_line_and_potential_engines(&fixture, &path);
     let points = grid_points()
         .into_iter()
         .chain(many_grid_targets().into_iter().step_by(30))
@@ -7953,7 +7808,7 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
     let mut per_edge = crate::RouteOptions::default();
     apply_per_edge_options(&graph, &mut per_edge);
     let overlay = grid_overlay(&graph);
-    let (mut compared, mut landmark_visited, mut potential_visited) = (0usize, 0usize, 0usize);
+    let (mut compared, mut straight_visited, mut potential_visited) = (0usize, 0usize, 0usize);
     for (name, costing) in costing_option_sets() {
         for variant in [
             "plain",
@@ -7994,17 +7849,17 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
                         };
                         let context =
                             format!("{name} {variant} {profile:?} {origin:?} -> {destination:?}");
-                        let expected = landmarks.route_leg(request());
+                        let expected = straight.route_leg(request());
                         let actual = potentials.route_leg(request());
                         match (expected, actual) {
                             (Ok(expected), Ok(actual)) => {
                                 compared += 1;
-                                landmark_visited += expected.diagnostics.visited_edge_count;
+                                straight_visited += expected.diagnostics.visited_edge_count;
                                 potential_visited += actual.diagnostics.visited_edge_count;
                                 assert!(
                                     (expected.cost - actual.cost).abs()
                                         <= 1e-9 * expected.cost.max(1.0),
-                                    "{context}: landmarks {} vs potentials {}",
+                                    "{context}: straight line {} vs potentials {}",
                                     expected.cost,
                                     actual.cost
                                 );
@@ -8024,7 +7879,7 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
                                 );
                             }
                             (expected, actual) => panic!(
-                                "{context}: landmarks {:?} vs potentials {:?}",
+                                "{context}: straight line {:?} vs potentials {:?}",
                                 expected.map(|result| result.cost).map_err(|f| f.error),
                                 actual.map(|result| result.cost).map_err(|f| f.error)
                             ),
@@ -8036,11 +7891,11 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
     }
     search::gates::force_gate_limit(None);
     assert!(compared > 500, "only {compared} routes");
-    // Under `WAYFARER_POTENTIAL=cch` both engines bound with potentials.
+    // Under `WAYFARER_POTENTIALS=off` both engines bound with the straight
+    // line.
     assert!(
-        crate::debug::potential() != crate::debug::Potential::Auto
-            || potential_visited < landmark_visited,
-        "potentials visited {potential_visited} edges, landmarks {landmark_visited}"
+        crate::debug::potentials_off() || potential_visited < straight_visited,
+        "potentials visited {potential_visited} edges, the straight line {straight_visited}"
     );
 }
 
@@ -8054,7 +7909,7 @@ fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
     for seed in 1..=4 {
         let path = dir.path().join(format!("restricted-{seed}.mrt"));
         let fixture = persist(&randomly_restricted_grid(seed), &path);
-        let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+        let (straight, potentials) = straight_line_and_potential_engines(&fixture, &path);
         for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
             for origin in &points {
                 for destination in &points {
@@ -8062,7 +7917,7 @@ fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
                         continue;
                     }
                     let context = format!("seed {seed} {profile:?} {origin:?} -> {destination:?}");
-                    let expected = route(&landmarks, *origin, *destination, profile, |_| {});
+                    let expected = route(&straight, *origin, *destination, profile, |_| {});
                     let actual = route(&potentials, *origin, *destination, profile, |_| {});
                     assert_eq!(expected.is_some(), actual.is_some(), "{context}");
                     let (Some(expected), Some(actual)) = (expected, actual) else {
@@ -8070,7 +7925,7 @@ fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
                     };
                     assert!(
                         (expected.cost - actual.cost).abs() <= 1e-9 * expected.cost.max(1.0),
-                        "{context}: landmarks {} vs potentials {}",
+                        "{context}: straight line {} vs potentials {}",
                         expected.cost,
                         actual.cost
                     );
@@ -8082,13 +7937,13 @@ fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
 }
 
 #[test]
-fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_landmarks() {
+fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_the_straight_line() {
     use crate::matrix::{MatrixMode, test_mode};
     let dir = tempdir().unwrap();
     let path = dir.path().join("costing.mrt");
     let graph = costing_grid_graph();
     let fixture = persist(&graph, &path);
-    let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let (straight, potentials) = straight_line_and_potential_engines(&fixture, &path);
     let sources = grid_points();
     let targets = many_grid_targets()
         .into_iter()
@@ -8101,7 +7956,7 @@ fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_landmarks() {
     for (name, costing) in costing_option_sets() {
         for variant in ["plain", "per-edge", "overlay"] {
             for profile in ALL_TEST_PROFILES {
-                for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+                for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
                     let request = || {
                         let mut request = crate::RouteMatrixRequest::new(
                             sources.clone(),
@@ -8119,7 +7974,7 @@ fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_landmarks() {
                         request
                     };
                     test_mode::set(Some(mode));
-                    let expected = landmarks.matrix(request());
+                    let expected = straight.matrix(request());
                     let actual = potentials.matrix(request());
                     test_mode::set(None);
                     let context = format!("{name} {variant} {profile:?} {mode:?}");
@@ -8161,7 +8016,7 @@ fn via_alternatives_are_valid_routes_within_the_policy() {
     let path = dir.path().join("costing.mrt");
     let graph = costing_grid_graph();
     let fixture = persist(&graph, &path);
-    let (_, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let (_, potentials) = straight_line_and_potential_engines(&fixture, &path);
     let view = potentials.route_graph_view().routing_package().view();
     let points = grid_points()
         .into_iter()

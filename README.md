@@ -27,9 +27,9 @@ connectivity, on roads that change by the hour.
 - **A lean runtime.** The routing-only C library is about 4.6 MB with 29
   third-party crates, and the compiler library prints nothing, reads no
   environment and installs no allocator. Typical requests take a few
-  milliseconds (median 3.6 ms on Małopolskie, single thread). The packages
-  themselves aren't small: Małopolskie's is 260 MiB, 1.16× Valhalla's tiles
-  for the same region (see [Limits](#limits)).
+  milliseconds: on Małopolskie, drives p95 9.3 ms and walks p95 25 ms
+  (`benchmarks/gates`). Packages are compact: Małopolskie's is 176 MiB,
+  0.79× Valhalla's tiles for the same region.
 - **Change the roads per request.** Closures, blocked bridges, slow-go
   stretches, newly opened tracks and ad-hoc connectors are overlays on a
   request, not a recompile. Overlay sets bind to a package by its hash, so a
@@ -49,14 +49,10 @@ overlap 0.97.
 
 - **Regions, not continents.** Wayfarer is built and measured on regional
   extracts: a province or a small country. Małopolskie (194 MiB extract,
-  1.07 million nodes, 2.56 million edges) gives a 176 MiB package (format 2;
-  260 MiB in format 1, a third of it landmark distances) and needs about
+  1.07 million nodes, 2.56 million edges) gives a 176 MiB package and needs about
   1.2 GiB to compile (`--low-memory` barely changes that at this size).
   Packages and compile memory grow with the road network. Larger extracts are
   untested.
-- **Slow tails.** The median request is a few milliseconds, but the slowest
-  long drives take far longer: p95 153 ms on Małopolskie, against Valhalla's
-  16 ms.
 - **No elevation.** Costs and durations ignore climbs: there is no elevation
   model, and OSM `incline` tags are stored but not costed. A host that cares
   can add cost overlays.

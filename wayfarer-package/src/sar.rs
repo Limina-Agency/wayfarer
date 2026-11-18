@@ -12,9 +12,8 @@
 //! - a [`SarPathClass`] and a [`SarWidthClass`] per shared info, in the
 //!   `SharedInfoCostClasses` word (R5 `vehicle_on_paths`): footways, paths
 //!   and cycleways are physically drivable, with their width when tagged;
-//! - [`SarPackageInfo`] in the metadata: the minimum surcharges the Wheeled
-//!   landmarks were built with (the *landmark metric*; paths
-//!   stay out of it) and R5's minimum factor.
+//! - [`SarPackageInfo`] in the metadata: the least factors requests may set
+//!   for R1, R2 and R5, which the engine's bound metrics of SAR columns use.
 //!
 //! [`Section::EdgeProfileAccess`]: crate::format::Section::EdgeProfileAccess
 
@@ -32,23 +31,13 @@ pub const ACCESS_WRONG_WAY: u8 = 1 << 7;
 /// The profile slot bits (0–5) of an `EdgeProfileAccess` byte.
 pub const ACCESS_PROFILE_BITS: u8 = 0b0011_1111;
 
-/// The least R1 factor a request may set, and the factor the landmark metric
-/// applies to an edge vehicles are legally denied (the default).
+/// The least R1 factor a request may set (the default).
 pub const SAR_LEGAL_ACCESS_MIN_FACTOR: f64 = 1.2;
-/// The least R2 factor a request may set, and the landmark metric's factor
-/// on an edge against a vehicle one-way (the default).
+/// The least R2 factor a request may set (the default).
 pub const SAR_WRONG_WAY_MIN_FACTOR: f64 = 2.0;
 /// The least R5 factor a request may set (the default: ×3 over the wheeled
-/// path cost). Paths stay out of the landmark metric (see
-/// [`SarPackageInfo::landmark_factor`]).
+/// path cost).
 pub const SAR_VEHICLE_ON_PATHS_MIN_FACTOR: f64 = 3.0;
-
-/// A landmark metric cost: the edge's default cost (with legal access)
-/// times its [`SarPackageInfo::landmark_factor`], as the f32 the columns
-/// store. The compiler and the engine compute it alike.
-pub fn sar_metric_cost(cost: f64, factor: f64) -> f32 {
-    (cost * factor) as f32
-}
 
 /// Highway classes a car can physically drive (their default modes include
 /// motor vehicles).
@@ -610,11 +599,11 @@ impl SarBarrierClass {
 
 /// The package's SAR data (`RoutingPackageMetadata::sar`): present when the
 /// package holds the physical graph, the legal reasons and the barrier
-/// nodes. The Wheeled landmarks are computed on the *landmark metric*: the
-/// stored Wheeled column, extended to every physically drivable edge it
-/// cannot use at its default Wheeled cost times these minimum factors (both
-/// when an edge needs both relaxations). A request's factors may not be
-/// lower, so every SAR column stays at or above the metric and its landmark
+/// nodes. A vehicle profile's SAR columns are bounded by the potentials of
+/// a *bound metric*: the profile's costs, extended to every physically
+/// drivable edge R1 and R2 can open at its cost times these minimum factors
+/// (and, for R5 columns, every path at R5's). A request's factors may not
+/// be lower, so every SAR column stays at or above its metric and the
 /// bounds hold at scale 1.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -623,8 +612,7 @@ pub struct SarPackageInfo {
     pub legal_access_min_factor: f64,
     pub wrong_way_min_factor: f64,
     /// R5 `vehicle_on_paths`: the least factor a request may set. Paths
-    /// stay out of the landmark metric: in it at this factor they cost
-    /// normal routes 40% more visited edges on the Małopolskie corpus.
+    /// are in the bound metric of R5 columns only.
     pub vehicle_on_paths_min_factor: f64,
 }
 
@@ -639,25 +627,6 @@ impl Default for SarPackageInfo {
 }
 
 impl SarPackageInfo {
-    /// The landmark metric's factor on an edge with these facts that the
-    /// stored column cannot use; `None` when it is not physically drivable
-    /// or is a path (R5): paths stay out of the metric, so a
-    /// column that can use one searches without landmarks.
-    pub fn landmark_factor(&self, facts: SarEdgeFacts) -> Option<f64> {
-        let needs = SarEdgeRelaxations::needs(facts)?;
-        if needs.vehicle_on_paths {
-            return None;
-        }
-        let mut factor = 1.0;
-        if needs.legal_access {
-            factor *= self.legal_access_min_factor;
-        }
-        if needs.wrong_way {
-            factor *= self.wrong_way_min_factor;
-        }
-        Some(factor)
-    }
-
     /// Whether every factor is finite and at least 1.
     pub fn is_valid(&self) -> bool {
         let valid = |factor: f64| factor.is_finite() && factor >= 1.0;
@@ -826,14 +795,6 @@ mod tests {
         };
         assert_eq!(both.factor(facts(wrong, legal)), Some(2.0));
         assert_eq!(both.factor(facts(wrong, denied)), Some(3.0));
-        let info = SarPackageInfo::default();
-        assert_eq!(info.landmark_factor(facts(wrong, denied)), Some(1.2 * 2.0));
-        assert_eq!(info.landmark_factor(facts(0, denied)), None);
-        // Physical, neither denied nor against a one-way nor a path.
-        assert_eq!(
-            info.landmark_factor(facts(ACCESS_VEHICLE_PHYSICAL, legal)),
-            None
-        );
     }
 
     #[test]
@@ -885,9 +846,7 @@ mod tests {
         );
         assert_eq!(bits(3.5, false), 0);
 
-        // Paths stay out of the landmark metric.
         let info = SarPackageInfo::default();
-        assert_eq!(info.landmark_factor(path(P::Path, W::Wide)), None);
         assert!(info.is_valid());
         assert!(
             !SarPackageInfo {

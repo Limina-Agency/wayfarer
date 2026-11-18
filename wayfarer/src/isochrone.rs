@@ -214,7 +214,6 @@ impl RoutingEngine {
             cancellation: &request.options.cancellation,
             cost_overrides,
             // A one-to-all expansion has no goal to direct it towards.
-            use_landmarks: false,
             gates: Vec::new(),
             restriction_penalty: crate::sar::restriction_penalty(&request.options),
         };
@@ -240,7 +239,6 @@ impl RoutingEngine {
                         edge_cost: &edge_cost,
                         split_cost: &split_cost,
                     },
-                    landmarks: None,
                     potentials: false,
                     gates: &[],
                     profile_bit: profile_bit(request.profile),

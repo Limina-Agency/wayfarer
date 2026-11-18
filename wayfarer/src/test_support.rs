@@ -17,14 +17,10 @@ pub(crate) fn package(
     Ok((RoutingPackage::from_bytes(&bytes)?, report))
 }
 
-/// The unit tests' package options: the default (the CCH order) plus 16
-/// landmarks, so that the landmark code keeps its tests; searches bound with
-/// the potentials wherever they apply.
+/// The unit tests' package options: the compiler's default (with the CCH
+/// order, so searches bound with the potentials).
 pub(crate) fn test_options() -> PackageBuildOptions {
-    PackageBuildOptions {
-        landmark_count: 16,
-        ..PackageBuildOptions::default()
-    }
+    PackageBuildOptions::default()
 }
 
 /// An engine over the package of `graph`, built with [`test_options`].

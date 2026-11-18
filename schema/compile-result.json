@@ -50,7 +50,7 @@
       "type": "string"
     },
     "report": {
-      "description": "What the package build stored (restrictions, shapes, landmarks, ...)\nand its timings.",
+      "description": "What the package build stored (restrictions, shapes, pieces, ...)\nand its timings.",
       "$ref": "#/$defs/PackageBuildReport"
     }
   },
@@ -168,33 +168,6 @@
             ]
           }
         },
-        "landmarkMs": {
-          "type": "integer",
-          "format": "uint128",
-          "default": 0,
-          "minimum": 0
-        },
-        "landmarkOneAnchorCount": {
-          "description": "(Column, node)s whose landmark distances derive from one anchor's\nrow, over all columns (not stored as rows).",
-          "type": "integer",
-          "format": "uint",
-          "default": 0,
-          "minimum": 0
-        },
-        "landmarkRowCount": {
-          "description": "Landmark rows stored, over all columns (rows unreachable from and to\nevery landmark are not).",
-          "type": "integer",
-          "format": "uint",
-          "default": 0,
-          "minimum": 0
-        },
-        "landmarkTwoAnchorCount": {
-          "description": "Likewise from two anchors' rows.",
-          "type": "integer",
-          "format": "uint",
-          "default": 0,
-          "minimum": 0
-        },
         "loneEdgeCount": {
           "description": "Edges without a twin (`Section::LoneInEdge`).",
           "type": "integer",
@@ -242,15 +215,8 @@
           "default": 0,
           "minimum": 0
         },
-        "sarMetricEdgeCount": {
-          "description": "Edges the Wheeled landmark metric adds to the stored column (SAR).",
-          "type": "integer",
-          "format": "uint",
-          "default": 0,
-          "minimum": 0
-        },
         "sarPathEdgeCountByWidth": {
-          "description": "Paths R5 `vehicle_on_paths` can open (physically drivable, no legal\nvehicle access), by width class: unknown, under 2.5 m, 2.5–3 m, 3 m\nor more. They stay out of the landmark metric.",
+          "description": "Paths R5 `vehicle_on_paths` can open (physically drivable, no legal\nvehicle access), by width class: unknown, under 2.5 m, 2.5–3 m, 3 m\nor more.",
           "type": "array",
           "default": [
             0,
@@ -359,14 +325,9 @@
         "tierExceptionCount",
         "costTupleCount",
         "wayIdWideCount",
-        "landmarkRowCount",
-        "landmarkOneAnchorCount",
-        "landmarkTwoAnchorCount",
-        "sarMetricEdgeCount",
         "sarPathEdgeCountByWidth",
         "barrierNodeCount",
         "assembleMs",
-        "landmarkMs",
         "cchOrderMs",
         "requestMs",
         "totalMs"

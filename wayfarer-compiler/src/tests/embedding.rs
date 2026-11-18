@@ -158,8 +158,8 @@ fn a_cancel_while_building_the_package_stops_the_compile_and_leaves_nothing() {
 }
 
 #[test]
-fn a_cancel_while_computing_landmarks_stops_the_compile_and_leaves_nothing() {
-    cancel_in(CompileStage::Landmarks);
+fn a_cancel_while_ordering_nodes_stops_the_compile_and_leaves_nothing() {
+    cancel_in(CompileStage::CchOrder);
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn the_default_scratch_sits_next_to_the_output_and_goes_whatever_the_outcome() {
     request.output = dir.path().join("a").join("b").join("routing.mrt");
     let cancel = CancelToken::new();
     let result = compile(&request, &cancel, |progress: &CompileProgress| {
-        if progress.stage == CompileStage::Landmarks {
+        if progress.stage == CompileStage::CchOrder {
             cancel.cancel();
         }
     });
@@ -322,7 +322,7 @@ fn the_result_describes_the_package_written() {
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["datasetHash"], result.dataset_hash.as_str());
     assert_eq!(json["graphId"], "fixture");
-    assert!(json["report"]["landmarkRowCount"].is_u64(), "{json}");
+    assert!(json["report"]["cchOrderMs"].is_u64(), "{json}");
     assert!(json.get("graphManifest").is_none());
 }
 

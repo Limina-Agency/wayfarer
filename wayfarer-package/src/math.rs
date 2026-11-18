@@ -3,7 +3,7 @@
 //! `f64::sin`, `cos`, `tan`, `asin`, `atan2`, `ln` and the like call the
 //! platform's C math library, whose results differ in the last bits between
 //! glibc, musl, Apple's libm, Bionic and the MSVC runtime. The compiler derives
-//! node unit vectors, edge lengths, headings and landmark candidates from them,
+//! node unit vectors, edge lengths and headings from them,
 //! so the package bytes depended on the platform the compiler was built for.
 //! These functions come from the `libm` crate instead, a pure-Rust port of
 //! musl's libm: plain IEEE arithmetic, so the same bits on every target and in

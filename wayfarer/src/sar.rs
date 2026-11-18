@@ -5,7 +5,7 @@
 //! in [`RouteSarOptions`]; there is no switch that relaxes everything. A
 //! relaxation only adds cost on top of the base profile (a vehicle profile:
 //! Wheeled, Emergency or Tracked), never lowers it, so the
-//! landmark bounds stay valid.
+//! search bounds stay valid.
 //!
 //! Relaxations on the road network alone:
 //!
@@ -53,7 +53,7 @@ use crate::types::{GeoPoint, MobilityProfile, RouteError};
 /// The default R3 surcharge: seconds per violated turn restriction.
 pub const SAR_DEFAULT_TURN_RESTRICTION_PENALTY_S: f64 = 60.0;
 /// The least R3 surcharge a request may set. Restrictions are applied in the
-/// search, outside the landmark metric, so any penalty of at least zero keeps
+/// search, outside the bounds' metric, so any penalty of at least zero keeps
 /// the bounds valid; a negative one would reward breaking a restriction.
 pub const SAR_MIN_TURN_RESTRICTION_PENALTY_S: f64 = 0.0;
 /// The default R7 reach: the longest straight-line leg between an endpoint
@@ -362,8 +362,8 @@ pub struct RouteSarCapability {
     /// Why `unavailable` is not empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// The least R1 and R2 factors a request may set (the package's
-    /// landmark metric), on a package with SAR data.
+    /// The least R1 and R2 factors a request may set (the bound metric of
+    /// SAR columns), on a package with SAR data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_access_min_factor: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,7 +378,7 @@ pub struct RouteSarCapability {
 impl Eq for RouteSarCapability {}
 
 impl RouteSarCapability {
-    /// The capability of a package with SAR data `sar` (its landmark
+    /// The capability of a package with SAR data `sar` (its bound
     /// metric): every relaxation, at the metric's least factors.
     pub fn with_package_data(sar: SarPackageInfo) -> Self {
         Self {
@@ -618,7 +618,7 @@ impl SarOpenEdges {
 }
 
 /// The SAR costs a request adds at transitions between edges (outside the
-/// landmark metric, like turn costs): R2's entry into a wrong-way stretch and
+/// bounds' metric, like turn costs): R2's entry into a wrong-way stretch and
 /// R4's barriers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SarTransitions {

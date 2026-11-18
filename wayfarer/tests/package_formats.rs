@@ -7,9 +7,9 @@ use std::sync::Arc;
 use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RouteStatus, RoutingEngine, RoutingPackage};
 use wayfarer_compiler::package_build::{PackageBuildOptions, write_package};
 use wayfarer_package::format::{
-    HEADER_COUNTS, HEADER_EDGE_ID_BASE, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, HEADER_VERSION,
-    MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION, Section,
-    TABLE_ENTRY_BYTES, section_count,
+    HEADER_COUNTS, HEADER_EDGE_ID_BASE, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM,
+    MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION, SECTION_COUNT, Section,
+    TABLE_ENTRY_BYTES,
 };
 use wayfarer_road_graph::{
     DirectionalAccess, RoadGraphBuilder, RoadType, RoutableWay, build_road_graph_manifest,
@@ -87,12 +87,7 @@ fn short_road_request(profile: MobilityProfile) -> LegRequest {
 /// `bytes` with a root checksum that matches its header and section table, as
 /// a hostile package would carry: the checksum guards against corruption only.
 fn resigned(mut bytes: Vec<u8>) -> Vec<u8> {
-    let version = u32::from_le_bytes(
-        bytes[HEADER_VERSION..HEADER_VERSION + 4]
-            .try_into()
-            .unwrap(),
-    );
-    let table_end = HEADER_FIXED_BYTES + section_count(version) * TABLE_ENTRY_BYTES;
+    let table_end = HEADER_FIXED_BYTES + SECTION_COUNT * TABLE_ENTRY_BYTES;
     let mut header = bytes[..HEADER_FIXED_BYTES].to_vec();
     header[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32].fill(0);
     let mut root = blake3::Hasher::new();
@@ -111,23 +106,17 @@ fn section_range(bytes: &[u8], section: Section) -> std::ops::Range<usize> {
     offset..offset + len
 }
 
-/// A package whose landmark names a node it doesn't have is rejected when it
-/// opens; engines used to index node arrays with it at query time (found by
-/// the `package` fuzz target).
+/// A package with a nonzero reserved header count is rejected when it opens:
+/// the slot held the landmark count of format 1.
 #[test]
-fn a_landmark_node_out_of_range_is_rejected() {
-    // Format 1 stores landmarks; format 2 packages, by default, do not.
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/format-1/short_road.mrt");
+fn a_nonzero_reserved_header_count_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
     let mut bytes = std::fs::read(path).unwrap();
-    let entry = HEADER_FIXED_BYTES + Section::LandmarkNode as usize * TABLE_ENTRY_BYTES;
-    let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
-    let len = u64::from_le_bytes(bytes[entry + 8..entry + 16].try_into().unwrap()) as usize;
-    assert!(len >= 4, "the fixture stores landmark nodes");
-    bytes[offset..offset + 4].copy_from_slice(&3_788_965_444u32.to_le_bytes());
+    let at = HEADER_COUNTS + 6 * 8;
+    bytes[at..at + 8].copy_from_slice(&1u64.to_le_bytes());
     let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
     assert!(
-        error.to_string().contains("landmark node out of range"),
+        error.to_string().contains("reserved header count"),
         "{error}"
     );
 }
@@ -155,7 +144,8 @@ fn a_negative_edge_cost_is_rejected() {
 fn overflowing_header_counts_are_rejected() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
     let bytes = std::fs::read(path).unwrap();
-    // Node, edge, shared-info, restriction, column and landmark counts.
+    // Node, edge, shared-info, restriction and column counts, and the
+    // reserved slot.
     for slot in 0..7 {
         for count in [
             u64::MAX,

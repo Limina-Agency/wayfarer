@@ -10,13 +10,32 @@ costing model and the C ABI version a release reads or writes.
 - **Package format 2: CCH potentials instead of landmarks.** The compiler
   stores the node order of CCH potentials (new section `CchRank`, computed
   with integer arithmetic only, so packages stay the same bytes on every
-  platform) and no landmark distances by default (`PackageBuildOptions`
-  `landmark_count`, `DEFAULT_LANDMARK_COUNT` to ask for them). Malopolskie:
-  260 MiB -> 176 MiB, compile 20 s, about 0.7 s from open to the first route
-  (the potentials are customized then, or in `prefetch`). Format 1
-  packages still open and route on their landmarks;
-  `RoutingPackage::prepare_potentials` gives them potentials too (about 3 s
-  for Malopolskie). Routes do not change: both bounds are exact.
+  platform) and no landmark distances. Malopolskie: 260 MiB -> 176 MiB,
+  compile 20 s, about 0.7 s from open to the first route (the potentials
+  are customized then, or in `prefetch`). Routes do not change: both bounds
+  are exact.
+- **Format 1 is no longer read, and landmarks are gone.** Opening a format 1
+  package fails with `Outdated` (recompile it); `MIN_READ_FORMAT_VERSION` is
+  2. The engine has no landmark bounds and the compiler cannot write
+  landmarks: format 1's landmark sections are `Reserved1` to `Reserved12`
+  (written as a package without landmarks wrote them, so format 2 packages
+  keep their bytes) and header count slot 6 must be zero. A package without
+  a CCH order is bounded by the straight line alone. Breaking API changes:
+  `PackageCounts::landmark_count`, `profile_landmark_capacity`, the
+  `PotentialStats` fields `stored_order`, `degree2_eliminated` and
+  `top_separator`, the `PackageBuildOptions` field `landmark_count` and
+  `DEFAULT_LANDMARK_COUNT`, and the `PackageBuildReport` landmark and SAR
+  metric fields are removed; the compile stage `landmarks` is now
+  `cch_order` (`CompileStage::CchOrder`, the report's `cch_order_ms`).
+  `wayfarer info` drops `landmarkCount` and lists `readableFormats` [2]. The
+  debug switch `WAYFARER_POTENTIAL=auto|alt|cch` is now
+  `WAYFARER_POTENTIALS=on|off` (`internals::set_potentials` replaces
+  `internals::set_potential`).
+- **Bucket many-to-many matrices removed.** They were opt-in
+  (`WAYFARER_MATRIX_MODE=buckets`) and slower than pairwise cells bounded by
+  the potentials. `WAYFARER_MATRIX_MODE`, `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS`
+  and `WAYFARER_CCH_ROW_TARGETS` are now read only with the `debug-env`
+  feature, like the other debug switches.
 - **Every search bounds with the potentials:** stored and derived columns,
   the strict destination-only pass, discounts, opened roads and SAR
   openings (gates at exact offsets), Emergency, Tracked and R5 columns (their

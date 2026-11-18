@@ -6,7 +6,6 @@
   "edgeCount": 8550,
   "formatVersion": 2,
   "graphId": "monaco",
-  "landmarkCount": 0,
   "nodeCount": 3184,
   "profileColumnCount": 2,
   "quality": {
@@ -20,7 +19,6 @@
     "status": "warning"
   },
   "readableFormats": [
-    1,
     2
   ],
   "sharedInfoCount": 4307

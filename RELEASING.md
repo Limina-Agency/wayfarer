@@ -10,7 +10,7 @@ the costing model releases both.
      previous format, and add `fixtures/routing/format-<N>/` with a package of
      the new format. A released format's fixture is frozen: never regenerate
      it. Raising `MIN_READ_FORMAT_VERSION` drops a format: delete its fixture
-     and say so in the changelog. Today both are 1 (`fixtures/routing/format-1/`).
+     and say so in the changelog. Today both are 2 (`fixtures/routing/format-2/`).
    - Stored costs: bump `COSTING_MODEL_VERSION` and release both lines.
    - C ABI: an incompatible change to `wayfarer.h` bumps
      `WAYFARER_ABI_VERSION`.

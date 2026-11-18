@@ -3,8 +3,8 @@
 The file format of offline routing packages. A package (`routing.mrt`) is one
 memory-mappable file holding the road network of an OpenStreetMap extract:
 nodes, directed edges and the attributes they share, per-profile edge costs,
-turn restrictions and the node order of CCH potentials (format 2; landmark
-distances in format 1), in checksummed sections. This crate
+turn restrictions and the node order of CCH potentials, in checksummed
+sections. This crate
 opens, verifies, reads and writes such files, and defines the road vocabulary
 (`RoadEdge`, `SharedEdgeInfo`, `MobilityProfile`, ...) that the route compiler
 and the routing engine share.
@@ -55,7 +55,6 @@ compactly or derived from others, so read them through the accessors:
 
 | Data | Accessor | Layout |
 |---|---|---|
-| Landmark distances | `LandmarkTable::get(rows.row(column, node), landmark)` | Rows only for nodes some landmark reaches or is reached from; a presence bit per (column, node) and a rank count per 64-bit word (`LandmarkRowPresent`, `LandmarkRowRank`). A missing row reads as `LANDMARK_INFINITY`. |
 | Exact node positions | `Sections::node_lat_lng` | Only the nodes that are not their E7 position (`NodeLatLngNodes`, sorted); the others read their E7 position. |
 | Costing inputs | `si_cost_flags[cost_tuple(shared)]` (likewise classes, speeds) | A table of distinct (flags, classes, speeds) tuples and a `u16` tuple per shared info (`SharedInfoCostTuple`). |
 | Way ids | `si_way.get(shared)`, `si_way.same_way(a, b)` | `u32`, with `WAY_ID_WIDE` marking ids kept apart (`SharedInfoWayWide*`): synthetic negative ids. |
