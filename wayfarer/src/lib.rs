@@ -104,7 +104,16 @@ pub mod internals {
     pub use crate::map_matching::{match_navigation_trace, match_navigation_trace_cancellable};
     pub use crate::overlay::project_route_overlay_geometry;
     pub use crate::package::columns::DerivedColumnProbe;
+
+    /// Chooses the lower bound of route searches for the whole process:
+    /// `auto` (CCH potentials once prepared, the default), `alt` (landmarks
+    /// only) or `cch` (potentials, prepared on first use). False for an
+    /// unknown name. For harnesses comparing the two in one process.
+    pub fn set_potential(name: &str) -> bool {
+        crate::debug::set_potential(name)
+    }
 }
+pub use package::cch::PotentialStats;
 pub use package::{
     PackageCounts, PackageQuality, PackageQualityStatus, ROUTING_PACKAGE_FORMAT_VERSION,
     RoutePackageMemoryProfile, RoutingPackage, RoutingPackageError, RoutingPackageMetadata,

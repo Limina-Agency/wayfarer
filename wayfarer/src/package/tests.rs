@@ -227,7 +227,7 @@ fn persist(graph: &RoadGraph, path: &Path) -> Fixture {
         graph,
         Some(&manifest),
         path,
-        &PackageBuildOptions::default(),
+        &crate::test_support::test_options(),
     )
     .unwrap();
     Fixture {
@@ -1505,8 +1505,9 @@ fn matrix_budget_bounds_each_search() {
         capped(&mut cell_counts.iter().flatten().copied(), largest - 1)
     );
 
-    // Rows: one shared expansion per source (more targets than the pairwise
-    // cut-off).
+    // Rows: one shared expansion per source (forced: the pairwise cut-off
+    // depends on whether CCH potentials bound the cells).
+    crate::matrix::test_mode::set(Some(crate::matrix::MatrixMode::Rows));
     let sources = &points[..3];
     for (name, engine, targets) in [("compact", &compact, many_grid_targets())] {
         let row_counts = sources
@@ -1553,6 +1554,7 @@ fn matrix_budget_bounds_each_search() {
             );
         }
     }
+    crate::matrix::test_mode::set(None);
 }
 
 // ---------------------------------------------------------------------------
@@ -7881,4 +7883,347 @@ fn derived_column_walks_match_where_the_column_opens_an_edge_at_a_marked_node() 
         "{:?}",
         taken.edge_ids
     );
+}
+
+/// Engines over the fixture's graph: one package with landmarks and no CCH
+/// order (format 1's bounds), one with the order and no landmarks (what the
+/// compiler writes by default), its potentials prepared.
+fn landmark_and_potential_engines(
+    fixture: &Fixture,
+    path: &Path,
+) -> (RoutingEngine, RoutingEngine) {
+    let build = |name: &str, landmark_count: usize, cch_order: bool| {
+        let file = path.with_file_name(name);
+        let options = PackageBuildOptions {
+            landmark_count,
+            cch_order,
+            ..PackageBuildOptions::default()
+        };
+        wayfarer_compiler::package_build::write_package(&fixture.graph, None, &file, &options)
+            .unwrap();
+        RoutingPackage::open(&file).unwrap()
+    };
+    let landmarks = build("landmarks.mrt", 16, false);
+    assert!(landmarks.file.view().cch_rank.is_empty());
+    let potentials = build("potentials.mrt", 0, true);
+    assert_eq!(potentials.file.view().landmark_count, 0);
+    let stats = potentials.prepare_potentials().expect("potentials");
+    assert!(stats.stored_order);
+    assert_eq!(
+        stats.column_count,
+        potentials.file.view().edge_cost.len() / potentials.counts().edge_count
+    );
+    (
+        RoutingEngine::from_package(Arc::new(landmarks)),
+        RoutingEngine::from_package(Arc::new(potentials)),
+    )
+}
+
+#[test]
+fn cch_potentials_are_exact_node_distances() {
+    let dir = tempdir().unwrap();
+    let graphs = [
+        ("grid", grid_graph()),
+        ("costing", costing_grid_graph()),
+        ("junction", junction_graph()),
+        ("restricted", randomly_restricted_grid(7)),
+    ];
+    for (name, graph) in graphs {
+        let fixture = persist(&graph, &dir.path().join(format!("{name}.mrt")));
+        let package = &fixture.package;
+        let view = package.file.view();
+        let potentials = package.cch.prepare(&view).expect("potentials").clone();
+        let (pairs, mismatches) = cch::exactness_mismatches(&view, &potentials);
+        assert!(pairs > 0, "{name}");
+        assert_eq!(mismatches, 0, "{name}: {mismatches} of {pairs} pairs");
+    }
+}
+
+#[test]
+fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let points = grid_points()
+        .into_iter()
+        .chain(many_grid_targets().into_iter().step_by(30))
+        .collect::<Vec<_>>();
+    let mut per_edge = crate::RouteOptions::default();
+    apply_per_edge_options(&graph, &mut per_edge);
+    let overlay = grid_overlay(&graph);
+    let (mut compared, mut landmark_visited, mut potential_visited) = (0usize, 0usize, 0usize);
+    for (name, costing) in costing_option_sets() {
+        for variant in [
+            "plain",
+            "per-edge",
+            "scaled",
+            "alternatives",
+            "overlay",
+            "overlay-per-edge",
+        ] {
+            if matches!(variant, "alternatives" | "overlay" | "overlay-per-edge")
+                && name != "default"
+            {
+                continue;
+            }
+            // "scaled": the per-edge options past the gate limit, bounded by
+            // scaling instead of gates.
+            search::gates::force_gate_limit((variant == "scaled").then_some(0));
+            for profile in ALL_TEST_PROFILES {
+                for origin in &points {
+                    for destination in &points {
+                        if origin == destination {
+                            continue;
+                        }
+                        let request = || {
+                            let mut request = LegRequest::new(*origin, *destination, profile);
+                            if matches!(variant, "per-edge" | "scaled" | "overlay-per-edge") {
+                                request.options = per_edge.clone();
+                            }
+                            if variant.starts_with("overlay") {
+                                request.options.dynamic_overlay = Some(overlay.clone());
+                            }
+                            request.options.max_correlation_distance_m = 60;
+                            request.options.costing = costing;
+                            if variant == "alternatives" {
+                                request.options.alternatives.requested_alternative_count = 2;
+                            }
+                            request
+                        };
+                        let context =
+                            format!("{name} {variant} {profile:?} {origin:?} -> {destination:?}");
+                        let expected = landmarks.route_leg(request());
+                        let actual = potentials.route_leg(request());
+                        match (expected, actual) {
+                            (Ok(expected), Ok(actual)) => {
+                                compared += 1;
+                                landmark_visited += expected.diagnostics.visited_edge_count;
+                                potential_visited += actual.diagnostics.visited_edge_count;
+                                assert!(
+                                    (expected.cost - actual.cost).abs()
+                                        <= 1e-9 * expected.cost.max(1.0),
+                                    "{context}: landmarks {} vs potentials {}",
+                                    expected.cost,
+                                    actual.cost
+                                );
+                                assert_eq!(expected.edge_ids, actual.edge_ids, "{context}");
+                                // Alternatives differ by design: with potentials
+                                // they go through via edges (see
+                                // `via_alternatives_are_valid_routes_within_the_policy`).
+                            }
+                            (Err(expected), Err(actual)) => {
+                                // Visited counts differ by design.
+                                assert_eq!(
+                                    std::mem::discriminant(&expected.error),
+                                    std::mem::discriminant(&actual.error),
+                                    "{context}: {:?} vs {:?}",
+                                    expected.error,
+                                    actual.error
+                                );
+                            }
+                            (expected, actual) => panic!(
+                                "{context}: landmarks {:?} vs potentials {:?}",
+                                expected.map(|result| result.cost).map_err(|f| f.error),
+                                actual.map(|result| result.cost).map_err(|f| f.error)
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    search::gates::force_gate_limit(None);
+    assert!(compared > 500, "only {compared} routes");
+    // Under `WAYFARER_POTENTIAL=cch` both engines bound with potentials.
+    assert!(
+        crate::debug::potential() != crate::debug::Potential::Auto
+            || potential_visited < landmark_visited,
+        "potentials visited {potential_visited} edges, landmarks {landmark_visited}"
+    );
+}
+
+#[test]
+fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
+    let dir = tempdir().unwrap();
+    let points = grid_points()
+        .into_iter()
+        .chain(many_grid_targets().into_iter().step_by(5))
+        .collect::<Vec<_>>();
+    for seed in 1..=4 {
+        let path = dir.path().join(format!("restricted-{seed}.mrt"));
+        let fixture = persist(&randomly_restricted_grid(seed), &path);
+        let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+        for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+            for origin in &points {
+                for destination in &points {
+                    if origin == destination {
+                        continue;
+                    }
+                    let context = format!("seed {seed} {profile:?} {origin:?} -> {destination:?}");
+                    let expected = route(&landmarks, *origin, *destination, profile, |_| {});
+                    let actual = route(&potentials, *origin, *destination, profile, |_| {});
+                    assert_eq!(expected.is_some(), actual.is_some(), "{context}");
+                    let (Some(expected), Some(actual)) = (expected, actual) else {
+                        continue;
+                    };
+                    assert!(
+                        (expected.cost - actual.cost).abs() <= 1e-9 * expected.cost.max(1.0),
+                        "{context}: landmarks {} vs potentials {}",
+                        expected.cost,
+                        actual.cost
+                    );
+                    assert_eq!(expected.edge_ids, actual.edge_ids, "{context}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_landmarks() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let sources = grid_points();
+    let targets = many_grid_targets()
+        .into_iter()
+        .step_by(4)
+        .collect::<Vec<_>>();
+    let mut per_edge = crate::RouteOptions::default();
+    apply_per_edge_options(&graph, &mut per_edge);
+    let overlay = grid_overlay(&graph);
+    let mut cells = 0usize;
+    for (name, costing) in costing_option_sets() {
+        for variant in ["plain", "per-edge", "overlay"] {
+            for profile in ALL_TEST_PROFILES {
+                for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+                    let request = || {
+                        let mut request = crate::RouteMatrixRequest::new(
+                            sources.clone(),
+                            targets.clone(),
+                            profile,
+                        );
+                        if variant == "per-edge" {
+                            request.options = per_edge.clone();
+                        }
+                        if variant == "overlay" {
+                            request.options.dynamic_overlay = Some(overlay.clone());
+                        }
+                        request.options.max_correlation_distance_m = 60;
+                        request.options.costing = costing;
+                        request
+                    };
+                    test_mode::set(Some(mode));
+                    let expected = landmarks.matrix(request());
+                    let actual = potentials.matrix(request());
+                    test_mode::set(None);
+                    let context = format!("{name} {variant} {profile:?} {mode:?}");
+                    assert_eq!(expected.cells.len(), actual.cells.len(), "{context}");
+                    for (expected, actual) in expected.cells.iter().zip(&actual.cells) {
+                        let cell = format!(
+                            "{context} cell {} -> {}",
+                            expected.source_index, expected.target_index
+                        );
+                        assert_eq!(expected.status, actual.status, "{cell}");
+                        assert_eq!(expected.failure_reason, actual.failure_reason, "{cell}");
+                        if let (Some(a), Some(b)) = (expected.cost, actual.cost) {
+                            assert!((a - b).abs() <= 1e-9 * a.max(1.0), "{cell}: {a} vs {b}");
+                            cells += 1;
+                        }
+                        // An overlay path may list an edge once per fragment
+                        // it runs along: equal paths, other stops.
+                        let mut expected_edges = expected.edge_ids.clone();
+                        let mut actual_edges = actual.edge_ids.clone();
+                        expected_edges.dedup();
+                        actual_edges.dedup();
+                        assert_eq!(expected_edges, actual_edges, "{cell}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(cells > 1_000, "only {cells} cells");
+}
+
+/// Via-edge alternatives (packages with CCH potentials): every alternative
+/// is a connected path (from any of the endpoints' candidates) that breaks no
+/// restriction, differs from the primary and the other alternatives, and
+/// keeps to the policy's sharing limit and (up to approach costs, which the
+/// policy counts and reported costs leave out) its cost limit.
+#[test]
+fn via_alternatives_are_valid_routes_within_the_policy() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (_, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let view = potentials.route_graph_view().routing_package().view();
+    let points = grid_points()
+        .into_iter()
+        .chain(many_grid_targets().into_iter().step_by(13))
+        .collect::<Vec<_>>();
+    let policy = crate::RouteAlternativePolicy {
+        requested_alternative_count: 2,
+        ..Default::default()
+    }
+    .normalized();
+    let mut found = 0usize;
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        for origin in &points {
+            for destination in &points {
+                if origin == destination {
+                    continue;
+                }
+                let Some(primary) = route(&potentials, *origin, *destination, profile, |request| {
+                    request.options.alternatives = policy;
+                }) else {
+                    continue;
+                };
+                let context = format!("{profile:?} {origin:?} -> {destination:?}");
+                let mut seen = vec![primary.edge_ids.clone()];
+                for alternative in &primary.alternatives {
+                    found += 1;
+                    assert!(
+                        !seen.contains(&alternative.edge_ids),
+                        "{context}: duplicate"
+                    );
+                    seen.push(alternative.edge_ids.clone());
+                    let edges = alternative
+                        .edge_ids
+                        .iter()
+                        .map(|id| view.edge_for_id(*id).expect("package edge"))
+                        .collect::<Vec<_>>();
+                    for pair in edges.windows(2) {
+                        assert_eq!(
+                            view.edge_target[pair[0] as usize],
+                            view.edge_source(pair[1] as usize),
+                            "{context}: not connected"
+                        );
+                    }
+                    assert!(
+                        view.restriction_violations(&edges, profile_bit(profile))
+                            .is_empty(),
+                        "{context}: breaks a restriction"
+                    );
+                    assert!(
+                        alternative.cost
+                            <= policy.max_cost_ratio * primary.cost * (1.0 + 1e-9) + 1.0,
+                        "{context}: cost {} against {}",
+                        alternative.cost,
+                        primary.cost
+                    );
+                    assert!(
+                        alternative.shared_edge_ratio <= policy.max_shared_edge_ratio + 1e-9,
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(found > 20, "only {found} alternatives");
 }

@@ -9,6 +9,7 @@
 //! source node and ordered by edge id within a node.
 
 mod landmarks;
+pub use landmarks::DEFAULT_LANDMARK_COUNT;
 mod pieces;
 mod request;
 
@@ -72,8 +73,12 @@ pub struct PackageBuildOptions {
     /// Profiles that receive a cost/duration column. `Default` always shares
     /// the `Wheeled` column because both use the same costing policy.
     pub profiles: Vec<MobilityProfile>,
-    /// ALT landmarks per profile column (0 disables landmark bounds).
+    /// ALT landmarks per profile column (0, the default, stores none: the
+    /// engine bounds searches with CCH potentials on the stored order).
     pub landmark_count: usize,
+    /// Store the CCH elimination order (`Section::CchRank`), from which the
+    /// engine builds its potentials at open.
+    pub cch_order: bool,
     /// Leave out the landmark rows of nodes whose distances derive exactly
     /// from anchors (`format::LandmarkRows`). Distances read the same either
     /// way; `false` stores every finite row, for comparisons.
@@ -84,7 +89,8 @@ impl Default for PackageBuildOptions {
     fn default() -> Self {
         Self {
             profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
-            landmark_count: landmarks::DEFAULT_LANDMARK_COUNT,
+            landmark_count: 0,
+            cch_order: true,
             anchored_landmark_rows: true,
         }
     }
@@ -145,6 +151,8 @@ pub struct PackageBuildReport {
     pub barrier_node_count: usize,
     pub assemble_ms: u128,
     pub landmark_ms: u128,
+    /// Computing the CCH order (nested dissection).
+    pub cch_order_ms: u128,
     pub request_ms: u128,
     pub total_ms: u128,
 }
@@ -1230,10 +1238,35 @@ fn build_package_from(
         job,
     )?;
     drop(landmark_cost);
+    report.landmark_ms = landmark_started.elapsed().as_millis();
+    // The CCH order, from the node graph and the fixed-point positions
+    // (integer arithmetic: the same on every platform).
+    job.report(
+        CompileStage::Landmarks,
+        Some(0.5),
+        0,
+        "Ordering nodes for CCH potentials",
+    );
+    let order_started = Instant::now();
+    let cch_rank = if options.cch_order {
+        let graph = wayfarer_package::cch_order::NodeGraph::new(&first_out, &edge_target);
+        let (order, _) = wayfarer_package::cch_order::elimination_order(&graph, &node_xyz);
+        wayfarer_package::cch_order::ranks(&order)
+    } else {
+        Vec::new()
+    };
+    report.cch_order_ms = order_started.elapsed().as_millis();
+    job.check().map_err(|_| cancelled_error())?;
+    job.report(
+        CompileStage::Landmarks,
+        Some(1.0),
+        0,
+        "Ordered nodes for CCH potentials",
+    );
+
     report.landmark_row_count = landmarks.row_count;
     report.landmark_one_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.0).sum();
     report.landmark_two_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.1).sum();
-    report.landmark_ms = landmark_started.elapsed().as_millis();
     drop(node_lat);
     drop(node_lng);
     clock.lap("landmarks")?;
@@ -1308,6 +1341,7 @@ fn build_package_from(
     writer.put_metadata(metadata);
     writer.put(Section::NodeFirstOut, first_out);
     writer.put(Section::NodeXyzFixed, node_xyz);
+    writer.put(Section::CchRank, cch_rank);
     writer.put(Section::NodeLatE7, node_lat_e7);
     writer.put(Section::NodeLngE7, node_lng_e7);
     writer.put(Section::NodeLatLng, node_lat_lng);
@@ -1415,7 +1449,10 @@ fn build_package_from(
     report.simple_restriction_count = counts.simple_restriction_count;
     report.complex_restriction_count = counts.complex_restriction_count;
     report.byte_len = writer.byte_len();
-    report.assemble_ms = started.elapsed().as_millis() - report.landmark_ms;
+    report.assemble_ms = started
+        .elapsed()
+        .as_millis()
+        .saturating_sub(report.landmark_ms + report.cch_order_ms);
     report.total_ms = started.elapsed().as_millis();
     Ok((writer, report))
 }
@@ -1717,9 +1754,17 @@ mod tests {
     use super::*;
     use wayfarer::internals::GraphAccess;
 
+    /// The default options plus landmarks (the landmark code's tests).
+    fn with_landmarks() -> PackageBuildOptions {
+        PackageBuildOptions {
+            landmark_count: landmarks::DEFAULT_LANDMARK_COUNT,
+            ..PackageBuildOptions::default()
+        }
+    }
+
     /// The package of `graph`, opened by the engine.
     fn in_memory(graph: &RoadGraph) -> (wayfarer::RoutingPackage, PackageBuildReport) {
-        let (bytes, report) = package_bytes(graph, &PackageBuildOptions::default()).unwrap();
+        let (bytes, report) = package_bytes(graph, &with_landmarks()).unwrap();
         (
             wayfarer::RoutingPackage::from_bytes(&bytes).unwrap(),
             report,
@@ -1968,8 +2013,7 @@ mod tests {
 
     #[test]
     fn open_rejects_duplicate_edge_ids() {
-        let (mut bytes, _) =
-            package_bytes(&compact_layout_graph(), &PackageBuildOptions::default()).unwrap();
+        let (mut bytes, _) = package_bytes(&compact_layout_graph(), &with_landmarks()).unwrap();
         let (offset, len) = PackageFile::from_bytes(&bytes)
             .unwrap()
             .section_range(Section::EdgeId);

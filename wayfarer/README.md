@@ -4,7 +4,8 @@ An offline routing engine over routing packages. Open a package compiled from an
 OpenStreetMap extract and ask for routes (with alternatives and turn-by-turn
 maneuvers), distance and duration matrices, isochrones, map-matched traces and
 navigation progress, all on a memory-mapped search graph: bidirectional A* with
-landmark bounds and exact shortest paths. Requests can carry dynamic overlays
+CCH lower-bound potentials (landmark bounds on format 1 packages) and exact
+shortest paths. Requests can carry dynamic overlays
 (blocked or avoided edges, cost multipliers, connectors) that are costed per
 request, with no recompile.
 

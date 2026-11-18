@@ -27,6 +27,7 @@ use std::collections::BinaryHeap;
 use super::{HeapEntry, NO_LABEL, SEED_TRAVERSED_FRACTION_EPSILON, SearchState, tie_window};
 use crate::costing::{CostingPolicy, EdgeCostDecision};
 use crate::package::SearchGraph;
+use crate::package::cch::{GatedPotential, PotentialScratch};
 use crate::package::columns::{CostColumn, LandmarkColumn};
 use crate::package::landmarks::AltBound;
 use crate::package::profile_bit;
@@ -38,6 +39,20 @@ use rustc_hash::FxHashMap;
 /// Above this many open target nodes a matrix row runs plain Dijkstra until
 /// enough targets are settled: each bound costs a pass over every target.
 const MAX_POTENTIAL_TARGET_NODES: usize = 8;
+/// Open target nodes up to which a matrix row bounds with CCH potentials
+/// (one elimination-tree query for all of them);
+/// `WAYFARER_CCH_ROW_TARGETS` overrides it (benchmarking).
+fn cch_max_target_nodes() -> usize {
+    static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| {
+            std::env::var("WAYFARER_CCH_ROW_TARGETS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+        })
+        .unwrap_or(MAX_POTENTIAL_TARGET_NODES)
+}
+
 /// `AltBound` tracks at most this many targets.
 const ALT_TARGET_CHUNK: usize = 16;
 
@@ -45,14 +60,17 @@ const ALT_TARGET_CHUNK: usize = 16;
 /// nodes (zero when no landmark bound applies). Taking the minimum of
 /// per-target landmark bounds keeps it consistent; the request's discount
 /// gates add their terms (see `gates`).
-struct TargetPotential<'g> {
-    bound: Option<GatedAlt<'g>>,
+enum TargetPotential<'g> {
+    /// No goal direction: plain Dijkstra.
+    None,
+    Landmarks(Box<GatedAlt<'g>>),
+    /// CCH potentials (`package::cch`), towards every open target at once.
+    Cch(GatedPotential<'g>),
 }
 
 impl<'g> TargetPotential<'g> {
-    /// No goal direction: plain Dijkstra.
     fn none() -> Self {
-        Self { bound: None }
+        Self::None
     }
 
     fn new(
@@ -85,14 +103,17 @@ impl<'g> TargetPotential<'g> {
         if bounds.is_empty() {
             return Self::none();
         }
-        Self {
-            bound: GatedAlt::new(landmarks, bounds, origins, false, gates),
-        }
+        GatedAlt::new(landmarks, bounds, origins, false, gates)
+            .map_or(Self::None, |bound| Self::Landmarks(Box::new(bound)))
     }
 
     #[inline]
     fn bound(&self, node: u32) -> f64 {
-        self.bound.as_ref().map_or(0.0, |bound| bound.bound(node))
+        match self {
+            Self::None => 0.0,
+            Self::Landmarks(bound) => bound.bound(node),
+            Self::Cch(potential) => potential.get(node),
+        }
     }
 }
 
@@ -925,6 +946,30 @@ pub(crate) fn matrix_row(
     candidates: &[MatrixTargetCandidate],
     target_count: usize,
 ) -> MatrixRow {
+    let scratch = std::mem::take(&mut state.cch_scratch).map(std::cell::RefCell::new);
+    let row = matrix_row_with(
+        graph,
+        state,
+        query,
+        origins,
+        candidates,
+        target_count,
+        &scratch,
+    );
+    state.cch_scratch = scratch.map(std::cell::RefCell::into_inner);
+    row
+}
+
+/// [`matrix_row`] with the CCH potential scratch taken out of `state`.
+fn matrix_row_with(
+    graph: SearchGraph<'_>,
+    state: &mut SearchState,
+    query: &AnalysisQuery<'_>,
+    origins: &[AnalysisPoint],
+    candidates: &[MatrixTargetCandidate],
+    target_count: usize,
+    scratch: &[std::cell::RefCell<PotentialScratch>; 4],
+) -> MatrixRow {
     let mut search = Expansion {
         g: graph,
         q: query,
@@ -994,16 +1039,38 @@ pub(crate) fn matrix_row(
         nodes
     };
     let mut open = searched;
-    let potential_for = |open: &[bool]| match query.column.landmarks.filter(|_| query.use_landmarks)
-    {
-        Some(landmarks) => TargetPotential::new(
+    let plan = super::potential_plan(
+        graph,
+        &query.column,
+        &query.cost_overrides,
+        !query.gates.is_empty(),
+    );
+    let potential_for = |open: &[bool]| match (
+        &plan,
+        query.column.landmarks.filter(|_| query.use_landmarks),
+    ) {
+        (Some(plan), _) => {
+            let targets = open_target_nodes(open);
+            if targets.is_empty() || targets.len() > cch_max_target_nodes() {
+                TargetPotential::none()
+            } else {
+                TargetPotential::Cch(plan.potential(
+                    &targets,
+                    false,
+                    &query.gates,
+                    &scratch[0],
+                    &scratch[2],
+                ))
+            }
+        }
+        (None, Some(landmarks)) => TargetPotential::new(
             graph,
             landmarks,
             &open_target_nodes(open),
             &origin_nodes,
             &query.gates,
         ),
-        None => TargetPotential::none(),
+        (None, None) => TargetPotential::none(),
     };
     let mut potential = potential_for(&open);
 

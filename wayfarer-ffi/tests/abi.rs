@@ -29,7 +29,7 @@ fn open() -> *mut WayfarerPackage {
     let status = unsafe { wayfarer_open(path.as_ptr(), ptr::null(), &mut package, &mut out) };
     let info = take(out);
     assert_eq!(status, WAYFARER_OK, "{info}");
-    assert_eq!(info["formatVersion"], 1);
+    assert_eq!(info["formatVersion"], 2);
     assert_eq!(info["costingModelVersion"], 1);
     package
 }
@@ -51,7 +51,7 @@ fn versions_describe_the_library() {
     let versions = take(wayfarer_versions());
     assert_eq!(versions["abi"], 1);
     assert_eq!(versions["readableFormats"][0], 1);
-    assert_eq!(versions["readableFormats"][1], 1);
+    assert_eq!(versions["readableFormats"][1], 2);
     assert_eq!(versions["costingModel"], 1);
 }
 

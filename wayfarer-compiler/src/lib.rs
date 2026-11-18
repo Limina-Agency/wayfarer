@@ -114,7 +114,8 @@ pub enum CompileStage {
     FinalizeGraph,
     /// Edge costs and the package's sections other than landmarks.
     BuildPackage,
-    /// ALT landmarks for each profile column.
+    /// ALT landmarks for each profile column (none by default), then the
+    /// node order of CCH potentials.
     Landmarks,
     /// Checksums, the file written and synced, then reopened.
     WritePackage,
@@ -1900,6 +1901,7 @@ mod tests {
                     &graph,
                     &PackageBuildOptions {
                         anchored_landmark_rows,
+                        landmark_count: package_build::DEFAULT_LANDMARK_COUNT,
                         ..PackageBuildOptions::default()
                     },
                 )
@@ -2005,8 +2007,14 @@ mod tests {
             )
             .unwrap()
             .road_graph;
-            let (bytes, report) =
-                package_build::package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+            let (bytes, report) = package_build::package_bytes(
+                &graph,
+                &PackageBuildOptions {
+                    landmark_count: package_build::DEFAULT_LANDMARK_COUNT,
+                    ..PackageBuildOptions::default()
+                },
+            )
+            .unwrap();
             let costs = package_build::LANDMARK_COSTS.with(|costs| costs.take());
             assert!(report.landmark_two_anchor_count > 0, "{name}");
             let file = PackageFile::from_bytes(&bytes).unwrap();

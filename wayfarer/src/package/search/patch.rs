@@ -44,9 +44,11 @@ use wayfarer_package::format::ColumnPieceKinds;
 
 use super::gates::{DiscountGate, gate_clusters, gate_ends};
 use super::{HeapEntry, NO_LABEL, SearchState, tie_window};
+use crate::package::cch::{CchPotential, GateDistances, PotentialScratch};
 use crate::package::columns::{CostColumn, LandmarkColumn};
 use crate::package::landmarks::{AltBound, GroupBound};
 use crate::package::restrictions::{ComplexAutomata, ROOT};
+use crate::package::search::{PotentialPlan, potential_plan};
 use crate::package::{
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, MeasuredPolyline, SearchGraph, chord_m, unit_xyz,
 };
@@ -786,6 +788,52 @@ impl PatchAlt<'_> {
     }
 }
 
+/// The same bounds on CCH potentials: one elimination-tree query towards
+/// the final-approach nodes at 0 and every gate's node at its offset, so
+/// every gate has its own term (no `rest`).
+struct PatchCch<'g> {
+    potential: CchPotential<'g>,
+    edge_gates: FxHashMap<u32, f64>,
+    endpoint_gates: FxHashMap<u32, f64>,
+}
+
+/// The connector-aware bounds of one side: landmarks or CCH potentials.
+enum PatchBound<'g> {
+    Landmarks(Box<PatchAlt<'g>>),
+    Cch(PatchCch<'g>),
+}
+
+impl PatchBound<'_> {
+    fn at_real(&self, node: u32) -> f64 {
+        match self {
+            Self::Landmarks(alt) => alt.at_real(node),
+            Self::Cch(cch) => cch.potential.get(node),
+        }
+    }
+
+    /// The offset of every gate without its own term.
+    fn rest(&self) -> f64 {
+        match self {
+            Self::Landmarks(alt) => alt.rest,
+            Self::Cch(_) => f64::INFINITY,
+        }
+    }
+
+    fn edge_gate(&self, edge: u32) -> Option<f64> {
+        match self {
+            Self::Landmarks(alt) => alt.edge_gates.get(&edge).copied(),
+            Self::Cch(cch) => cch.edge_gates.get(&edge).copied(),
+        }
+    }
+
+    fn endpoint_gate(&self, node: u32) -> Option<f64> {
+        match self {
+            Self::Landmarks(alt) => alt.endpoint_gates.get(&node).copied(),
+            Self::Cch(cch) => cch.endpoint_gates.get(&node).copied(),
+        }
+    }
+}
+
 /// A virtual node, as the bounds see it.
 #[derive(Clone, Copy)]
 enum VirtualNode {
@@ -814,7 +862,7 @@ struct Bounds<'g> {
     center: [f64; 3],
     radius: f64,
     k: f64,
-    alt: Option<PatchAlt<'g>>,
+    alt: Option<PatchBound<'g>>,
     /// Request cost of each discount gate's edge, below its column cost.
     cheaper: FxHashMap<u32, f64>,
 }
@@ -832,6 +880,10 @@ impl<'g> Bounds<'g> {
         terminal_edges: &[u32],
         seed_nodes: &[u32],
         gates: &[DiscountGate],
+        cch: Option<(
+            &'g PotentialPlan<'g>,
+            &'g std::cell::RefCell<PotentialScratch>,
+        )>,
     ) -> Self {
         let patch = arcs.patch;
         let center = goal_points.first().copied().unwrap_or([0.0; 3]);
@@ -876,8 +928,17 @@ impl<'g> Bounds<'g> {
             alt: None,
             cheaper: gates.iter().map(|gate| (gate.edge, gate.cost)).collect(),
         };
-        if let Some(landmarks) = landmarks {
-            bounds.alt = bounds.build_alt(arcs, landmarks, terminal_edges, seed_nodes, gates);
+        if let Some((plan, scratch)) = cch {
+            bounds.alt = bounds
+                .build_cch(arcs, plan, scratch, terminal_edges, gates)
+                .map(PatchBound::Cch);
+        }
+        if bounds.alt.is_none()
+            && let Some(landmarks) = landmarks
+        {
+            bounds.alt = bounds
+                .build_alt(arcs, landmarks, terminal_edges, seed_nodes, gates)
+                .map(|alt| PatchBound::Landmarks(Box::new(alt)));
         }
         bounds
     }
@@ -1146,6 +1207,217 @@ impl<'g> Bounds<'g> {
         })
     }
 
+    /// [`build_alt`](Self::build_alt) on CCH potentials: every real or
+    /// edge gate and every discount gate node is a slot of its own, its
+    /// terms the CCH distances from a connector's far end (`GateDistances`).
+    /// `None` with more slots than `cch::EXACT_GATE_NODES`.
+    fn build_cch(
+        &self,
+        arcs: &RunArcs<'_, '_>,
+        plan: &'g PotentialPlan<'g>,
+        scratch: &'g std::cell::RefCell<PotentialScratch>,
+        terminal_edges: &[u32],
+        gates: &[DiscountGate],
+    ) -> Option<PatchCch<'g>> {
+        let g = self.graph;
+        let reversed = self.side == Side::Backward;
+        let topology = &plan.potentials.topology;
+        let metric = plan.metric.metric();
+        let scale = plan.factor * crate::package::cch::POTENTIAL_MARGIN;
+        let mut finals = terminal_edges
+            .iter()
+            .map(|edge| match self.side {
+                Side::Forward => g.edge_source(*edge as usize),
+                Side::Backward => g.edge_target[*edge as usize],
+            })
+            .collect::<Vec<_>>();
+        finals.sort_unstable();
+        finals.dedup();
+        let node_count = self.node_count;
+        let gate_of = |node: u32| -> Gate {
+            if node < node_count {
+                Gate::Real(node)
+            } else {
+                match self.virtual_nodes[(node - node_count) as usize] {
+                    VirtualNode::Point { edge, .. } => Gate::Edge(edge),
+                    _ => Gate::Endpoint(node),
+                }
+            }
+        };
+        let connectors = arcs
+            .all()
+            .filter(|arc| matches!(arc.kind, ArcKind::Connector(_)))
+            .map(|arc| match self.side {
+                Side::Forward => (gate_of(arc.from), arc.to, arc.cost),
+                Side::Backward => (gate_of(arc.to), arc.from, arc.cost),
+            })
+            .collect::<Vec<_>>();
+        let mut gate_keys = connectors
+            .iter()
+            .map(|(gate, _, _)| *gate)
+            .collect::<Vec<_>>();
+        gate_keys.sort_unstable();
+        gate_keys.dedup();
+        // Slots with a real node: connector gates, then discount gate nodes;
+        // then endpoint gates.
+        let mut slot_nodes = Vec::<u32>::new();
+        let mut slot_of = FxHashMap::<Gate, usize>::default();
+        let mut edge_slots = Vec::<(u32, usize)>::new();
+        for gate in &gate_keys {
+            let node = match (gate, self.side) {
+                (Gate::Real(node), _) => *node,
+                (Gate::Edge(edge), Side::Forward) => g.edge_source(*edge as usize),
+                (Gate::Edge(edge), Side::Backward) => g.edge_target[*edge as usize],
+                (Gate::Endpoint(_), _) => continue,
+            };
+            if let Gate::Edge(edge) = gate {
+                edge_slots.push((*edge, slot_nodes.len()));
+            }
+            slot_of.insert(*gate, slot_nodes.len());
+            slot_nodes.push(node);
+        }
+        let mut discount_slot = FxHashMap::<u32, usize>::default();
+        for gate in gates {
+            let (node, _) = gate_ends(gate, reversed);
+            discount_slot.entry(node).or_insert_with(|| {
+                slot_nodes.push(node);
+                slot_nodes.len() - 1
+            });
+        }
+        if slot_nodes.len() > crate::package::cch::EXACT_GATE_NODES {
+            return None;
+        }
+        let real_slots = slot_nodes.len();
+        let mut endpoint_slots = Vec::<(u32, usize)>::new();
+        for gate in &gate_keys {
+            if let Gate::Endpoint(node) = gate {
+                let slot = real_slots + endpoint_slots.len();
+                slot_of.insert(*gate, slot);
+                endpoint_slots.push((*node, slot));
+            }
+        }
+        let slot_count = real_slots + endpoint_slots.len();
+
+        let base = CchPotential::with_offsets(
+            topology,
+            metric,
+            &finals,
+            &[],
+            reversed,
+            plan.factor,
+            scratch,
+        );
+        let distances = GateDistances::new(topology, metric, reversed, &slot_nodes);
+        let real_terms = |node: u32| -> (f64, Vec<f64>) {
+            let mut terms = distances
+                .from(node)
+                .into_iter()
+                .map(|d| {
+                    if d.is_finite() {
+                        d * scale
+                    } else {
+                        f64::INFINITY
+                    }
+                })
+                .collect::<Vec<_>>();
+            terms.resize(slot_count, f64::INFINITY);
+            (base.get(node), terms)
+        };
+        let discount_rows = gates.iter().map(|gate| {
+            let (node, end) = gate_ends(gate, reversed);
+            let (base, terms) = real_terms(end);
+            (discount_slot[&node], gate.cost, base, terms)
+        });
+        let mut rows = Vec::new();
+        for (gate, end, cost) in &connectors {
+            let Some(slot) = slot_of.get(gate).copied() else {
+                continue;
+            };
+            let (base, terms) = if *end < node_count {
+                real_terms(*end)
+            } else {
+                match self.virtual_nodes[(*end - node_count) as usize] {
+                    VirtualNode::Point {
+                        edge,
+                        fraction,
+                        reaches_end,
+                        terminal,
+                    } => {
+                        let mut base = if terminal { 0.0 } else { f64::INFINITY };
+                        let mut terms = vec![f64::INFINITY; slot_count];
+                        if reaches_end {
+                            let (node, along) = self.along(edge, fraction);
+                            let (far_base, far_terms) = real_terms(node);
+                            base = base.min(along + far_base);
+                            for (term, far) in terms.iter_mut().zip(far_terms) {
+                                *term = along + far;
+                            }
+                        }
+                        if let Some(own) = slot_of.get(&Gate::Edge(edge)) {
+                            terms[*own] = 0.0;
+                        }
+                        (base, terms)
+                    }
+                    VirtualNode::OwnEndpoint => (0.0, vec![f64::INFINITY; slot_count]),
+                    VirtualNode::OtherEndpoint => {
+                        let mut terms = vec![f64::INFINITY; slot_count];
+                        if let Some(own) = slot_of.get(&Gate::Endpoint(*end)) {
+                            terms[*own] = 0.0;
+                        }
+                        (f64::INFINITY, terms)
+                    }
+                }
+            };
+            rows.push((slot, *cost, base, terms));
+        }
+        rows.extend(discount_rows);
+        // Bellman-Ford over gates, as in `build_alt`.
+        let mut offsets = vec![f64::INFINITY; slot_count];
+        for _ in 0..=slot_count {
+            let mut changed = false;
+            for (slot, cost, base, terms) in &rows {
+                let far = terms
+                    .iter()
+                    .zip(&offsets)
+                    .map(|(term, offset)| term + offset)
+                    .fold(*base, f64::min);
+                let value = cost + far;
+                if value < offsets[*slot] {
+                    offsets[*slot] = value;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let seeds = slot_nodes
+            .iter()
+            .zip(&offsets)
+            .map(|(node, offset)| (*node, *offset))
+            .collect::<Vec<_>>();
+        let potential = CchPotential::with_offsets(
+            topology,
+            metric,
+            &finals,
+            &seeds,
+            reversed,
+            plan.factor,
+            scratch,
+        );
+        Some(PatchCch {
+            potential,
+            edge_gates: edge_slots
+                .iter()
+                .map(|(edge, slot)| (*edge, offsets[*slot]))
+                .collect(),
+            endpoint_gates: endpoint_slots
+                .iter()
+                .map(|(node, slot)| (*node, offsets[*slot]))
+                .collect(),
+        })
+    }
+
     fn position(&self, node: u32) -> [f64; 3] {
         if node < self.node_count {
             self.graph.xyz(node)
@@ -1170,9 +1442,9 @@ impl<'g> Bounds<'g> {
                     reaches_end,
                     terminal,
                 } => {
-                    let mut value = if terminal { 0.0 } else { alt.rest };
-                    if let Some(offset) = alt.edge_gates.get(&edge) {
-                        value = value.min(*offset);
+                    let mut value = if terminal { 0.0 } else { alt.rest() };
+                    if let Some(offset) = alt.edge_gate(edge) {
+                        value = value.min(offset);
                     }
                     if reaches_end && value > 0.0 {
                         let (far, along) = self.along(edge, fraction);
@@ -1182,11 +1454,9 @@ impl<'g> Bounds<'g> {
                 }
                 VirtualNode::OwnEndpoint => 0.0,
                 VirtualNode::OtherEndpoint => alt
-                    .endpoint_gates
-                    .get(&node)
-                    .copied()
+                    .endpoint_gate(node)
                     .unwrap_or(f64::INFINITY)
-                    .min(alt.rest),
+                    .min(alt.rest()),
             }
         };
         if bound.is_finite() {
@@ -1205,6 +1475,10 @@ pub(crate) struct PatchQuery<'q> {
     pub costs: PatchCosts<'q>,
     /// Landmark tables, unless request overrides void them.
     pub landmarks: Option<LandmarkColumn<'q>>,
+    /// Whether the CCH potentials, where the package has them, bound the
+    /// request: false in the scaled fallback (see `analysis::override_bounds`),
+    /// which does not cover the virtual points either.
+    pub potentials: bool,
     /// Edges and split edges the request makes cheaper than the column:
     /// gates of the landmark bounds (see `gates`).
     pub gates: &'q [DiscountGate],
@@ -1265,6 +1539,7 @@ impl<'q> PatchQuery<'q> {
                 split_cost: self.costs.split_cost,
             },
             landmarks: self.landmarks,
+            potentials: self.potentials,
             gates: self.gates,
             profile_bit: self.profile_bit,
             origins,
@@ -1506,6 +1781,12 @@ pub(crate) fn run(
     let forced = dijkstra::forced();
     let k = if forced { 0.0 } else { k.max(0.0) };
     let landmarks = query.landmarks.filter(|_| !forced);
+    // CCH potentials on the column's metric; the patch's connectors and the
+    // request's discount gates join them as gates of their own.
+    let plan = (query.potentials && !forced)
+        .then(|| potential_plan(graph, &costs.column, &FxHashMap::default(), false))
+        .flatten();
+    let scratch = std::mem::take(&mut state.cch_scratch).map(std::cell::RefCell::new);
     // Real nodes the search starts from, to pick landmarks by.
     let seed_nodes = seeds
         .iter()
@@ -1546,6 +1827,7 @@ pub(crate) fn run(
         &destination_terminals,
         &seed_nodes,
         query.gates,
+        plan.as_ref().map(|plan| (plan, &scratch[0])),
     );
 
     // Restriction penalties are charged forward only (the joins of the
@@ -1582,16 +1864,21 @@ pub(crate) fn run(
             &origin_terminals,
             &destination_nodes,
             query.gates,
+            plan.as_ref().map(|plan| (plan, &scratch[1])),
         );
         search.bidirectional(&seeds, &forward, &backward, best)
     } else {
         search.unidirectional(&seeds, &forward, best)
     };
-    match outcome {
+    let result = match outcome {
         Ok(Some(best)) => PatchOutcome::Found(search.reconstruct(&best)),
         Ok(None) => PatchOutcome::NoPath,
         Err(outcome) => outcome,
-    }
+    };
+    let state = search.state;
+    drop(forward);
+    state.cch_scratch = scratch.map(std::cell::RefCell::into_inner);
+    result
 }
 
 struct PatchRun<'a, 'g, 'p, 'o, 'q> {

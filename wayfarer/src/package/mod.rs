@@ -24,6 +24,7 @@
 //! the sections themselves. [`RoutingPackage::verify`] re-hashes every
 //! section (an install-time check for packages shipped over poor links).
 
+pub(crate) mod cch;
 pub(crate) mod columns;
 pub(crate) mod destination;
 pub(crate) mod landmarks;
@@ -120,6 +121,9 @@ pub struct RoutingPackage {
     recost: bool,
     /// Per profile slot, grouped on first use (see `destination`).
     destination_pockets: [OnceLock<destination::DestinationPockets>; PROFILE_SLOTS],
+    /// CCH lower-bound potentials, once [`RoutingPackage::prepare_potentials`]
+    /// built them.
+    cch: cch::CchCache,
 }
 
 impl std::fmt::Debug for RoutingPackage {
@@ -247,6 +251,7 @@ impl RoutingPackage {
             matrix_pool: OnceLock::new(),
             recost: model < wayfarer_costing::COSTING_MODEL_VERSION,
             destination_pockets: Default::default(),
+            cch: cch::CchCache::default(),
         })
     }
 
@@ -279,12 +284,46 @@ impl RoutingPackage {
         bytes
     }
 
+    /// Builds CCH lower-bound potentials for the stored cost columns: a
+    /// node order by nested dissection, its topology, and one metric per
+    /// stored column. Route searches use them in place of the landmarks
+    /// wherever a stored column bounds the request: the stored columns
+    /// themselves, the strict destination-only pass of a default drive, and
+    /// costing options that only raise or remove edges. Elsewhere (discounts,
+    /// opened edges, SAR openings, metrics of their own) they keep the
+    /// landmarks. Routes do not change: both bounds are exact, so only the
+    /// work a search does changes (visited and settled counts).
+    ///
+    /// This takes seconds on a regional package (about 3 s for Małopolskie,
+    /// 1.07 M nodes, on 16 threads) and holds the topology and metrics in
+    /// memory (about 135 MB there). Every pooled search state that uses them
+    /// allocates 8 bytes per node of scratch on first use (16 with discount
+    /// gates; about 9 MB there). Searches running while it
+    /// builds use the landmarks. Later calls return at once. `None` when the
+    /// node graph is too large for the potentials' 31-bit arc ids.
+    pub fn prepare_potentials(&self) -> Option<cch::PotentialStats> {
+        let sections = self.file.view();
+        self.cch
+            .prepare(&sections)
+            .map(|potentials| potentials.stats.clone())
+    }
+
     /// The sections, with the complex-restriction automata the searches build.
     pub(crate) fn view(&self) -> SearchGraph<'_> {
+        let sections = self.file.view();
+        let cch = match crate::debug::potential() {
+            crate::debug::Potential::Alt => None,
+            // A package that stores its order (format 2) builds the
+            // potentials on first use; otherwise only once prepared.
+            crate::debug::Potential::Auto if sections.cch_rank.is_empty() => self.cch.get(),
+            crate::debug::Potential::Auto => self.cch.prepare(&sections),
+            crate::debug::Potential::Cch => self.cch.prepare(&sections),
+        };
         SearchGraph {
-            sections: self.file.view(),
+            sections,
             complex_automata: &self.complex_automata,
             transitions: None,
+            cch: cch.map(std::sync::Arc::as_ref),
         }
     }
 
@@ -337,6 +376,8 @@ pub(crate) struct SearchGraph<'g> {
     /// R4 barriers), which [`SearchGraph::turn_cost`] adds; `None` outside a
     /// request (landmarks, map matching).
     pub(crate) transitions: Option<crate::transitions::Transitions>,
+    /// The package's CCH potentials, if prepared.
+    pub(crate) cch: Option<&'g cch::CchPotentials>,
 }
 
 impl<'g> Deref for SearchGraph<'g> {

@@ -46,3 +46,10 @@ path = "fuzz_targets/overlay_set.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "route_parity"
+path = "fuzz_targets/route_parity.rs"
+test = false
+doc = false
+bench = false

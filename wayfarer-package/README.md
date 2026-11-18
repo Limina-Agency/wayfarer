@@ -3,7 +3,8 @@
 The file format of offline routing packages. A package (`routing.mrt`) is one
 memory-mappable file holding the road network of an OpenStreetMap extract:
 nodes, directed edges and the attributes they share, per-profile edge costs,
-turn restrictions and landmark distances, in checksummed sections. This crate
+turn restrictions and the node order of CCH potentials (format 2; landmark
+distances in format 1), in checksummed sections. This crate
 opens, verifies, reads and writes such files, and defines the road vocabulary
 (`RoadEdge`, `SharedEdgeInfo`, `MobilityProfile`, ...) that the route compiler
 and the routing engine share.

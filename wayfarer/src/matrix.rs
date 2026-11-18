@@ -369,6 +369,7 @@ impl RoutingEngine {
             landmarks: column
                 .landmarks
                 .filter(|_| use_landmarks && !bounds.fell_back()),
+            potentials: !bounds.fell_back(),
             gates: &bounds.gates,
             profile_bit: profile_bit(request.profile),
             origins: &[],
@@ -477,6 +478,7 @@ impl RoutingEngine {
             searchable_targets,
             patch.is_some(),
             query.restriction_penalty.is_some(),
+            view.cch.is_some() && query.column.potential.is_some(),
         );
         let rows = if mode == MatrixMode::Buckets {
             // Many sources and targets: bounded backward searches from every
@@ -758,10 +760,20 @@ impl RoutingEngine {
 /// another order).
 const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT: usize = 12;
 const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 50;
+/// The vehicle cut-off when CCH potentials bound the cells
+/// (`RoutingPackage::prepare_potentials`): a cell then searches a corridor,
+/// while a row still floods towards its farthest target. Measured
+/// 2026-11-18 on Malopolskie (16 threads, potentials prepared): pairwise
+/// against rows 0.66 s and 30 s at 50x50 (rows at 50: landmarks), 2.2 s and
+/// 16 s at 100x100, 15.6 s and about 90 s at 250x250, and with Krakow points
+/// 0.53 s and 4.1 s at 100x100. On the small Krakow centre package rows stay
+/// a little cheaper (0.17 s and 0.22 s at 100, 1.1 s and 1.4 s at 250).
+const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE_POTENTIALS: usize = 400;
 
-/// The pairwise cut-off for `profile`; `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS`
-/// overrides it for every profile (for benchmarking).
-fn matrix_pairwise_max_targets(profile: MobilityProfile) -> usize {
+/// The pairwise cut-off for `profile` (`potentials`: CCH potentials bound
+/// the cells); `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS` overrides it for every
+/// profile (for benchmarking).
+fn matrix_pairwise_max_targets(profile: MobilityProfile, potentials: bool) -> usize {
     static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     let configured = *OVERRIDE.get_or_init(|| {
         std::env::var("WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS")
@@ -773,7 +785,13 @@ fn matrix_pairwise_max_targets(profile: MobilityProfile) -> usize {
         MobilityProfile::Default
         | MobilityProfile::Wheeled
         | MobilityProfile::Tracked
-        | MobilityProfile::Emergency => MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE,
+        | MobilityProfile::Emergency => {
+            if potentials {
+                MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE_POTENTIALS
+            } else {
+                MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE
+            }
+        }
     })
 }
 
@@ -819,6 +837,7 @@ fn matrix_mode(
     targets: usize,
     overlay: bool,
     forward_only: bool,
+    potentials: bool,
 ) -> MatrixMode {
     static FORCED: std::sync::OnceLock<Option<MatrixMode>> = std::sync::OnceLock::new();
     let forced =
@@ -840,7 +859,7 @@ fn matrix_mode(
             && targets > MATRIX_BUCKETS_MIN_TARGETS
         {
             MatrixMode::Buckets
-        } else if targets <= matrix_pairwise_max_targets(profile) {
+        } else if targets <= matrix_pairwise_max_targets(profile, potentials) {
             MatrixMode::Pairwise
         } else {
             MatrixMode::Rows
