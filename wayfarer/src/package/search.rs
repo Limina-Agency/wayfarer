@@ -18,7 +18,7 @@ use std::collections::BinaryHeap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use wayfarer_package::format::{ColumnPieceKinds, PieceKind};
 
-use super::cch::{CchPotential, CchPotentials, PotentialScratch};
+use super::cch::{CchPotentials, GatedPotential, PotentialGate, PotentialScratch};
 use super::columns::{CostColumn, LandmarkColumn};
 use super::landmarks::AltBound;
 use super::restrictions::{ComplexAutomata, ROOT};
@@ -42,12 +42,22 @@ pub(crate) mod patch;
 /// nodes whose bounds were set, borrowed by the bidirectional search.
 type NodeBoundsCache = std::cell::RefCell<(Vec<(f64, f64)>, Vec<u32>)>;
 
-/// The CCH potentials' scratch, forward and backward, borrowed by the
-/// bidirectional search.
-type PotentialScratches = (
-    std::cell::RefCell<PotentialScratch>,
-    std::cell::RefCell<PotentialScratch>,
-);
+/// The CCH potentials' scratch, borrowed by the bidirectional search:
+/// forward, backward, and each side's gated potential.
+type PotentialScratches = [std::cell::RefCell<PotentialScratch>; 4];
+
+/// How the CCH potentials bound a query (see `Run::potentials`).
+struct PotentialPlan<'g> {
+    potentials: &'g CchPotentials,
+    column: usize,
+    /// Scales the stored column's metric to the query's costs.
+    factor: f64,
+    /// Whether the query's discount gates join the potentials.
+    gated: bool,
+    /// With gates: every edge costs at least `floor` times the scaled metric
+    /// (0 with an opened edge).
+    floor: f64,
+}
 
 const NO_LABEL: u32 = u32::MAX;
 const SEED_TRAVERSED_FRACTION_EPSILON: f64 = 1e-9;
@@ -285,7 +295,7 @@ pub(crate) struct SearchState {
     edge_aux: Vec<u32>,
     /// CCH potential scratch (forward, backward), allocated by the first
     /// search that bounds with the potentials.
-    cch_scratch: (PotentialScratch, PotentialScratch),
+    cch_scratch: [PotentialScratch; 4],
 }
 
 /// Backward label on edge `edge`: cost from entering `edge` at its source to
@@ -1195,13 +1205,9 @@ impl<'q> Run<'_, '_, 'q> {
             std::mem::take(&mut self.state.node_bounds),
             std::mem::take(&mut self.state.node_bounds_touched),
         ));
-        let (forward, backward) = std::mem::take(&mut self.state.cch_scratch);
-        let scratch = (
-            std::cell::RefCell::new(forward),
-            std::cell::RefCell::new(backward),
-        );
+        let scratch = std::mem::take(&mut self.state.cch_scratch).map(std::cell::RefCell::new);
         let outcome = self.bidirectional_body(&cache, &scratch);
-        self.state.cch_scratch = (scratch.0.into_inner(), scratch.1.into_inner());
+        self.state.cch_scratch = scratch.map(std::cell::RefCell::into_inner);
         let (values, touched) = cache.into_inner();
         self.state.node_bounds = values;
         self.state.node_bounds_touched = touched;
@@ -1219,28 +1225,61 @@ impl<'q> Run<'_, '_, 'q> {
         outcome
     }
 
-    /// The CCH potentials that bound this query, the stored column they were
-    /// customized on, and the factor scaling them to the query's costs: when
-    /// the package has them, the query's column is bounded by a stored
-    /// column (every edge it can use is usable there and costs at least
-    /// `factor` times as much), and every cost override is finite only
-    /// where that column is and at least `factor` times its cost. Discounts,
-    /// opened edges and SAR openings fail the last test and keep the
-    /// landmarks (with their gates).
-    fn potentials<'g>(
-        g: SearchGraph<'g>,
-        q: &SearchQuery<'_>,
-    ) -> Option<(&'g CchPotentials, usize, f64)> {
+    /// How the CCH potentials bound this query, when the package has them
+    /// and the query's column is bounded by a stored column (every edge it
+    /// can use is usable there and costs at least `factor` times as much):
+    ///
+    /// - no override below `factor` times the stored cost: the stored metric
+    ///   scaled by `factor`;
+    /// - with such overrides and the query's discount gates: the gated
+    ///   potentials ([`GatedPotential`]), every override below the scaled
+    ///   metric being a gate;
+    /// - with such overrides past the gate limit (no gates): the metric
+    ///   scaled further by the least override ratio, as the landmarks are
+    ///   (`analysis::override_bounds`); `None` when one of them opens an
+    ///   edge the stored column cannot use.
+    fn potentials<'g>(g: SearchGraph<'g>, q: &SearchQuery<'_>) -> Option<PotentialPlan<'g>> {
+        /// Safety margin on override ratios against rounding in f32 weights.
+        const MARGIN: f64 = 1.0 - 1e-6;
         let potentials = g.cch?;
         let (column, factor) = q.column.potential?;
+        if column >= potentials.metrics.len() {
+            return None;
+        }
         let stored = g
             .edge_cost
             .get(column * g.edge_count..(column + 1) * g.edge_count)?;
-        let below = q.cost_overrides.iter().any(|(edge, cost)| {
-            let base = f64::from(stored[*edge as usize]);
-            cost.is_finite() && !(base.is_finite() && f64::from(*cost) >= factor * base)
-        });
-        (!below && column < potentials.metrics.len()).then_some((potentials, column, factor))
+        let (mut below, mut opened, mut ratio) = (false, false, 1.0f64);
+        for (edge, cost) in q.cost_overrides {
+            if !cost.is_finite() {
+                continue;
+            }
+            let base = factor * f64::from(stored[*edge as usize]);
+            if !base.is_finite() {
+                below = true;
+                opened = true;
+            } else if f64::from(*cost) < base {
+                below = true;
+                if base > 0.0 {
+                    ratio = ratio.min(f64::from(*cost) / base);
+                }
+            }
+        }
+        let plan = |factor: f64, gated: bool, floor: f64| PotentialPlan {
+            potentials,
+            column,
+            factor,
+            gated,
+            floor,
+        };
+        if !below {
+            return Some(plan(factor, false, 0.0));
+        }
+        if !q.gates.is_empty() {
+            let floor = if opened { 0.0 } else { ratio.min(1.0) * MARGIN };
+            return Some(plan(factor, true, floor));
+        }
+        (!opened && ratio > 0.0).then(|| plan(factor * ratio * MARGIN, false, 0.0))
     }
 
     fn bidirectional_search(
@@ -1299,34 +1338,38 @@ impl<'q> Run<'_, '_, 'q> {
             gates::GatedAlt::new(landmarks, vec![base], seeds, reversed, self.q.gates)
         };
         // CCH potentials in place of the landmarks where they apply.
-        let cch = Self::potentials(g, self.q).map(|(potentials, column, factor)| {
-            let metric = &potentials.metrics[column];
-            let targets = target_nodes
-                .iter()
-                .map(|node| (*node, 0.0))
-                .collect::<Vec<_>>();
-            let sources = origin_nodes
-                .iter()
-                .map(|node| (*node, 0.0))
-                .collect::<Vec<_>>();
-            (
-                CchPotential::new(
-                    &potentials.topology,
+        let cch = Self::potentials(g, self.q).map(|plan| {
+            let metric = &plan.potentials.metrics[plan.column];
+            let side = |targets: &[u32], reversed: bool, slot: usize| {
+                let gates = if plan.gated {
+                    self.q
+                        .gates
+                        .iter()
+                        .map(|gate| {
+                            let (node, end) = gates::gate_ends(gate, reversed);
+                            PotentialGate {
+                                node,
+                                end,
+                                cost: gate.cost,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                GatedPotential::new(
+                    &plan.potentials.topology,
                     metric,
-                    &targets,
-                    false,
-                    factor,
-                    &scratch.0,
-                ),
-                CchPotential::new(
-                    &potentials.topology,
-                    metric,
-                    &sources,
-                    true,
-                    factor,
-                    &scratch.1,
-                ),
-            )
+                    targets,
+                    reversed,
+                    plan.factor,
+                    &gates,
+                    plan.floor,
+                    &scratch[slot],
+                    &scratch[slot + 2],
+                )
+            };
+            (side(&target_nodes, false, 0), side(&origin_nodes, true, 1))
         });
         let (forward_alt, backward_alt) = if cch.is_some() {
             (None, None)

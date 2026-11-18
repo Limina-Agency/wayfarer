@@ -7936,10 +7936,13 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
     apply_per_edge_options(&graph, &mut per_edge);
     let (mut compared, mut landmark_visited, mut potential_visited) = (0usize, 0usize, 0usize);
     for (name, costing) in costing_option_sets() {
-        for variant in ["plain", "per-edge", "alternatives"] {
+        for variant in ["plain", "per-edge", "scaled", "alternatives"] {
             if variant == "alternatives" && name != "default" {
                 continue;
             }
+            // "scaled": the per-edge options past the gate limit, bounded by
+            // scaling instead of gates.
+            search::gates::force_gate_limit((variant == "scaled").then_some(0));
             for profile in ALL_TEST_PROFILES {
                 for origin in &points {
                     for destination in &points {
@@ -7948,7 +7951,7 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
                         }
                         let request = || {
                             let mut request = LegRequest::new(*origin, *destination, profile);
-                            if variant == "per-edge" {
+                            if matches!(variant, "per-edge" | "scaled") {
                                 request.options = per_edge.clone();
                             }
                             request.options.max_correlation_distance_m = 60;
@@ -8009,6 +8012,7 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
             }
         }
     }
+    search::gates::force_gate_limit(None);
     assert!(compared > 500, "only {compared} routes");
     // Under `WAYFARER_POTENTIAL=cch` both engines bound with potentials.
     assert!(

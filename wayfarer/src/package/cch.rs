@@ -40,6 +40,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use super::Sections;
 
@@ -1122,6 +1123,315 @@ impl<'a> CchPotential<'a> {
             value
         }
     }
+}
+
+/// Rounds of gate offsets (see [`GatedPotential`]).
+const GATE_ROUNDS: usize = 6;
+/// Distinct gate nodes up to which gate offsets are solved exactly.
+const EXACT_GATE_NODES: usize = 256;
+
+/// An f64 ordered by `total_cmp`, for heaps.
+#[derive(Clone, Copy, PartialEq)]
+struct OrderedCost(f64);
+impl Eq for OrderedCost {}
+impl PartialOrd for OrderedCost {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrderedCost {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// A gate of a [`GatedPotential`] on one side: the node a path reaches it at
+/// (forward: the edge's source; backward: its target), the node it continues
+/// from (the other end), and the request cost of the edge.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PotentialGate {
+    pub node: u32,
+    pub end: u32,
+    pub cost: f64,
+}
+
+/// CCH potentials for a request with discount gates (edges it makes cheaper
+/// than the stored metric bounds, or usable where it is not), as
+/// `search::gates` does for the landmarks.
+///
+/// A path to the targets either uses no gate, and costs at least `pot(v)`,
+/// or reaches a first gate `e` at its node `u` through edges the metric
+/// bounds. So `pi(v) = min(pot(v), min over gates of d(v, u) + off(e))` with
+/// `off(e) = c(e) + pi'(w)`, for any consistent lower bound `pi'` on the
+/// request's costs from `w`, is a lower bound. That is one elimination-tree
+/// query with the gates' nodes as further targets at their offsets.
+///
+/// With at most [`EXACT_GATE_NODES`] gate nodes the offsets are exact:
+/// `off(e) = c(e) + min(pot(w), min over gates g of d(w, u_g) + off(g))`,
+/// a Dijkstra over the gates with CCH distances between their ends and
+/// nodes (see [`exact_offsets`]). Beyond that the offsets start from `pi' = floor * pot` (or 0) and are raised in rounds
+/// with the previous round's `pi`. Within a round, gates that continue
+/// straight into another gate (its node is this one's end: a discounted
+/// corridor, both directions of an opened way) take `off(e) = min(c(e) +
+/// pi'(w), c(e) + off(g))` by a Dijkstra over the gates, so chains settle at
+/// once. Each round is a valid lower bound at least as high as the one
+/// before, so every gate edge keeps `pi(u) <= c(e) + pi(w)` and the bound
+/// stays consistent. With every gate an edge the
+/// metric bounds, each edge costs at least `floor` times its metric cost,
+/// and `floor * pot` is a consistent lower bound too: the larger of the two
+/// is used.
+pub(crate) struct GatedPotential<'a> {
+    base: CchPotential<'a>,
+    gated: Option<CchPotential<'a>>,
+    floor: f64,
+}
+
+impl<'a> GatedPotential<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        topology: &'a CchTopology,
+        metric: &'a CchMetric,
+        targets: &[u32],
+        reversed: bool,
+        factor: f64,
+        gates: &[PotentialGate],
+        floor: f64,
+        scratch: &'a RefCell<PotentialScratch>,
+        gated_scratch: &'a RefCell<PotentialScratch>,
+    ) -> Self {
+        let seeds = targets.iter().map(|node| (*node, 0.0)).collect::<Vec<_>>();
+        let base = CchPotential::new(topology, metric, &seeds, reversed, factor, scratch);
+        if gates.is_empty() {
+            return Self {
+                base,
+                gated: None,
+                floor: 0.0,
+            };
+        }
+        // Offsets in request costs; seeds in metric units (`get` scales
+        // them back), lowered by a hair against rounding.
+        let scale = base.factor;
+        // Gates by the node they continue from (`end`), to relax the gates
+        // ending where a settled gate starts.
+        let mut by_end = FxHashMap::<u32, Vec<usize>>::default();
+        for (index, gate) in gates.iter().enumerate() {
+            by_end.entry(gate.end).or_default().push(index);
+        }
+        let chained = |mut offsets: Vec<f64>| {
+            use std::cmp::Reverse;
+            let mut heap = std::collections::BinaryHeap::new();
+            for (index, offset) in offsets.iter().enumerate() {
+                if offset.is_finite() {
+                    heap.push((Reverse(OrderedCost(*offset)), index));
+                }
+            }
+            while let Some((Reverse(OrderedCost(offset)), index)) = heap.pop() {
+                if offset > offsets[index] {
+                    continue;
+                }
+                for &other in by_end.get(&gates[index].node).into_iter().flatten() {
+                    let value = gates[other].cost + offset;
+                    if value < offsets[other] {
+                        offsets[other] = value;
+                        heap.push((Reverse(OrderedCost(value)), other));
+                    }
+                }
+            }
+            offsets
+        };
+        let build = |offsets: &[f64]| {
+            let mut all = seeds.clone();
+            all.extend(
+                gates
+                    .iter()
+                    .zip(offsets)
+                    .filter(|(_, offset)| offset.is_finite())
+                    .map(|(gate, offset)| (gate.node, offset / scale * (1.0 - 1e-12))),
+            );
+            CchPotential::new(topology, metric, &all, reversed, factor, gated_scratch)
+        };
+        if let Some(offsets) = exact_offsets(topology, metric, reversed, scale, gates, |node| {
+            base.get(node)
+        }) {
+            let potential = Self {
+                gated: Some(build(&offsets)),
+                base,
+                floor,
+            };
+            return potential;
+        }
+        let mut offsets = chained(
+            gates
+                .iter()
+                .map(|gate| {
+                    let lower = if floor > 0.0 {
+                        floor * base.get(gate.end)
+                    } else {
+                        0.0
+                    };
+                    gate.cost + lower
+                })
+                .collect(),
+        );
+        let mut potential = Self {
+            gated: Some(build(&offsets)),
+            base,
+            floor,
+        };
+        for _ in 1..GATE_ROUNDS {
+            let raised = chained(
+                gates
+                    .iter()
+                    .map(|gate| gate.cost + potential.get(gate.end))
+                    .collect(),
+            );
+            let higher = raised
+                .iter()
+                .zip(&offsets)
+                .any(|(new, old)| *new > *old + 1e-9 * old.abs().max(1.0));
+            if !higher {
+                break;
+            }
+            offsets = raised;
+            potential.gated = Some(build(&offsets));
+        }
+        potential
+    }
+
+    /// The lower bound at `node` (infinite: no target is reachable).
+    #[inline]
+    pub(crate) fn get(&self, node: u32) -> f64 {
+        let Some(gated) = &self.gated else {
+            return self.base.get(node);
+        };
+        let value = gated.get(node);
+        if self.floor > 0.0 {
+            value.max(self.floor * self.base.get(node))
+        } else {
+            value
+        }
+    }
+}
+
+/// Exact gate offsets (see [`GatedPotential`]), or `None` with more than
+/// [`EXACT_GATE_NODES`] distinct gate nodes or ends.
+///
+/// `d(w, u)` between every gate end `w` and gate node `u` comes from their
+/// elimination-tree searches: an up-down shortest path meets at a common
+/// ancestor `z`, so `d(w, u) = min over z of up(w, z) + down(z, u)`, with the
+/// nodes' searches bucketed at each ancestor. Forward, `up` follows arcs
+/// away from `w` and `down` arcs into `u`; backward (paths from the origins,
+/// so from `u` to `w`) the other way round. The offsets then settle in
+/// increasing order, each gate relaxing the gates whose end reaches it.
+fn exact_offsets(
+    topology: &CchTopology,
+    metric: &CchMetric,
+    reversed: bool,
+    scale: f64,
+    gates: &[PotentialGate],
+    base: impl Fn(u32) -> f64,
+) -> Option<Vec<f64>> {
+    let t = topology;
+    let mut nodes = gates.iter().map(|gate| gate.node).collect::<Vec<_>>();
+    nodes.sort_unstable();
+    nodes.dedup();
+    let mut ends = gates.iter().map(|gate| gate.end).collect::<Vec<_>>();
+    ends.sort_unstable();
+    ends.dedup();
+    if nodes.len() > EXACT_GATE_NODES || ends.len() > EXACT_GATE_NODES {
+        return None;
+    }
+    // Elimination-tree search from `node` (rank order up its ancestors):
+    // (ancestor rank, distance), with `weights[a]` the cost of arc `a` in the
+    // direction searched.
+    let search = |node: u32, weights: &[f32], out: &mut Vec<(u32, f64)>| {
+        out.clear();
+        let mut x = t.rank[node as usize];
+        let start = out.len();
+        while x != NO_NODE {
+            out.push((x, f64::INFINITY));
+            x = t.parent[x as usize];
+        }
+        out[start].1 = 0.0;
+        // Ancestors are in increasing rank, and every upward arc of a node on
+        // the path leads to a later node on it.
+        for i in start..out.len() {
+            let (x, dx) = out[i];
+            if !dx.is_finite() {
+                continue;
+            }
+            let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
+            let mut j = i + 1;
+            for (y, w) in t.up_head[arcs.clone()].iter().zip(&weights[arcs]) {
+                while out[j].0 < *y {
+                    j += 1;
+                }
+                let value = dx + f64::from(*w);
+                if value < out[j].1 {
+                    out[j].1 = value;
+                }
+            }
+        }
+    };
+    // Forward: up(w, z) leaves `w` along arcs low → high (`up`), and
+    // down(z, u) reaches `u` along arcs high → low (`down`), searched from
+    // `u` upwards. Backward the other way round.
+    let (from_end, into_node) = if reversed {
+        (&metric.down, &metric.up)
+    } else {
+        (&metric.up, &metric.down)
+    };
+    let mut buckets = FxHashMap::<u32, Vec<(usize, f64)>>::default();
+    let mut space = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        search(*node, into_node, &mut space);
+        for (z, d) in &space {
+            if d.is_finite() {
+                buckets.entry(*z).or_default().push((index, *d));
+            }
+        }
+    }
+    // distance[end][node], in metric units.
+    let mut distance = vec![vec![f64::INFINITY; nodes.len()]; ends.len()];
+    for (row, end) in ends.iter().enumerate() {
+        search(*end, from_end, &mut space);
+        for (z, d) in &space {
+            if !d.is_finite() {
+                continue;
+            }
+            for (index, down) in buckets.get(z).into_iter().flatten() {
+                let value = d + down;
+                if value < distance[row][*index] {
+                    distance[row][*index] = value;
+                }
+            }
+        }
+    }
+    let end_row = |node: u32| ends.binary_search(&node).ok();
+    let node_column = |node: u32| nodes.binary_search(&node).ok();
+    let mut offsets = gates
+        .iter()
+        .map(|gate| gate.cost + base(gate.end))
+        .collect::<Vec<_>>();
+    let mut settled = vec![false; gates.len()];
+    while let Some(next) = (0..gates.len())
+        .filter(|index| !settled[*index] && offsets[*index].is_finite())
+        .min_by(|a, b| offsets[*a].total_cmp(&offsets[*b]).then(a.cmp(b)))
+    {
+        settled[next] = true;
+        let column = node_column(gates[next].node)?;
+        for (index, gate) in gates.iter().enumerate() {
+            if settled[index] {
+                continue;
+            }
+            let row = end_row(gate.end)?;
+            let value = gate.cost + scale * distance[row][column] + offsets[next];
+            if value < offsets[index] {
+                offsets[index] = value;
+            }
+        }
+    }
+    Some(offsets)
 }
 
 /// Compares the potentials of every stored column, both directions, from
