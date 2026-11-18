@@ -18,6 +18,7 @@ use std::collections::BinaryHeap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use wayfarer_package::format::{ColumnPieceKinds, PieceKind};
 
+use super::cch::{CchPotential, CchPotentials, PotentialScratch};
 use super::columns::{CostColumn, LandmarkColumn};
 use super::landmarks::AltBound;
 use super::restrictions::{ComplexAutomata, ROOT};
@@ -40,6 +41,13 @@ pub(crate) mod patch;
 /// Per-node (forward, backward) potential bounds, NaN until computed, and the
 /// nodes whose bounds were set, borrowed by the bidirectional search.
 type NodeBoundsCache = std::cell::RefCell<(Vec<(f64, f64)>, Vec<u32>)>;
+
+/// The CCH potentials' scratch, forward and backward, borrowed by the
+/// bidirectional search.
+type PotentialScratches = (
+    std::cell::RefCell<PotentialScratch>,
+    std::cell::RefCell<PotentialScratch>,
+);
 
 const NO_LABEL: u32 = u32::MAX;
 const SEED_TRAVERSED_FRACTION_EPSILON: f64 = 1e-9;
@@ -275,6 +283,9 @@ pub(crate) struct SearchState {
     /// Per-edge isochrone reach slot, allocated on first use and reset
     /// through `touched` (every reached edge is labelled).
     edge_aux: Vec<u32>,
+    /// CCH potential scratch (forward, backward), allocated by the first
+    /// search that bounds with the potentials.
+    cch_scratch: (PotentialScratch, PotentialScratch),
 }
 
 /// Backward label on edge `edge`: cost from entering `edge` at its source to
@@ -318,6 +329,7 @@ impl SearchState {
             analysis_labels: Vec::new(),
             analysis_label_states: FxHashMap::default(),
             edge_aux: Vec::new(),
+            cch_scratch: Default::default(),
         }
     }
 
@@ -1183,21 +1195,59 @@ impl<'q> Run<'_, '_, 'q> {
             std::mem::take(&mut self.state.node_bounds),
             std::mem::take(&mut self.state.node_bounds_touched),
         ));
-        let outcome = self.bidirectional_body(&cache);
+        let (forward, backward) = std::mem::take(&mut self.state.cch_scratch);
+        let scratch = (
+            std::cell::RefCell::new(forward),
+            std::cell::RefCell::new(backward),
+        );
+        let outcome = self.bidirectional_body(&cache, &scratch);
+        self.state.cch_scratch = (scratch.0.into_inner(), scratch.1.into_inner());
         let (values, touched) = cache.into_inner();
         self.state.node_bounds = values;
         self.state.node_bounds_touched = touched;
         outcome
     }
 
-    fn bidirectional_body(&mut self, cache: &NodeBoundsCache) -> SearchOutcome {
+    fn bidirectional_body(
+        &mut self,
+        cache: &NodeBoundsCache,
+        scratch: &PotentialScratches,
+    ) -> SearchOutcome {
         self.walk = self.walk_setup();
-        let outcome = self.bidirectional_search(cache);
+        let outcome = self.bidirectional_search(cache, scratch);
         walks::record(self.counters.walked_edge_count);
         outcome
     }
 
-    fn bidirectional_search(&mut self, cache: &NodeBoundsCache) -> SearchOutcome {
+    /// The CCH potentials that bound this query, the stored column they were
+    /// customized on, and the factor scaling them to the query's costs: when
+    /// the package has them, the query's column is bounded by a stored
+    /// column (every edge it can use is usable there and costs at least
+    /// `factor` times as much), and every cost override is finite only
+    /// where that column is and at least `factor` times its cost. Discounts,
+    /// opened edges and SAR openings fail the last test and keep the
+    /// landmarks (with their gates).
+    fn potentials<'g>(
+        g: SearchGraph<'g>,
+        q: &SearchQuery<'_>,
+    ) -> Option<(&'g CchPotentials, usize, f64)> {
+        let potentials = g.cch?;
+        let (column, factor) = q.column.potential?;
+        let stored = g
+            .edge_cost
+            .get(column * g.edge_count..(column + 1) * g.edge_count)?;
+        let below = q.cost_overrides.iter().any(|(edge, cost)| {
+            let base = f64::from(stored[*edge as usize]);
+            cost.is_finite() && !(base.is_finite() && f64::from(*cost) >= factor * base)
+        });
+        (!below && column < potentials.metrics.len()).then_some((potentials, column, factor))
+    }
+
+    fn bidirectional_search(
+        &mut self,
+        cache: &NodeBoundsCache,
+        scratch: &PotentialScratches,
+    ) -> SearchOutcome {
         let g = self.g;
         let origins = self.q.origin_edges;
         let destinations = self.destinations();
@@ -1248,16 +1298,58 @@ impl<'q> Run<'_, '_, 'q> {
             )?;
             gates::GatedAlt::new(landmarks, vec![base], seeds, reversed, self.q.gates)
         };
-        let forward_alt = landmarks(&target_nodes, &origin_nodes, false);
-        let backward_alt = landmarks(&origin_nodes, &target_nodes, true);
+        // CCH potentials in place of the landmarks where they apply.
+        let cch = Self::potentials(g, self.q).map(|(potentials, column, factor)| {
+            let metric = &potentials.metrics[column];
+            let targets = target_nodes
+                .iter()
+                .map(|node| (*node, 0.0))
+                .collect::<Vec<_>>();
+            let sources = origin_nodes
+                .iter()
+                .map(|node| (*node, 0.0))
+                .collect::<Vec<_>>();
+            (
+                CchPotential::new(
+                    &potentials.topology,
+                    metric,
+                    &targets,
+                    false,
+                    factor,
+                    &scratch.0,
+                ),
+                CchPotential::new(
+                    &potentials.topology,
+                    metric,
+                    &sources,
+                    true,
+                    factor,
+                    &scratch.1,
+                ),
+            )
+        });
+        let (forward_alt, backward_alt) = if cch.is_some() {
+            (None, None)
+        } else {
+            (
+                landmarks(&target_nodes, &origin_nodes, false),
+                landmarks(&origin_nodes, &target_nodes, true),
+            )
+        };
         let forward_h = |node: u32| {
             let geometric = k * (chord_m(g.xyz(node), d_center) - d_radius).max(0.0);
+            if let Some((forward, _)) = &cch {
+                return forward.get(node).max(geometric);
+            }
             forward_alt
                 .as_ref()
                 .map_or(geometric, |alt| alt.bound(node).max(geometric))
         };
         let backward_h = |node: u32| {
             let geometric = k * (chord_m(g.xyz(node), o_center) - o_radius).max(0.0);
+            if let Some((_, backward)) = &cch {
+                return backward.get(node).max(geometric);
+            }
             backward_alt
                 .as_ref()
                 .map_or(geometric, |alt| alt.bound(node).max(geometric))

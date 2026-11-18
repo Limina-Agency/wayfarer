@@ -7882,3 +7882,175 @@ fn derived_column_walks_match_where_the_column_opens_an_edge_at_a_marked_node() 
         taken.edge_ids
     );
 }
+
+/// Engines over the same package file: the fixture's, bounded by landmarks,
+/// and a second opening of the file with CCH potentials prepared.
+fn landmark_and_potential_engines(
+    fixture: &Fixture,
+    path: &Path,
+) -> (RoutingEngine, RoutingEngine) {
+    let package = RoutingPackage::open(path).unwrap();
+    let stats = package.prepare_potentials().expect("potentials");
+    assert_eq!(
+        stats.column_count,
+        package.file.view().edge_cost.len() / package.counts().edge_count
+    );
+    (
+        RoutingEngine::from_package(fixture.package.clone()),
+        RoutingEngine::from_package(Arc::new(package)),
+    )
+}
+
+#[test]
+fn cch_potentials_are_exact_node_distances() {
+    let dir = tempdir().unwrap();
+    let graphs = [
+        ("grid", grid_graph()),
+        ("costing", costing_grid_graph()),
+        ("junction", junction_graph()),
+        ("restricted", randomly_restricted_grid(7)),
+    ];
+    for (name, graph) in graphs {
+        let fixture = persist(&graph, &dir.path().join(format!("{name}.mrt")));
+        let package = &fixture.package;
+        let view = package.file.view();
+        let potentials = package.cch.prepare(&view).expect("potentials").clone();
+        let (pairs, mismatches) = cch::exactness_mismatches(&view, &potentials);
+        assert!(pairs > 0, "{name}");
+        assert_eq!(mismatches, 0, "{name}: {mismatches} of {pairs} pairs");
+    }
+}
+
+#[test]
+fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let points = grid_points()
+        .into_iter()
+        .chain(many_grid_targets().into_iter().step_by(30))
+        .collect::<Vec<_>>();
+    let mut per_edge = crate::RouteOptions::default();
+    apply_per_edge_options(&graph, &mut per_edge);
+    let (mut compared, mut landmark_visited, mut potential_visited) = (0usize, 0usize, 0usize);
+    for (name, costing) in costing_option_sets() {
+        for variant in ["plain", "per-edge", "alternatives"] {
+            if variant == "alternatives" && name != "default" {
+                continue;
+            }
+            for profile in ALL_TEST_PROFILES {
+                for origin in &points {
+                    for destination in &points {
+                        if origin == destination {
+                            continue;
+                        }
+                        let request = || {
+                            let mut request = LegRequest::new(*origin, *destination, profile);
+                            if variant == "per-edge" {
+                                request.options = per_edge.clone();
+                            }
+                            request.options.max_correlation_distance_m = 60;
+                            request.options.costing = costing;
+                            if variant == "alternatives" {
+                                request.options.alternatives.requested_alternative_count = 2;
+                            }
+                            request
+                        };
+                        let context =
+                            format!("{name} {variant} {profile:?} {origin:?} -> {destination:?}");
+                        let expected = landmarks.route_leg(request());
+                        let actual = potentials.route_leg(request());
+                        match (expected, actual) {
+                            (Ok(expected), Ok(actual)) => {
+                                compared += 1;
+                                landmark_visited += expected.diagnostics.visited_edge_count;
+                                potential_visited += actual.diagnostics.visited_edge_count;
+                                assert!(
+                                    (expected.cost - actual.cost).abs()
+                                        <= 1e-9 * expected.cost.max(1.0),
+                                    "{context}: landmarks {} vs potentials {}",
+                                    expected.cost,
+                                    actual.cost
+                                );
+                                assert_eq!(expected.edge_ids, actual.edge_ids, "{context}");
+                                let alternatives = |result: &LegResult| {
+                                    result
+                                        .alternatives
+                                        .iter()
+                                        .map(|alternative| alternative.edge_ids.clone())
+                                        .collect::<Vec<_>>()
+                                };
+                                assert_eq!(
+                                    alternatives(&expected),
+                                    alternatives(&actual),
+                                    "{context}"
+                                );
+                            }
+                            (Err(expected), Err(actual)) => {
+                                // Visited counts differ by design.
+                                assert_eq!(
+                                    std::mem::discriminant(&expected.error),
+                                    std::mem::discriminant(&actual.error),
+                                    "{context}: {:?} vs {:?}",
+                                    expected.error,
+                                    actual.error
+                                );
+                            }
+                            (expected, actual) => panic!(
+                                "{context}: landmarks {:?} vs potentials {:?}",
+                                expected.map(|result| result.cost).map_err(|f| f.error),
+                                actual.map(|result| result.cost).map_err(|f| f.error)
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 500, "only {compared} routes");
+    // Under `WAYFARER_POTENTIAL=cch` both engines bound with potentials.
+    assert!(
+        crate::debug::potential() != crate::debug::Potential::Auto
+            || potential_visited < landmark_visited,
+        "potentials visited {potential_visited} edges, landmarks {landmark_visited}"
+    );
+}
+
+#[test]
+fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
+    let dir = tempdir().unwrap();
+    let points = grid_points()
+        .into_iter()
+        .chain(many_grid_targets().into_iter().step_by(5))
+        .collect::<Vec<_>>();
+    for seed in 1..=4 {
+        let path = dir.path().join(format!("restricted-{seed}.mrt"));
+        let fixture = persist(&randomly_restricted_grid(seed), &path);
+        let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+        for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+            for origin in &points {
+                for destination in &points {
+                    if origin == destination {
+                        continue;
+                    }
+                    let context = format!("seed {seed} {profile:?} {origin:?} -> {destination:?}");
+                    let expected = route(&landmarks, *origin, *destination, profile, |_| {});
+                    let actual = route(&potentials, *origin, *destination, profile, |_| {});
+                    assert_eq!(expected.is_some(), actual.is_some(), "{context}");
+                    let (Some(expected), Some(actual)) = (expected, actual) else {
+                        continue;
+                    };
+                    assert!(
+                        (expected.cost - actual.cost).abs() <= 1e-9 * expected.cost.max(1.0),
+                        "{context}: landmarks {} vs potentials {}",
+                        expected.cost,
+                        actual.cost
+                    );
+                    assert_eq!(expected.edge_ids, actual.edge_ids, "{context}");
+                }
+            }
+        }
+    }
+}

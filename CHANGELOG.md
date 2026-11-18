@@ -7,6 +7,18 @@ costing model and the C ABI version a release reads or writes.
 
 ## Unreleased
 
+- **Opt-in CCH lower-bound potentials for route searches.**
+  `RoutingPackage::prepare_potentials` builds a node order by nested
+  dissection, its CCH topology and one metric per stored cost column from
+  the open package (no format change), about 3 s and 135 MB for
+  Malopolskie. Route searches then bound with exact node-level distances
+  instead of the landmarks wherever a stored column bounds the request:
+  stored columns, the strict destination-only pass of a default drive, and
+  costing options that only raise or remove edges. Discounts, opened edges,
+  SAR openings, own-metric columns, matrices, isochrones and overlay patches
+  keep their bounds. Routes are unchanged; only visited and settled counts
+  drop. On Malopolskie drive p95 goes from 15.3 to 9.0 ms and walk p95 from
+  55 to 24 ms. Without the call nothing changes.
 - **A package that is open can be replaced on any Windows file system.** On
   NTFS and ReFS the rename already replaced a package an engine had open, as
   on Linux and macOS. Where Windows can't rename with POSIX semantics

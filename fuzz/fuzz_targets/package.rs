@@ -3,7 +3,7 @@
 //! The root checksum guards against corruption, not attackers, so the target
 //! recomputes it after the fuzzer's mutation: the input then reaches the
 //! header, section table and section checks behind it, and the queries run on
-//! whatever opens.
+//! whatever opens, again after building CCH potentials for it.
 
 #![no_main]
 
@@ -52,7 +52,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let _ = package.sar_capability();
-    let engine = RoutingEngine::from_package(Arc::new(package));
+    let package = Arc::new(package);
+    let engine = RoutingEngine::from_package(package.clone());
     for (from, to) in [(0, 1), (2, 3)] {
         for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
             let _ = engine.route(RouteRequest::new(point(from), point(to), profile));
@@ -72,4 +73,13 @@ fuzz_target!(|data: &[u8]| {
     )
     .expect("isochrone request");
     let _ = engine.isochrone(isochrone);
+    // The CCH potentials, built from whatever opened, then the routes again
+    // bounded by them.
+    if package.prepare_potentials().is_some() {
+        for (from, to) in [(0, 1), (2, 3)] {
+            for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+                let _ = engine.route(RouteRequest::new(point(from), point(to), profile));
+            }
+        }
+    }
 });
