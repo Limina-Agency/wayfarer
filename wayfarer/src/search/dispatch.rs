@@ -388,6 +388,7 @@ impl Search<'_> {
                 .column
                 .landmarks
                 .filter(|_| bounds.use_landmarks && !bounds.fell_back()),
+            potentials: !bounds.fell_back(),
             gates: &bounds.gates,
             costs,
             profile_bit: profile_bit(self.request.profile),

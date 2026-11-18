@@ -241,6 +241,7 @@ impl RoutingEngine {
                         split_cost: &split_cost,
                     },
                     landmarks: None,
+                    potentials: false,
                     gates: &[],
                     profile_bit: profile_bit(request.profile),
                     origins: candidates,

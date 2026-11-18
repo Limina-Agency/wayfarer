@@ -50,9 +50,49 @@ type PotentialScratches = [std::cell::RefCell<PotentialScratch>; 4];
 
 /// The metric a [`PotentialPlan`] bounds with, and the costs it was
 /// customized from.
-enum PlanMetric<'g> {
+pub(crate) enum PlanMetric<'g> {
     Stored(&'g CchMetric, &'g [f32]),
     Own(std::sync::Arc<OwnMetric>),
+}
+
+impl<'g> PotentialPlan<'g> {
+    /// The potential towards `targets` (`reversed`: from them), with
+    /// `gates` (ignored unless the plan is gated).
+    pub(crate) fn potential<'a>(
+        &'a self,
+        targets: &[u32],
+        reversed: bool,
+        gates: &[gates::DiscountGate],
+        scratch: &'a std::cell::RefCell<PotentialScratch>,
+        gated_scratch: &'a std::cell::RefCell<PotentialScratch>,
+    ) -> GatedPotential<'a> {
+        let gates = if self.gated {
+            gates
+                .iter()
+                .map(|gate| {
+                    let (node, end) = gates::gate_ends(gate, reversed);
+                    PotentialGate {
+                        node,
+                        end,
+                        cost: gate.cost,
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        GatedPotential::new(
+            &self.potentials.topology,
+            self.metric.metric(),
+            targets,
+            reversed,
+            self.factor,
+            &gates,
+            self.floor,
+            scratch,
+            gated_scratch,
+        )
+    }
 }
 
 impl PlanMetric<'_> {
@@ -71,8 +111,77 @@ impl PlanMetric<'_> {
     }
 }
 
-/// How the CCH potentials bound a query (see `Run::potentials`).
-struct PotentialPlan<'g> {
+/// How the CCH potentials bound a query, when the package has them
+/// and the query's column is bounded by a stored column (every edge it
+/// can use is usable there and costs at least `factor` times as much):
+///
+/// - no override below `factor` times the stored cost: the stored metric
+///   scaled by `factor`;
+/// - with such overrides and discount gates (`has_gates`): the gated
+///   potentials ([`GatedPotential`]), every override below the scaled
+///   metric being a gate;
+/// - with such overrides past the gate limit (no gates): the metric
+///   scaled further by the least override ratio, as the landmarks are
+///   (`analysis::override_bounds`); `None` when one of them opens an
+///   edge the stored column cannot use.
+pub(crate) fn potential_plan<'g>(
+    g: SearchGraph<'g>,
+    column: &CostColumn<'_>,
+    cost_overrides: &FxHashMap<u32, f32>,
+    has_gates: bool,
+) -> Option<PotentialPlan<'g>> {
+    /// Safety margin on override ratios against rounding in f32 weights.
+    const MARGIN: f64 = 1.0 - 1e-6;
+    let potentials = g.cch?;
+    let (base, factor) = column.potential?;
+    let metric = match base {
+        PotentialBase::Stored(column) => PlanMetric::Stored(
+            potentials.metrics.get(column)?,
+            g.edge_cost
+                .get(column * g.edge_count..(column + 1) * g.edge_count)?,
+        ),
+        PotentialBase::Metric(key) => {
+            PlanMetric::Own(potentials.own_metric(key, || metric_costs(&g, key)))
+        }
+    };
+    let stored = metric.costs();
+    let (mut below, mut opened, mut ratio) = (false, false, 1.0f64);
+    for (edge, cost) in cost_overrides {
+        if !cost.is_finite() {
+            continue;
+        }
+        let base = factor * f64::from(stored[*edge as usize]);
+        if !base.is_finite() {
+            below = true;
+            opened = true;
+        } else if f64::from(*cost) < base {
+            below = true;
+            if base > 0.0 {
+                ratio = ratio.min(f64::from(*cost) / base);
+            }
+        }
+    }
+    let (factor, gated, floor) = if !below {
+        (factor, false, 0.0)
+    } else if has_gates {
+        let floor = if opened { 0.0 } else { ratio.min(1.0) * MARGIN };
+        (factor, true, floor)
+    } else if !opened && ratio > 0.0 {
+        (factor * ratio * MARGIN, false, 0.0)
+    } else {
+        return None;
+    };
+    Some(PotentialPlan {
+        potentials,
+        metric,
+        factor,
+        gated,
+        floor,
+    })
+}
+
+/// How the CCH potentials bound a query (see [`potential_plan`]).
+pub(crate) struct PotentialPlan<'g> {
     potentials: &'g CchPotentials,
     metric: PlanMetric<'g>,
     /// Scales the stored column's metric to the query's costs.
@@ -320,7 +429,7 @@ pub(crate) struct SearchState {
     edge_aux: Vec<u32>,
     /// CCH potential scratch (forward, backward), allocated by the first
     /// search that bounds with the potentials.
-    cch_scratch: [PotentialScratch; 4],
+    pub(crate) cch_scratch: [PotentialScratch; 4],
 }
 
 /// Backward label on edge `edge`: cost from entering `edge` at its source to
@@ -1250,68 +1359,8 @@ impl<'q> Run<'_, '_, 'q> {
         outcome
     }
 
-    /// How the CCH potentials bound this query, when the package has them
-    /// and the query's column is bounded by a stored column (every edge it
-    /// can use is usable there and costs at least `factor` times as much):
-    ///
-    /// - no override below `factor` times the stored cost: the stored metric
-    ///   scaled by `factor`;
-    /// - with such overrides and the query's discount gates: the gated
-    ///   potentials ([`GatedPotential`]), every override below the scaled
-    ///   metric being a gate;
-    /// - with such overrides past the gate limit (no gates): the metric
-    ///   scaled further by the least override ratio, as the landmarks are
-    ///   (`analysis::override_bounds`); `None` when one of them opens an
-    ///   edge the stored column cannot use.
     fn potentials<'g>(g: SearchGraph<'g>, q: &SearchQuery<'_>) -> Option<PotentialPlan<'g>> {
-        /// Safety margin on override ratios against rounding in f32 weights.
-        const MARGIN: f64 = 1.0 - 1e-6;
-        let potentials = g.cch?;
-        let (base, factor) = q.column.potential?;
-        let metric = match base {
-            PotentialBase::Stored(column) => PlanMetric::Stored(
-                potentials.metrics.get(column)?,
-                g.edge_cost
-                    .get(column * g.edge_count..(column + 1) * g.edge_count)?,
-            ),
-            PotentialBase::Metric(key) => {
-                PlanMetric::Own(potentials.own_metric(key, || metric_costs(&g, key)))
-            }
-        };
-        let stored = metric.costs();
-        let (mut below, mut opened, mut ratio) = (false, false, 1.0f64);
-        for (edge, cost) in q.cost_overrides {
-            if !cost.is_finite() {
-                continue;
-            }
-            let base = factor * f64::from(stored[*edge as usize]);
-            if !base.is_finite() {
-                below = true;
-                opened = true;
-            } else if f64::from(*cost) < base {
-                below = true;
-                if base > 0.0 {
-                    ratio = ratio.min(f64::from(*cost) / base);
-                }
-            }
-        }
-        let (factor, gated, floor) = if !below {
-            (factor, false, 0.0)
-        } else if !q.gates.is_empty() {
-            let floor = if opened { 0.0 } else { ratio.min(1.0) * MARGIN };
-            (factor, true, floor)
-        } else if !opened && ratio > 0.0 {
-            (factor * ratio * MARGIN, false, 0.0)
-        } else {
-            return None;
-        };
-        Some(PotentialPlan {
-            potentials,
-            metric,
-            factor,
-            gated,
-            floor,
-        })
+        potential_plan(g, &q.column, q.cost_overrides, !q.gates.is_empty())
     }
 
     fn bidirectional_search(
@@ -1372,37 +1421,10 @@ impl<'q> Run<'_, '_, 'q> {
         // CCH potentials in place of the landmarks where they apply.
         let plan = Self::potentials(g, self.q);
         let cch = plan.as_ref().map(|plan| {
-            let metric = plan.metric.metric();
-            let side = |targets: &[u32], reversed: bool, slot: usize| {
-                let gates = if plan.gated {
-                    self.q
-                        .gates
-                        .iter()
-                        .map(|gate| {
-                            let (node, end) = gates::gate_ends(gate, reversed);
-                            PotentialGate {
-                                node,
-                                end,
-                                cost: gate.cost,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                GatedPotential::new(
-                    &plan.potentials.topology,
-                    metric,
-                    targets,
-                    reversed,
-                    plan.factor,
-                    &gates,
-                    plan.floor,
-                    &scratch[slot],
-                    &scratch[slot + 2],
-                )
-            };
-            (side(&target_nodes, false, 0), side(&origin_nodes, true, 1))
+            (
+                plan.potential(&target_nodes, false, self.q.gates, &scratch[0], &scratch[2]),
+                plan.potential(&origin_nodes, true, self.q.gates, &scratch[1], &scratch[3]),
+            )
         });
         let (forward_alt, backward_alt) = if cch.is_some() {
             (None, None)

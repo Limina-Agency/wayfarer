@@ -297,8 +297,8 @@ impl RoutingPackage {
     /// This takes seconds on a regional package (about 3 s for Małopolskie,
     /// 1.07 M nodes, on 16 threads) and holds the topology and metrics in
     /// memory (about 135 MB there). Every pooled search state that uses them
-    /// allocates 48 bytes per node of scratch on first use (about 51 MB
-    /// there). Searches running while it
+    /// allocates 8 bytes per node of scratch on first use (16 with discount
+    /// gates; about 9 MB there). Searches running while it
     /// builds use the landmarks. Later calls return at once. `None` when the
     /// node graph is too large for the potentials' 31-bit arc ids.
     pub fn prepare_potentials(&self) -> Option<cch::PotentialStats> {

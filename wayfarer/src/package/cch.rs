@@ -52,7 +52,7 @@ const UP_BIT: u32 = 1 << 31;
 const LEAF_CELL: usize = 64;
 /// Safety factor on potentials against f64 rounding in path sums (a
 /// consistent potential scaled by a factor below 1 stays consistent).
-const POTENTIAL_MARGIN: f64 = 1.0 - 1e-9;
+pub(crate) const POTENTIAL_MARGIN: f64 = 1.0 - 1e-9;
 
 /// What [`RoutingPackage::prepare_potentials`](super::RoutingPackage::prepare_potentials)
 /// built, and how long it took.
@@ -1012,30 +1012,59 @@ fn round_down(value: f64) -> f32 {
 /// epochs.
 #[derive(Default)]
 pub(crate) struct PotentialScratch {
-    b: Vec<f64>,
-    b_epoch: Vec<u32>,
-    pot: Vec<f64>,
-    pot_epoch: Vec<u32>,
-    epoch: u32,
+    /// By rank: the node's entry in `entries`, valid only when that entry
+    /// names the rank back (a sparse set: never cleared, 4 bytes per node).
+    slot: Vec<u32>,
+    /// The nodes this query touched: rank, `B` (infinite unless an ancestor
+    /// of a target, see the module docs) and the memoised potential (NaN
+    /// until computed).
+    entries: Vec<ScratchEntry>,
     ancestors: Vec<u32>,
     path: Vec<u32>,
 }
 
+#[derive(Clone, Copy)]
+struct ScratchEntry {
+    rank: u32,
+    b: f64,
+    pot: f64,
+}
+
+/// Entries a scratch keeps its capacity for between queries.
+const SCRATCH_KEEP: usize = 1 << 16;
+
 impl PotentialScratch {
     fn begin(&mut self, n: usize) {
-        if self.b.len() != n {
-            self.b = vec![f64::INFINITY; n];
-            self.b_epoch = vec![0; n];
-            self.pot = vec![f64::INFINITY; n];
-            self.pot_epoch = vec![0; n];
-            self.epoch = 0;
+        if self.slot.len() != n {
+            self.slot = vec![u32::MAX; n];
         }
-        self.epoch = self.epoch.wrapping_add(1);
-        if self.epoch == 0 {
-            self.b_epoch.fill(0);
-            self.pot_epoch.fill(0);
-            self.epoch = 1;
+        if self.entries.capacity() > SCRATCH_KEEP {
+            self.entries = Vec::new();
+        } else {
+            self.entries.clear();
         }
+    }
+
+    #[inline]
+    fn find(&self, rank: u32) -> Option<usize> {
+        let index = self.slot[rank as usize] as usize;
+        (index < self.entries.len() && self.entries[index].rank == rank).then_some(index)
+    }
+
+    /// The entry of `rank`, added (no `B`, no potential) if missing.
+    #[inline]
+    fn entry(&mut self, rank: u32) -> usize {
+        if let Some(index) = self.find(rank) {
+            return index;
+        }
+        let index = self.entries.len();
+        self.slot[rank as usize] = index as u32;
+        self.entries.push(ScratchEntry {
+            rank,
+            b: f64::INFINITY,
+            pot: f64::NAN,
+        });
+        index
     }
 }
 
@@ -1078,23 +1107,22 @@ impl<'a> CchPotential<'a> {
         let mut s = self.scratch.borrow_mut();
         let s = &mut *s;
         s.begin(t.rank.len());
-        let epoch = s.epoch;
         s.ancestors.clear();
         for (node, initial) in targets {
-            let r = t.rank[*node as usize] as usize;
-            if s.b_epoch[r] != epoch {
-                s.b_epoch[r] = epoch;
-                s.b[r] = *initial;
-                s.ancestors.push(r as u32);
-                let mut x = t.parent[r];
-                while x != NO_NODE && s.b_epoch[x as usize] != epoch {
-                    s.b_epoch[x as usize] = epoch;
-                    s.b[x as usize] = f64::INFINITY;
-                    s.ancestors.push(x);
-                    x = t.parent[x as usize];
-                }
-            } else {
-                s.b[r] = s.b[r].min(*initial);
+            let r = t.rank[*node as usize];
+            if let Some(index) = s.find(r) {
+                let b = &mut s.entries[index].b;
+                *b = b.min(*initial);
+                continue;
+            }
+            let index = s.entry(r);
+            s.entries[index].b = *initial;
+            s.ancestors.push(r);
+            let mut x = t.parent[r as usize];
+            while x != NO_NODE && s.find(x).is_none() {
+                s.entry(x);
+                s.ancestors.push(x);
+                x = t.parent[x as usize];
             }
         }
         s.ancestors.sort_unstable();
@@ -1102,19 +1130,45 @@ impl<'a> CchPotential<'a> {
         // reversed: w(x -> y)).
         let toward = if self.reversed { self.up } else { self.down };
         for i in 0..s.ancestors.len() {
-            let x = s.ancestors[i] as usize;
-            let bx = s.b[x];
+            let x = s.ancestors[i];
+            let bx = s.entries[s.slot[x as usize] as usize].b;
             if !bx.is_finite() {
                 continue;
             }
-            let arcs = t.first_up[x] as usize..t.first_up[x + 1] as usize;
+            let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
             for (y, w) in t.up_head[arcs.clone()].iter().zip(&toward[arcs]) {
                 let value = bx + f64::from(*w);
-                if value < s.b[*y as usize] {
-                    s.b[*y as usize] = value;
+                let b = &mut s.entries[s.slot[*y as usize] as usize].b;
+                if value < *b {
+                    *b = value;
                 }
             }
         }
+    }
+
+    /// The potential towards `targets` (at 0) and `seeds` (node, offset in
+    /// request costs): `min(pot(v), min over seeds of d(v, u) + offset)`.
+    pub(crate) fn with_offsets(
+        topology: &'a CchTopology,
+        metric: &'a CchMetric,
+        targets: &[u32],
+        seeds: &[(u32, f64)],
+        reversed: bool,
+        factor: f64,
+        scratch: &'a RefCell<PotentialScratch>,
+    ) -> Self {
+        let scale = factor * POTENTIAL_MARGIN;
+        let all = targets
+            .iter()
+            .map(|node| (*node, 0.0))
+            .chain(
+                seeds
+                    .iter()
+                    .filter(|(_, offset)| offset.is_finite())
+                    .map(|(node, offset)| (*node, offset / scale * (1.0 - 1e-12))),
+            )
+            .collect::<Vec<_>>();
+        Self::new(topology, metric, &all, reversed, factor, scratch)
     }
 
     /// The potential at package node `node` (infinite: no target reachable).
@@ -1124,36 +1178,41 @@ impl<'a> CchPotential<'a> {
         let r = t.rank[node as usize];
         let mut s = self.scratch.borrow_mut();
         let s = &mut *s;
-        let epoch = s.epoch;
-        if s.pot_epoch[r as usize] != epoch {
-            s.path.clear();
-            let mut x = r;
-            while x != NO_NODE && s.pot_epoch[x as usize] != epoch {
-                s.path.push(x);
-                x = t.parent[x as usize];
-            }
-            // pot(v) = min(B(v), min over upward arcs (v, y) of w(v -> y) +
-            // pot(y)) (forward; reversed: w(y -> v)).
-            let away = if self.reversed { self.down } else { self.up };
-            for i in (0..s.path.len()).rev() {
-                let x = s.path[i] as usize;
-                let mut best = if s.b_epoch[x] == epoch {
-                    s.b[x]
-                } else {
-                    f64::INFINITY
-                };
-                let arcs = t.first_up[x] as usize..t.first_up[x + 1] as usize;
-                for (y, w) in t.up_head[arcs.clone()].iter().zip(&away[arcs]) {
-                    let value = f64::from(*w) + s.pot[*y as usize];
-                    if value < best {
-                        best = value;
+        let memoised = s.find(r).map(|index| s.entries[index].pot);
+        let value = match memoised {
+            Some(value) if !value.is_nan() => value,
+            _ => {
+                s.path.clear();
+                let mut x = r;
+                while x != NO_NODE {
+                    let index = s.entry(x);
+                    if !s.entries[index].pot.is_nan() {
+                        break;
                     }
+                    s.path.push(index as u32);
+                    x = t.parent[x as usize];
                 }
-                s.pot[x] = best;
-                s.pot_epoch[x] = epoch;
+                // pot(v) = min(B(v), min over upward arcs (v, y) of
+                // w(v -> y) + pot(y)) (forward; reversed: w(y -> v)). Every
+                // upward neighbour is an ancestor, memoised by now.
+                let away = if self.reversed { self.down } else { self.up };
+                let mut best = f64::INFINITY;
+                for i in (0..s.path.len()).rev() {
+                    let index = s.path[i] as usize;
+                    let ScratchEntry { rank: x, b, .. } = s.entries[index];
+                    best = b;
+                    let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
+                    for (y, w) in t.up_head[arcs.clone()].iter().zip(&away[arcs]) {
+                        let value = f64::from(*w) + s.entries[s.slot[*y as usize] as usize].pot;
+                        if value < best {
+                            best = value;
+                        }
+                    }
+                    s.entries[index].pot = best;
+                }
+                best
             }
-        }
-        let value = s.pot[r as usize];
+        };
         if value < f64::INFINITY {
             value * self.factor
         } else {
@@ -1176,7 +1235,7 @@ impl<'a> CchPotential<'a> {
 /// Rounds of gate offsets (see [`GatedPotential`]).
 const GATE_ROUNDS: usize = 6;
 /// Distinct gate nodes up to which gate offsets are solved exactly.
-const EXACT_GATE_NODES: usize = 256;
+pub(crate) const EXACT_GATE_NODES: usize = 256;
 
 /// An f64 ordered by `total_cmp`, for heaps.
 #[derive(Clone, Copy, PartialEq)]
@@ -1361,6 +1420,105 @@ impl<'a> GatedPotential<'a> {
     }
 }
 
+/// CCH distances from any node to each of a set of gate nodes (forward;
+/// `reversed`: from each gate node to any node), in metric units.
+///
+/// An up-down shortest path meets at a common elimination-tree ancestor `z`,
+/// so `d(w, u) = min over z of up(w, z) + down(z, u)`. Each gate node's
+/// search up its ancestors is bucketed at every ancestor; a query searches up
+/// from its node and scans the buckets it meets.
+pub(crate) struct GateDistances<'a> {
+    topology: &'a CchTopology,
+    /// The metric's weights in the direction leaving the query node.
+    from_node: &'a [f32],
+    buckets: FxHashMap<u32, Vec<(usize, f64)>>,
+    count: usize,
+}
+
+impl<'a> GateDistances<'a> {
+    pub(crate) fn new(
+        topology: &'a CchTopology,
+        metric: &'a CchMetric,
+        reversed: bool,
+        gate_nodes: &[u32],
+    ) -> Self {
+        // Forward: up(w, z) leaves `w` along arcs low → high (`up`), and
+        // down(z, u) reaches `u` along arcs high → low (`down`), searched
+        // from `u` upwards. Backward the other way round.
+        let (from_node, into_gate) = if reversed {
+            (&metric.down[..], &metric.up[..])
+        } else {
+            (&metric.up[..], &metric.down[..])
+        };
+        let mut buckets = FxHashMap::<u32, Vec<(usize, f64)>>::default();
+        let mut space = Vec::new();
+        for (index, node) in gate_nodes.iter().enumerate() {
+            elimination_search(topology, *node, into_gate, &mut space);
+            for (z, d) in &space {
+                if d.is_finite() {
+                    buckets.entry(*z).or_default().push((index, *d));
+                }
+            }
+        }
+        Self {
+            topology,
+            from_node,
+            buckets,
+            count: gate_nodes.len(),
+        }
+    }
+
+    /// Distances from `node` to every gate node (`reversed`: from them).
+    pub(crate) fn from(&self, node: u32) -> Vec<f64> {
+        let mut distance = vec![f64::INFINITY; self.count];
+        let mut space = Vec::new();
+        elimination_search(self.topology, node, self.from_node, &mut space);
+        for (z, d) in &space {
+            if !d.is_finite() {
+                continue;
+            }
+            for (index, down) in self.buckets.get(z).into_iter().flatten() {
+                let value = d + down;
+                if value < distance[*index] {
+                    distance[*index] = value;
+                }
+            }
+        }
+        distance
+    }
+}
+
+/// Elimination-tree search from `node` up its ancestors (in rank order):
+/// (ancestor rank, distance) into `out`, with `weights[a]` the cost of arc
+/// `a` in the direction searched.
+fn elimination_search(t: &CchTopology, node: u32, weights: &[f32], out: &mut Vec<(u32, f64)>) {
+    out.clear();
+    let mut x = t.rank[node as usize];
+    while x != NO_NODE {
+        out.push((x, f64::INFINITY));
+        x = t.parent[x as usize];
+    }
+    out[0].1 = 0.0;
+    // Every upward arc of a node on the path leads to a later node on it.
+    for i in 0..out.len() {
+        let (x, dx) = out[i];
+        if !dx.is_finite() {
+            continue;
+        }
+        let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
+        let mut j = i + 1;
+        for (y, w) in t.up_head[arcs.clone()].iter().zip(&weights[arcs]) {
+            while out[j].0 < *y {
+                j += 1;
+            }
+            let value = dx + f64::from(*w);
+            if value < out[j].1 {
+                out[j].1 = value;
+            }
+        }
+    }
+}
+
 /// Exact gate offsets (see [`GatedPotential`]), or `None` with more than
 /// [`EXACT_GATE_NODES`] distinct gate nodes or ends.
 ///
@@ -1379,7 +1537,7 @@ fn exact_offsets(
     gates: &[PotentialGate],
     base: impl Fn(u32) -> f64,
 ) -> Option<Vec<f64>> {
-    let t = topology;
+    // (the distances come from `GateDistances`)
     let mut nodes = gates.iter().map(|gate| gate.node).collect::<Vec<_>>();
     nodes.sort_unstable();
     nodes.dedup();
@@ -1389,72 +1547,12 @@ fn exact_offsets(
     if nodes.len() > EXACT_GATE_NODES || ends.len() > EXACT_GATE_NODES {
         return None;
     }
-    // Elimination-tree search from `node` (rank order up its ancestors):
-    // (ancestor rank, distance), with `weights[a]` the cost of arc `a` in the
-    // direction searched.
-    let search = |node: u32, weights: &[f32], out: &mut Vec<(u32, f64)>| {
-        out.clear();
-        let mut x = t.rank[node as usize];
-        let start = out.len();
-        while x != NO_NODE {
-            out.push((x, f64::INFINITY));
-            x = t.parent[x as usize];
-        }
-        out[start].1 = 0.0;
-        // Ancestors are in increasing rank, and every upward arc of a node on
-        // the path leads to a later node on it.
-        for i in start..out.len() {
-            let (x, dx) = out[i];
-            if !dx.is_finite() {
-                continue;
-            }
-            let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
-            let mut j = i + 1;
-            for (y, w) in t.up_head[arcs.clone()].iter().zip(&weights[arcs]) {
-                while out[j].0 < *y {
-                    j += 1;
-                }
-                let value = dx + f64::from(*w);
-                if value < out[j].1 {
-                    out[j].1 = value;
-                }
-            }
-        }
-    };
-    // Forward: up(w, z) leaves `w` along arcs low → high (`up`), and
-    // down(z, u) reaches `u` along arcs high → low (`down`), searched from
-    // `u` upwards. Backward the other way round.
-    let (from_end, into_node) = if reversed {
-        (&metric.down, &metric.up)
-    } else {
-        (&metric.up, &metric.down)
-    };
-    let mut buckets = FxHashMap::<u32, Vec<(usize, f64)>>::default();
-    let mut space = Vec::new();
-    for (index, node) in nodes.iter().enumerate() {
-        search(*node, into_node, &mut space);
-        for (z, d) in &space {
-            if d.is_finite() {
-                buckets.entry(*z).or_default().push((index, *d));
-            }
-        }
-    }
+    let distances = GateDistances::new(topology, metric, reversed, &nodes);
     // distance[end][node], in metric units.
-    let mut distance = vec![vec![f64::INFINITY; nodes.len()]; ends.len()];
-    for (row, end) in ends.iter().enumerate() {
-        search(*end, from_end, &mut space);
-        for (z, d) in &space {
-            if !d.is_finite() {
-                continue;
-            }
-            for (index, down) in buckets.get(z).into_iter().flatten() {
-                let value = d + down;
-                if value < distance[row][*index] {
-                    distance[row][*index] = value;
-                }
-            }
-        }
-    }
+    let distance = ends
+        .iter()
+        .map(|end| distances.from(*end))
+        .collect::<Vec<_>>();
     let end_row = |node: u32| ends.binary_search(&node).ok();
     let node_column = |node: u32| nodes.binary_search(&node).ok();
     let mut offsets = gates

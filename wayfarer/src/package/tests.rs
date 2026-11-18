@@ -1505,8 +1505,9 @@ fn matrix_budget_bounds_each_search() {
         capped(&mut cell_counts.iter().flatten().copied(), largest - 1)
     );
 
-    // Rows: one shared expansion per source (more targets than the pairwise
-    // cut-off).
+    // Rows: one shared expansion per source (forced: the pairwise cut-off
+    // depends on whether CCH potentials bound the cells).
+    crate::matrix::test_mode::set(Some(crate::matrix::MatrixMode::Rows));
     let sources = &points[..3];
     for (name, engine, targets) in [("compact", &compact, many_grid_targets())] {
         let row_counts = sources
@@ -1553,6 +1554,7 @@ fn matrix_budget_bounds_each_search() {
             );
         }
     }
+    crate::matrix::test_mode::set(None);
 }
 
 // ---------------------------------------------------------------------------
@@ -7934,10 +7936,20 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
         .collect::<Vec<_>>();
     let mut per_edge = crate::RouteOptions::default();
     apply_per_edge_options(&graph, &mut per_edge);
+    let overlay = grid_overlay(&graph);
     let (mut compared, mut landmark_visited, mut potential_visited) = (0usize, 0usize, 0usize);
     for (name, costing) in costing_option_sets() {
-        for variant in ["plain", "per-edge", "scaled", "alternatives"] {
-            if variant == "alternatives" && name != "default" {
+        for variant in [
+            "plain",
+            "per-edge",
+            "scaled",
+            "alternatives",
+            "overlay",
+            "overlay-per-edge",
+        ] {
+            if matches!(variant, "alternatives" | "overlay" | "overlay-per-edge")
+                && name != "default"
+            {
                 continue;
             }
             // "scaled": the per-edge options past the gate limit, bounded by
@@ -7951,8 +7963,11 @@ fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_landmarks() {
                         }
                         let request = || {
                             let mut request = LegRequest::new(*origin, *destination, profile);
-                            if matches!(variant, "per-edge" | "scaled") {
+                            if matches!(variant, "per-edge" | "scaled" | "overlay-per-edge") {
                                 request.options = per_edge.clone();
+                            }
+                            if variant.starts_with("overlay") {
+                                request.options.dynamic_overlay = Some(overlay.clone());
                             }
                             request.options.max_correlation_distance_m = 60;
                             request.options.costing = costing;
@@ -8057,4 +8072,73 @@ fn routes_under_random_complex_restrictions_are_unchanged_by_cch_potentials() {
             }
         }
     }
+}
+
+#[test]
+fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_landmarks() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (landmarks, potentials) = landmark_and_potential_engines(&fixture, &path);
+    let sources = grid_points();
+    let targets = many_grid_targets()
+        .into_iter()
+        .step_by(4)
+        .collect::<Vec<_>>();
+    let mut per_edge = crate::RouteOptions::default();
+    apply_per_edge_options(&graph, &mut per_edge);
+    let overlay = grid_overlay(&graph);
+    let mut cells = 0usize;
+    for (name, costing) in costing_option_sets() {
+        for variant in ["plain", "per-edge", "overlay"] {
+            for profile in ALL_TEST_PROFILES {
+                for mode in [MatrixMode::Pairwise, MatrixMode::Rows, MatrixMode::Buckets] {
+                    let request = || {
+                        let mut request = crate::RouteMatrixRequest::new(
+                            sources.clone(),
+                            targets.clone(),
+                            profile,
+                        );
+                        if variant == "per-edge" {
+                            request.options = per_edge.clone();
+                        }
+                        if variant == "overlay" {
+                            request.options.dynamic_overlay = Some(overlay.clone());
+                        }
+                        request.options.max_correlation_distance_m = 60;
+                        request.options.costing = costing;
+                        request
+                    };
+                    test_mode::set(Some(mode));
+                    let expected = landmarks.matrix(request());
+                    let actual = potentials.matrix(request());
+                    test_mode::set(None);
+                    let context = format!("{name} {variant} {profile:?} {mode:?}");
+                    assert_eq!(expected.cells.len(), actual.cells.len(), "{context}");
+                    for (expected, actual) in expected.cells.iter().zip(&actual.cells) {
+                        let cell = format!(
+                            "{context} cell {} -> {}",
+                            expected.source_index, expected.target_index
+                        );
+                        assert_eq!(expected.status, actual.status, "{cell}");
+                        assert_eq!(expected.failure_reason, actual.failure_reason, "{cell}");
+                        if let (Some(a), Some(b)) = (expected.cost, actual.cost) {
+                            assert!((a - b).abs() <= 1e-9 * a.max(1.0), "{cell}: {a} vs {b}");
+                            cells += 1;
+                        }
+                        // An overlay path may list an edge once per fragment
+                        // it runs along: equal paths, other stops.
+                        let mut expected_edges = expected.edge_ids.clone();
+                        let mut actual_edges = actual.edge_ids.clone();
+                        expected_edges.dedup();
+                        actual_edges.dedup();
+                        assert_eq!(expected_edges, actual_edges, "{cell}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(cells > 1_000, "only {cells} cells");
 }
