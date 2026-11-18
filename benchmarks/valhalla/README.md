@@ -76,11 +76,10 @@ Graph compilation, Małopolskie (194 MiB extract), one run on 10 threads
 | Valhalla admins + tiles + tar | 12.4 s | 44.9 s | 2,003 MiB (tiles) | 223.9 MiB (216.7 tar + 7.1 admins) |
 | Ratio | 0.57 | 0.51 | 0.98 | 1.16 |
 
-Our package is larger because of ALT landmark distances, which Valhalla
-doesn't store (its search uses hierarchies and shortcuts instead): the
-landmark sections are 88.7 MiB, 34% of the package; the rest is 170.8 MiB
-against Valhalla's 216.7 MiB of tiles (`wayfarer verify` lists the
-sections).
+That package (format 1) stored ALT landmark distances, 88.7 MiB of it.
+Format 2 replaces them with CCH potentials computed when the package opens
+from a stored node order, and Małopolskie's package is now 176 MiB, 0.79×
+Valhalla's output (`wayfarer verify` lists the sections).
 
 Route quality, Małopolskie, 212 pairs (147 drives, 65 walks), with junction
 delay:
