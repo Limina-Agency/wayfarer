@@ -1097,6 +1097,20 @@ impl PackageFile {
         }) {
             return invalid("edge junction section is malformed");
         }
+        // Headings are whole degrees below 360 (costing folds their
+        // differences into 0..=180 and would overflow past it), or none.
+        let heading_ok = |heading: &u16| *heading < 360 || *heading == NO_HEADING;
+        if !self
+            .slice::<u16>(Section::EdgeHeadingStart)
+            .iter()
+            .all(heading_ok)
+            || !self
+                .slice::<u16>(Section::LoneHeadingEnd)
+                .iter()
+                .all(heading_ok)
+        {
+            return invalid("edge headings out of range");
+        }
         if c.node_count >= u32::MAX as usize || c.edge_count >= u32::MAX as usize {
             return invalid("graph exceeds u32 indexing");
         }
@@ -1157,6 +1171,15 @@ impl PackageFile {
         // The lookup is built on first use: the ids must be distinct, and
         // span no more than the compiler allows.
         let span_limit = edge_id_span_limit(c.edge_count);
+        // Ids are the base plus a slot below the span limit, in u64.
+        if self
+            .layout
+            .edge_id_base
+            .checked_add(span_limit as u64)
+            .is_none()
+        {
+            return invalid("edge id base overflows");
+        }
         let mut seen = vec![0u64; span_limit.div_ceil(64)];
         for slot in self.slice::<u32>(Section::EdgeId) {
             let slot = *slot as usize;
@@ -1254,7 +1277,52 @@ impl PackageFile {
         {
             return invalid("exact shapes are invalid");
         }
+        self.check_chain_marks()?;
         Ok(())
+    }
+
+    /// Marked chain nodes see what the route search's walks rely on (see
+    /// [`PieceKinds`]): over the stored column's usable arcs, leaving out
+    /// its marked tree nodes, at most two neighbours, no self-loop, and at
+    /// most one arc each way to each. A walk then has at most one way to
+    /// continue at every chain node. Needs the adjacency, twins and costs
+    /// checked.
+    fn check_chain_marks(&self) -> Result<(), RoutingPackageError> {
+        use rayon::prelude::*;
+        let view = self.view();
+        let chain = self.slice::<u64>(Section::PieceChain);
+        if chain.is_empty() {
+            return Ok(());
+        }
+        let c = self.counts;
+        let words = c.node_count.div_ceil(64);
+        let valid = (0..c.column_count).into_par_iter().all(|column| {
+            let Some(kinds) = view.piece_kinds.column(column) else {
+                return false;
+            };
+            let cost = &view.edge_cost[column * c.edge_count..(column + 1) * c.edge_count];
+            chain[column * words..(column + 1) * words]
+                .par_iter()
+                .enumerate()
+                .all(|(word, bits)| {
+                    let mut bits = *bits;
+                    while bits != 0 {
+                        let node = (word * 64) as u32 + bits.trailing_zeros();
+                        bits &= bits - 1;
+                        if !chain_node_is_valid(&view, kinds, cost, node) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err(RoutingPackageError::Invalid(
+                "piece kinds are invalid".into(),
+            ))
+        }
     }
 
     /// Twins pair edges
@@ -1996,6 +2064,68 @@ impl ColumnPieceKinds<'_> {
             PieceKind::Other
         }
     }
+}
+
+/// Whether chain node `node` of a column (`kinds`, arc costs `cost`) sees
+/// at most two neighbours over the usable arcs, leaving out tree nodes, no
+/// self-loop, and at most one arc each way to each (see
+/// `PackageFile::check_chain_marks`).
+fn chain_node_is_valid(
+    view: &Sections<'_>,
+    kinds: ColumnPieceKinds<'_>,
+    cost: &[f32],
+    node: u32,
+) -> bool {
+    let n = node as usize;
+    let mut neighbours = [u32::MAX; 2];
+    // Per direction (out, in), the neighbours an arc already reaches.
+    let mut seen = [[false; 2]; 2];
+    let mut visit = |direction: usize, edge: u32, other: u32| {
+        if !cost[edge as usize].is_finite() || kinds.kind(other) == PieceKind::Tree {
+            return true;
+        }
+        if other == node {
+            return false;
+        }
+        let slot = match neighbours.iter().position(|seen| *seen == other) {
+            Some(slot) => slot,
+            None => match neighbours.iter().position(|seen| *seen == u32::MAX) {
+                Some(slot) => {
+                    neighbours[slot] = other;
+                    slot
+                }
+                None => return false,
+            },
+        };
+        !std::mem::replace(&mut seen[direction][slot], true)
+    };
+    // The in-edges are the out-edges' twins and the lone in-edges (see
+    // `Sections::in_edges`), in any order.
+    for edge in view.first_out[n]..view.first_out[n + 1] {
+        let target = view.edge_target[edge as usize];
+        if !visit(0, edge, target) {
+            return false;
+        }
+        let twin = view.edge_twin[edge as usize];
+        if twin != NO_TWIN && !visit(1, twin, target) {
+            return false;
+        }
+    }
+    if view.lone_in_present[n / 64] & (1 << (n % 64)) != 0 {
+        let target = |edge: &u32| view.edge_target[*edge as usize];
+        let start = view
+            .lone_in_edge
+            .partition_point(|edge| target(edge) < node);
+        for edge in &view.lone_in_edge[start..] {
+            if target(edge) != node {
+                break;
+            }
+            if !visit(1, *edge, view.edge_source(*edge as usize)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `u32`s per record of [`Section::LandmarkOneAnchor`].

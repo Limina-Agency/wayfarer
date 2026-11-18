@@ -5,10 +5,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RouteStatus, RoutingEngine, RoutingPackage};
+use wayfarer_compiler::package_build::{PackageBuildOptions, write_package};
 use wayfarer_package::format::{
-    HEADER_COUNTS, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, HEADER_VERSION,
+    HEADER_COUNTS, HEADER_EDGE_ID_BASE, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, HEADER_VERSION,
     MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION, Section,
     TABLE_ENTRY_BYTES, section_count,
+};
+use wayfarer_road_graph::{
+    DirectionalAccess, RoadGraphBuilder, RoadType, RoutableWay, build_road_graph_manifest,
+    enhance_road_graph, inspect_road_graph_container, serialize_road_graph,
 };
 
 #[test]
@@ -98,6 +103,14 @@ fn resigned(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+/// The byte range of `section` in package `bytes`.
+fn section_range(bytes: &[u8], section: Section) -> std::ops::Range<usize> {
+    let entry = HEADER_FIXED_BYTES + section as usize * TABLE_ENTRY_BYTES;
+    let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
+    let len = u64::from_le_bytes(bytes[entry + 8..entry + 16].try_into().unwrap()) as usize;
+    offset..offset + len
+}
+
 /// A package whose landmark names a node it doesn't have is rejected when it
 /// opens; engines used to index node arrays with it at query time (found by
 /// the `package` fuzz target).
@@ -178,4 +191,136 @@ fn a_cch_order_that_is_not_a_permutation_is_rejected() {
     assert!(RoutingPackage::from_bytes(&resigned(bytes.clone())).is_err());
     bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(RoutingPackage::from_bytes(&resigned(bytes)).is_err());
+}
+
+/// A package with an edge heading of 360 degrees or more is rejected when it
+/// opens; costing folded heading differences with `360 - delta`, which
+/// overflowed (found by the `package` fuzz target with debug assertions).
+#[test]
+fn an_out_of_range_heading_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    let headings = section_range(&bytes, Section::EdgeHeadingStart);
+    assert!(headings.len() >= 2, "the fixture stores edge headings");
+    for heading in [360u16, 400, u16::MAX - 1] {
+        let mut bytes = bytes.clone();
+        bytes[headings.start..headings.start + 2].copy_from_slice(&heading.to_le_bytes());
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error.to_string().contains("edge headings out of range"),
+            "{heading}: {error}"
+        );
+    }
+    // No heading at all stays valid.
+    let mut bytes = bytes;
+    bytes[headings.start..headings.start + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    RoutingPackage::from_bytes(&resigned(bytes)).unwrap();
+}
+
+/// A package that marks a junction as a chain node is rejected when it
+/// opens: the route search walks a chain node's single way on without
+/// queueing labels, and asserted "a chain node continues one way" (found by
+/// the `package` fuzz target with debug assertions).
+#[test]
+fn a_chain_mark_at_a_junction_is_rejected() {
+    // Four roads meeting at (52.0, 21.0).
+    let mut builder = RoadGraphBuilder::new("dataset-junction");
+    let arms = [(0.001, 0.0), (-0.001, 0.0), (0.0, 0.001), (0.0, -0.001)];
+    for (id, (lat, lng)) in (1..).zip(arms) {
+        builder.push_way(RoutableWay {
+            osm_way_id: id,
+            points: vec![(52.0, 21.0), (52.0 + lat, 21.0 + lng)],
+            road_type: RoadType::Primary,
+            directional_access: DirectionalAccess::Both,
+            highway: Some("primary".into()),
+            access: Some("yes".into()),
+            ..RoutableWay::default()
+        });
+    }
+    let mut graph = builder.finish();
+    enhance_road_graph(&mut graph);
+    let container = inspect_road_graph_container(&serialize_road_graph(&graph).unwrap()).unwrap();
+    let manifest = build_road_graph_manifest(&graph, &container);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("junction.mrt");
+    write_package(
+        &graph,
+        Some(&manifest),
+        &path,
+        &PackageBuildOptions::default(),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    RoutingPackage::from_bytes(&bytes).unwrap();
+
+    let first_out = section_range(&bytes, Section::NodeFirstOut);
+    let first_out = bytes[first_out]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect::<Vec<_>>();
+    let junction = first_out
+        .windows(2)
+        .position(|pair| pair[1] - pair[0] == 4)
+        .expect("the junction has four out-edges");
+    let chain = section_range(&bytes, Section::PieceChain);
+    let tree = section_range(&bytes, Section::PieceTree);
+    assert!(!chain.is_empty(), "the package classifies its columns");
+    let mut bytes = bytes;
+    // No tree marks (the arms count as the junction's core neighbours), and
+    // the junction marked a chain node in the first column.
+    bytes[tree].fill(0);
+    let word = chain.start + junction / 64 * 8;
+    let mut bits = u64::from_le_bytes(bytes[word..word + 8].try_into().unwrap());
+    bits |= 1 << (junction % 64);
+    bytes[word..word + 8].copy_from_slice(&bits.to_le_bytes());
+    let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+    assert!(
+        error.to_string().contains("piece kinds are invalid"),
+        "{error}"
+    );
+}
+
+/// A package whose edge id base overflows when its edges' slots are added is
+/// rejected when it opens; engines added them as they reported edge ids
+/// (found by the `package` fuzz target with debug assertions).
+#[test]
+fn an_overflowing_edge_id_base_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    for base in [u64::MAX, u64::MAX - 1] {
+        let mut bytes = bytes.clone();
+        bytes[HEADER_EDGE_ID_BASE..HEADER_EDGE_ID_BASE + 8].copy_from_slice(&base.to_le_bytes());
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error.to_string().contains("edge id base overflows"),
+            "{base}: {error}"
+        );
+    }
+}
+
+/// A package whose request grid's row and column counts overflow when
+/// multiplied is rejected, not a panic with overflow checks on (found by the
+/// `package` fuzz target with debug assertions).
+#[test]
+fn an_overflowing_request_grid_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    let grid = section_range(&bytes, Section::RequestGrid);
+    assert_eq!(grid.len(), 5 * 8, "[min lat, min lng, cell, rows, cols]");
+    // 2^33, 2^40 and the largest f64.
+    for count in [8_589_934_592.0, 1_099_511_627_776.0, f64::MAX] {
+        let mut bytes = bytes.clone();
+        for at in [grid.start + 3 * 8, grid.start + 4 * 8] {
+            bytes[at..at + 8].copy_from_slice(&count.to_le_bytes());
+        }
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("request sections are inconsistent"),
+            "{count}: {error}"
+        );
+    }
 }
