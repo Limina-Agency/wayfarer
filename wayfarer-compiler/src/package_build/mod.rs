@@ -1238,6 +1238,7 @@ fn build_package_from(
         job,
     )?;
     drop(landmark_cost);
+    report.landmark_ms = landmark_started.elapsed().as_millis();
     // The CCH order, from the node graph and the fixed-point positions
     // (integer arithmetic: the same on every platform).
     job.report(
@@ -1266,7 +1267,6 @@ fn build_package_from(
     report.landmark_row_count = landmarks.row_count;
     report.landmark_one_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.0).sum();
     report.landmark_two_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.1).sum();
-    report.landmark_ms = landmark_started.elapsed().as_millis();
     drop(node_lat);
     drop(node_lng);
     clock.lap("landmarks")?;

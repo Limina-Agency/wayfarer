@@ -4,8 +4,8 @@ Compiles an OpenStreetMap `.osm.pbf` extract into an offline routing package
 (`routing.mrt`): a single memory-mappable file that the routing engine opens
 and queries. It ingests the PBF, builds and enhances the road graph, bakes the
 default edge costs for the wheeled and on-foot profiles (the engine derives
-the others), computes landmark distances for
-A* search, and writes the package. This crate is the library; the command
+the others), orders the nodes for the engine's CCH potentials (format 2;
+landmark distances on request), and writes the package. This crate is the library; the command
 line is the `wayfarer` binary (crate `wayfarer-cli`):
 
 ```sh

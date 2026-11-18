@@ -7,18 +7,30 @@ costing model and the C ABI version a release reads or writes.
 
 ## Unreleased
 
-- **Opt-in CCH lower-bound potentials for route searches.**
-  `RoutingPackage::prepare_potentials` builds a node order by nested
-  dissection, its CCH topology and one metric per stored cost column from
-  the open package (no format change), about 3 s and 135 MB for
-  Malopolskie. Route searches then bound with exact node-level distances
-  instead of the landmarks wherever a stored column bounds the request:
-  stored columns, the strict destination-only pass of a default drive, and
-  costing options that only raise or remove edges. Discounts, opened edges,
-  SAR openings, own-metric columns, matrices, isochrones and overlay patches
-  keep their bounds. Routes are unchanged; only visited and settled counts
-  drop. On Malopolskie drive p95 goes from 15.3 to 9.0 ms and walk p95 from
-  55 to 24 ms. Without the call nothing changes.
+- **Package format 2: CCH potentials instead of landmarks.** The compiler
+  stores the node order of CCH potentials (new section `CchRank`, computed
+  with integer arithmetic only, so packages stay the same bytes on every
+  platform) and no landmark distances by default (`PackageBuildOptions`
+  `landmark_count`, `DEFAULT_LANDMARK_COUNT` to ask for them). Malopolskie:
+  260 MiB -> 176 MiB, compile 20 s, about 0.7 s from open to the first route
+  (the potentials are customized then, or in `prefetch`). Format 1
+  packages still open and route on their landmarks;
+  `RoutingPackage::prepare_potentials` gives them potentials too (about 3 s
+  for Malopolskie). Routes do not change: both bounds are exact.
+- **Every search bounds with the potentials:** stored and derived columns,
+  the strict destination-only pass, discounts, opened roads and SAR
+  openings (gates at exact offsets), Emergency, Tracked and R5 columns (their
+  own metric, customized on first use), matrix rows and overlay patches. On
+  Malopolskie drive p95 15.3 -> 9.3 ms, walk p95 55 -> 25 ms.
+- **Faster vehicle matrices with potentials:** cells search corridors, so
+  vehicle matrices stay pairwise up to 400 targets. Malopolskie 100x100
+  16 s -> 2.2 s, 50x50 30 s -> 0.6 s; same statuses and paths.
+- **Alternatives through via edges** (packages with potentials): plateaus of
+  the shortest-path trees from the origin and to the destination, each
+  routed as two searches meeting mid-edge. Two alternatives on the
+  Malopolskie corpus: p95 74 ms (862 ms with penalties), and more of them
+  (122 against 95). The alternatives returned change; overlays and SAR
+  requests keep the penalty method.
 - **A package that is open can be replaced on any Windows file system.** On
   NTFS and ReFS the rename already replaced a package an engine had open, as
   on Linux and macOS. Where Windows can't rename with POSIX semantics

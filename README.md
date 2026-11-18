@@ -49,10 +49,10 @@ overlap 0.97.
 
 - **Regions, not continents.** Wayfarer is built and measured on regional
   extracts: a province or a small country. Małopolskie (194 MiB extract,
-  1.07 million nodes, 2.56 million edges) gives a 260 MiB package and needs
-  about 1.2 GiB to compile (`--low-memory` barely changes that at this size).
-  Packages and compile memory grow with the road network; landmark distances
-  are about a third of a package (34% on Małopolskie). Larger extracts are
+  1.07 million nodes, 2.56 million edges) gives a 176 MiB package (format 2;
+  260 MiB in format 1, a third of it landmark distances) and needs about
+  1.2 GiB to compile (`--low-memory` barely changes that at this size).
+  Packages and compile memory grow with the road network. Larger extracts are
   untested.
 - **Slow tails.** The median request is a few milliseconds, but the slowest
   long drives take far longer: p95 153 ms on Małopolskie, against Valhalla's
