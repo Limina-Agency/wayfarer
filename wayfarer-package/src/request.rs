@@ -925,7 +925,11 @@ impl PackageFile {
             == c.node_count;
         if !shared_ids_ok
             || !node_ids_ok
-            || cell_start.len() != grid.rows * grid.cols + 1
+            || grid
+                .rows
+                .checked_mul(grid.cols)
+                .and_then(|cells| cells.checked_add(1))
+                != Some(cell_start.len())
             || !offsets_ok(cell_start, entries.len())
             || entries.iter().any(|edge| *edge >= e)
             || !exceptions.len().is_multiple_of(2)

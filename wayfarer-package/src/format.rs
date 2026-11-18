@@ -1171,6 +1171,15 @@ impl PackageFile {
         // The lookup is built on first use: the ids must be distinct, and
         // span no more than the compiler allows.
         let span_limit = edge_id_span_limit(c.edge_count);
+        // Ids are the base plus a slot below the span limit, in u64.
+        if self
+            .layout
+            .edge_id_base
+            .checked_add(span_limit as u64)
+            .is_none()
+        {
+            return invalid("edge id base overflows");
+        }
         let mut seen = vec![0u64; span_limit.div_ceil(64)];
         for slot in self.slice::<u32>(Section::EdgeId) {
             let slot = *slot as usize;

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RouteStatus, RoutingEngine, RoutingPackage};
 use wayfarer_compiler::package_build::{PackageBuildOptions, write_package};
 use wayfarer_package::format::{
-    HEADER_COUNTS, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, HEADER_VERSION,
+    HEADER_COUNTS, HEADER_EDGE_ID_BASE, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, HEADER_VERSION,
     MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION, Section,
     TABLE_ENTRY_BYTES, section_count,
 };
@@ -280,4 +280,47 @@ fn a_chain_mark_at_a_junction_is_rejected() {
         error.to_string().contains("piece kinds are invalid"),
         "{error}"
     );
+}
+
+/// A package whose edge id base overflows when its edges' slots are added is
+/// rejected when it opens; engines added them as they reported edge ids
+/// (found by the `package` fuzz target with debug assertions).
+#[test]
+fn an_overflowing_edge_id_base_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    for base in [u64::MAX, u64::MAX - 1] {
+        let mut bytes = bytes.clone();
+        bytes[HEADER_EDGE_ID_BASE..HEADER_EDGE_ID_BASE + 8].copy_from_slice(&base.to_le_bytes());
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error.to_string().contains("edge id base overflows"),
+            "{base}: {error}"
+        );
+    }
+}
+
+/// A package whose request grid's row and column counts overflow when
+/// multiplied is rejected, not a panic with overflow checks on (found by the
+/// `package` fuzz target with debug assertions).
+#[test]
+fn an_overflowing_request_grid_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    let grid = section_range(&bytes, Section::RequestGrid);
+    assert_eq!(grid.len(), 5 * 8, "[min lat, min lng, cell, rows, cols]");
+    // 2^33, 2^40 and the largest f64.
+    for count in [8_589_934_592.0, 1_099_511_627_776.0, f64::MAX] {
+        let mut bytes = bytes.clone();
+        for at in [grid.start + 3 * 8, grid.start + 4 * 8] {
+            bytes[at..at + 8].copy_from_slice(&count.to_le_bytes());
+        }
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("request sections are inconsistent"),
+            "{count}: {error}"
+        );
+    }
 }
