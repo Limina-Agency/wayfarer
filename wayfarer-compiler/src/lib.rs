@@ -1,6 +1,6 @@
 //! Compiles an OpenStreetMap PBF extract into a routing package
-//! (`routing.mrt`): ingest, road graph, baked edge costs, landmarks, and the
-//! package file. This deliberately knows nothing about vector layers or map
+//! (`routing.mrt`): ingest, road graph, baked edge costs, the node order of
+//! CCH potentials, and the package file. This deliberately knows nothing about vector layers or map
 //! tiles; routing compilation starts from the PBF on its own. The command
 //! line is the `wayfarer` binary (crate `wayfarer-cli`).
 //!
@@ -112,11 +112,10 @@ pub enum CompileStage {
     CollectRoads,
     /// The road graph: topology, restrictions, enrichment and repair.
     FinalizeGraph,
-    /// Edge costs and the package's sections other than landmarks.
+    /// Edge costs and the package's sections other than the node order.
     BuildPackage,
-    /// ALT landmarks for each profile column (none by default), then the
-    /// node order of CCH potentials.
-    Landmarks,
+    /// The node order of CCH potentials (nested dissection).
+    CchOrder,
     /// Checksums, the file written and synced, then reopened.
     WritePackage,
 }
@@ -128,7 +127,7 @@ impl CompileStage {
         Self::CollectRoads,
         Self::FinalizeGraph,
         Self::BuildPackage,
-        Self::Landmarks,
+        Self::CchOrder,
         Self::WritePackage,
     ];
 
@@ -138,7 +137,7 @@ impl CompileStage {
             Self::CollectRoads => "collect_roads",
             Self::FinalizeGraph => "finalize_graph",
             Self::BuildPackage => "build_package",
-            Self::Landmarks => "landmarks",
+            Self::CchOrder => "cch_order",
             Self::WritePackage => "write_package",
         }
     }
@@ -151,7 +150,7 @@ impl CompileStage {
             Self::CollectRoads => 0.20,
             Self::FinalizeGraph => 0.25,
             Self::BuildPackage => 0.10,
-            Self::Landmarks => 0.20,
+            Self::CchOrder => 0.20,
             Self::WritePackage => 0.05,
         }
     }
@@ -1870,222 +1869,6 @@ mod tests {
             &Job::new(&never, &mut ignore),
         )
         .unwrap()
-    }
-
-    /// Anchored landmark rows read, through the package, exactly as the
-    /// rows they replace: on the Monaco and Kraków centre fixtures every
-    /// (column, node, landmark, direction) value equals the full table's.
-    #[test]
-    fn anchored_landmark_rows_equal_the_full_table() {
-        use wayfarer_package::format::{LandmarkRow, PackageFile};
-        for (name, country) in [("monaco", "MC"), ("krakow-centre", "PL")] {
-            let dir = tempfile::tempdir().unwrap();
-            let never = || false;
-            let mut ignore = |_: &job::Report| {};
-            let graph = compile_road_graph_from_pbf(
-                &RoadGraphCompileRequest {
-                    input_pbf_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join(format!("../fixtures/{name}.osm.pbf")),
-                    temp_dir: dir.path().join("scratch"),
-                    graph_id: name.to_string(),
-                    country_code: Some(country.to_string()),
-                    build_profile: IngestBuildProfile::DesktopFull,
-                },
-                2,
-                &Job::new(&never, &mut ignore),
-            )
-            .unwrap()
-            .road_graph;
-            let build = |anchored_landmark_rows| {
-                package_build::package_bytes(
-                    &graph,
-                    &PackageBuildOptions {
-                        anchored_landmark_rows,
-                        landmark_count: package_build::DEFAULT_LANDMARK_COUNT,
-                        ..PackageBuildOptions::default()
-                    },
-                )
-                .unwrap()
-            };
-            let (full_bytes, full_report) = build(false);
-            let (bytes, report) = build(true);
-            let (full, anchored) = (
-                PackageFile::from_bytes(&full_bytes).unwrap(),
-                PackageFile::from_bytes(&bytes).unwrap(),
-            );
-            let (full, anchored) = (full.view(), anchored.view());
-            assert_eq!(full.landmark_node, anchored.landmark_node, "{name}");
-            assert_eq!(full.landmark_scale, anchored.landmark_scale, "{name}");
-            assert_eq!(
-                (
-                    full_report.landmark_one_anchor_count,
-                    full_report.landmark_two_anchor_count
-                ),
-                (0, 0)
-            );
-            let mut seen = [0usize; 3];
-            let mut kinds = (0, 0);
-            for column in 0..full.landmark_node.len() / full.landmark_count {
-                for node in 0..full.node_count as u32 {
-                    let row = anchored.landmark_from.rows().row(column, node);
-                    let full_row = full.landmark_from.rows().row(column, node);
-                    assert_eq!(row.is_present(), full_row.is_present(), "{name}");
-                    match row {
-                        LandmarkRow::Anchored { rows, .. } => {
-                            if rows[1] == wayfarer_package::format::NO_ANCHOR_ROW {
-                                kinds.0 += 1;
-                            } else {
-                                kinds.1 += 1;
-                            }
-                            seen[0] += 1;
-                        }
-                        LandmarkRow::Stored(_) => seen[1] += 1,
-                        LandmarkRow::Absent => seen[2] += 1,
-                    }
-                    for landmark in 0..full.landmark_count {
-                        for (table, full_table) in [
-                            (anchored.landmark_from, full.landmark_from),
-                            (anchored.landmark_to, full.landmark_to),
-                        ] {
-                            assert_eq!(
-                                table.get(row, landmark),
-                                full_table.get(full_row, landmark),
-                                "{name}: column {column}, node {node}, landmark {landmark}"
-                            );
-                        }
-                    }
-                }
-            }
-            assert_eq!(
-                kinds,
-                (
-                    report.landmark_one_anchor_count,
-                    report.landmark_two_anchor_count
-                ),
-                "{name}"
-            );
-            // Most rows go: the fixtures are mostly trees and chains.
-            assert!(seen[0] > seen[1], "{name}: {seen:?}");
-            assert!(bytes.len() < full_bytes.len());
-        }
-    }
-
-    /// Every landmark value a package reads, stored or derived from anchors,
-    /// equals a plain floor Dijkstra over every node of the landmark metric
-    /// (one per landmark, column and direction, written here independently
-    /// of the compiler's contracted graph): on the Monaco and Kraków centre
-    /// fixtures, for every (column, node, landmark, direction).
-    #[test]
-    fn landmark_values_equal_a_full_floor_dijkstra() {
-        use wayfarer_package::format::{
-            LANDMARK_INFINITY, LANDMARK_SATURATED, LandmarkRow, PackageFile,
-        };
-        // floor(cost / quantum) whole quanta, never more than the cost.
-        let quanta = |cost: f32, quantum: f64| -> u64 {
-            let cost = f64::from(cost);
-            let mut units = (cost / quantum).floor();
-            while units > 0.0 && units * quantum > cost {
-                units -= 1.0;
-            }
-            (units as u64).min(u64::from(LANDMARK_SATURATED))
-        };
-        for (name, country) in [("monaco", "MC"), ("krakow-centre", "PL")] {
-            let dir = tempfile::tempdir().unwrap();
-            let never = || false;
-            let mut ignore = |_: &job::Report| {};
-            let graph = compile_road_graph_from_pbf(
-                &RoadGraphCompileRequest {
-                    input_pbf_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join(format!("../fixtures/{name}.osm.pbf")),
-                    temp_dir: dir.path().join("scratch"),
-                    graph_id: name.to_string(),
-                    country_code: Some(country.to_string()),
-                    build_profile: IngestBuildProfile::DesktopFull,
-                },
-                2,
-                &Job::new(&never, &mut ignore),
-            )
-            .unwrap()
-            .road_graph;
-            let (bytes, report) = package_build::package_bytes(
-                &graph,
-                &PackageBuildOptions {
-                    landmark_count: package_build::DEFAULT_LANDMARK_COUNT,
-                    ..PackageBuildOptions::default()
-                },
-            )
-            .unwrap();
-            let costs = package_build::LANDMARK_COSTS.with(|costs| costs.take());
-            assert!(report.landmark_two_anchor_count > 0, "{name}");
-            let file = PackageFile::from_bytes(&bytes).unwrap();
-            let view = file.view();
-            let (n, e) = (view.node_count, view.edge_count);
-            let count = view.landmark_count;
-            let columns = view.landmark_node.len() / count;
-            assert_eq!(costs.len(), columns * e, "{name}");
-            let mut kinds = [0usize; 3];
-            for column in 0..columns {
-                let costs = &costs[column * e..(column + 1) * e];
-                // Usable arcs (finite, non-negative cost) per node, both ways.
-                let mut out = vec![Vec::new(); n];
-                let mut into = vec![Vec::new(); n];
-                for (edge, cost) in costs.iter().enumerate() {
-                    if cost.is_finite() && *cost >= 0.0 {
-                        let (s, t) = (view.edge_source(edge), view.edge_target[edge]);
-                        out[s as usize].push((t, *cost));
-                        into[t as usize].push((s, *cost));
-                    }
-                }
-                for node in 0..n as u32 {
-                    kinds[match view.landmark_from.rows().row(column, node) {
-                        LandmarkRow::Stored(_) => 0,
-                        LandmarkRow::Anchored { .. } => 1,
-                        LandmarkRow::Absent => 2,
-                    }] += 1;
-                }
-                for landmark in 0..count {
-                    let source = view.landmark_node[column * count + landmark];
-                    for (direction, arcs, table) in
-                        [(0, &out, view.landmark_from), (1, &into, view.landmark_to)]
-                    {
-                        let quantum = f64::from(
-                            view.landmark_scale[(column * count + landmark) * 2 + direction],
-                        );
-                        let mut dist = vec![u64::MAX; n];
-                        let mut heap = std::collections::BinaryHeap::new();
-                        dist[source as usize] = 0;
-                        heap.push(std::cmp::Reverse((0u64, source)));
-                        while let Some(std::cmp::Reverse((d, node))) = heap.pop() {
-                            if d > dist[node as usize] {
-                                continue;
-                            }
-                            for (next, cost) in &arcs[node as usize] {
-                                let candidate = d + quanta(*cost, quantum);
-                                if candidate < dist[*next as usize] {
-                                    dist[*next as usize] = candidate;
-                                    heap.push(std::cmp::Reverse((candidate, *next)));
-                                }
-                            }
-                        }
-                        for node in 0..n as u32 {
-                            let expected = match dist[node as usize] {
-                                u64::MAX => LANDMARK_INFINITY,
-                                d => d.min(u64::from(LANDMARK_SATURATED)) as u32,
-                            };
-                            let row = table.rows().row(column, node);
-                            assert_eq!(
-                                table.get(row, landmark),
-                                expected,
-                                "{name}: column {column}, node {node}, landmark {landmark}, \
-                                 direction {direction}"
-                            );
-                        }
-                    }
-                }
-            }
-            // Both kinds of row are exercised.
-            assert!(kinds[0] > 0 && kinds[1] > kinds[0], "{name}: {kinds:?}");
-        }
     }
 
     /// Each node's ways, by node index.

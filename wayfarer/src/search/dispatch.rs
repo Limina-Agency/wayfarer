@@ -120,12 +120,8 @@ impl Search<'_> {
             let patch = PatchGraph::new(view, overlay, &costs, &resolve_id);
             if !patch.is_empty() {
                 // Discounted edges and fragments become gates of the
-                // patch's landmark bounds.
+                // patch's potentials.
                 let bounds = override_bounds(view, column, &cost_overrides, &split_cost);
-                let costs = PatchCosts {
-                    column: bounds.column(costs.column),
-                    ..costs
-                };
                 // The patch search walks through the pieces it does not
                 // touch where the static search's walks would be exact.
                 let pieces = handle.piece_kinds(&view).filter(|_| {
@@ -194,7 +190,7 @@ impl Search<'_> {
         }
 
         // Overrides may lower an edge's cost below the column's: such edges
-        // are gates of the landmark bounds.
+        // are gates of the potentials.
         let bounds = override_bounds(view, column, &cost_overrides, &Default::default());
         let restriction_penalty = crate::sar::restriction_penalty(options);
         let bidirectional =
@@ -217,7 +213,7 @@ impl Search<'_> {
                 })
         });
         let query = SearchQuery {
-            column: bounds.column(column),
+            column,
             profile_bit: profile_bit(profile),
             heuristic_cost_per_m: bounds.heuristic_cost_per_m,
             origins: origin_candidates,
@@ -227,7 +223,6 @@ impl Search<'_> {
             cost_overrides: &cost_overrides,
             max_visited_edge_count: options.max_visited_edge_count,
             cancellation: &options.cancellation,
-            use_landmarks: bounds.use_landmarks,
             gates: &bounds.gates,
             // Tests force the unidirectional search with the patch's switch.
             bidirectional,
@@ -384,10 +379,6 @@ impl Search<'_> {
             heuristic_cost_per_m: bounds.heuristic_cost_per_m,
             // The scaled fallback does not cover the patch's bounds at
             // virtual points, which go along edges at column cost.
-            landmarks: costs
-                .column
-                .landmarks
-                .filter(|_| bounds.use_landmarks && !bounds.fell_back()),
             potentials: !bounds.fell_back(),
             gates: &bounds.gates,
             costs,

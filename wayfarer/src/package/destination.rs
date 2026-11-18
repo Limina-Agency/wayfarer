@@ -11,7 +11,7 @@
 //! column.
 //!
 //! Unblocking goes through the request's sparse cost overrides, so the search
-//! loops know nothing of it: the landmark bounds take the unblocked edges as
+//! loops know nothing of it: the potentials take the unblocked edges as
 //! discount gates (`search::gates`), and the walks stay exact, the strict
 //! column with a pocket unblocked using no edge the stored column (which
 //! classified the pieces) cannot.

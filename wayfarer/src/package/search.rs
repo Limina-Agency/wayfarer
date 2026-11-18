@@ -21,8 +21,7 @@ use wayfarer_package::format::{ColumnPieceKinds, PieceKind};
 use super::cch::{
     CchMetric, CchPotentials, GatedPotential, OwnMetric, PotentialGate, PotentialScratch,
 };
-use super::columns::{CostColumn, LandmarkColumn, PotentialBase, metric_costs};
-use super::landmarks::AltBound;
+use super::columns::{CostColumn, PotentialBase, metric_costs};
 use super::restrictions::{ComplexAutomata, ROOT};
 use super::{
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
@@ -37,7 +36,6 @@ use crate::types::CorrelatedLocation;
 
 pub(crate) mod analysis;
 pub(crate) mod gates;
-pub(crate) mod many_to_many;
 pub(crate) mod patch;
 
 /// Per-node (forward, backward) potential bounds, NaN until computed, and the
@@ -121,7 +119,7 @@ impl PlanMetric<'_> {
 ///   potentials ([`GatedPotential`]), every override below the scaled
 ///   metric being a gate;
 /// - with such overrides past the gate limit (no gates): the metric
-///   scaled further by the least override ratio, as the landmarks are
+///   scaled further by the least override ratio
 ///   (`analysis::override_bounds`); `None` when one of them opens an
 ///   edge the stored column cannot use.
 pub(crate) fn potential_plan<'g>(
@@ -191,6 +189,62 @@ pub(crate) struct PotentialPlan<'g> {
     /// With gates: every edge costs at least `floor` times the scaled metric
     /// (0 with an opened edge).
     floor: f64,
+}
+
+/// The edge continuing a piece's chain after `edge`, which ends at a chain
+/// node: its `usable` out-edge to the node's other core neighbour (not back,
+/// not into a tree node). A marked chain node has at most one.
+fn chain_continuation(
+    g: &SearchGraph<'_>,
+    edge: u32,
+    is_tree: impl Fn(u32) -> bool,
+    usable: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    let (back, node) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
+    let mut found = None;
+    for next in g.first_out[node as usize]..g.first_out[node as usize + 1] {
+        let target = g.edge_target[next as usize];
+        if target == back || is_tree(target) || !usable(next) {
+            continue;
+        }
+        debug_assert!(found.is_none(), "a chain node continues one way");
+        found = Some(next);
+        if !cfg!(debug_assertions) {
+            break;
+        }
+    }
+    found
+}
+
+/// The edge before `edge` along a piece's chain, which starts at a chain
+/// node: the inverse of [`chain_continuation`].
+fn chain_predecessor(
+    g: &SearchGraph<'_>,
+    edge: u32,
+    is_tree: impl Fn(u32) -> bool,
+    usable: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    let (node, ahead) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
+    let mut found = None;
+    for (previous, source) in g.in_edges(node as usize) {
+        if source == ahead || is_tree(source) || !usable(previous) {
+            continue;
+        }
+        debug_assert!(found.is_none(), "a chain node continues one way");
+        found = Some(previous);
+        if !cfg!(debug_assertions) {
+            break;
+        }
+    }
+    found
+}
+
+/// The `usable` edge back from `edge`'s target to its source: at a marked
+/// node at most one, of the same segment, so turning onto it costs a U-turn.
+fn opposing_edge(g: &SearchGraph<'_>, edge: u32, usable: impl Fn(u32) -> bool) -> Option<u32> {
+    let (source, node) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
+    (g.first_out[node as usize]..g.first_out[node as usize + 1])
+        .find(|next| g.edge_target[*next as usize] == source && usable(*next))
 }
 
 const NO_LABEL: u32 = u32::MAX;
@@ -384,13 +438,6 @@ impl StateSlots {
             .into_iter()
             .flatten()
             .map(|(_, label)| *label)
-    }
-
-    /// Every (id, label) held here.
-    pub(crate) fn all(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
-        self.slots
-            .iter()
-            .flat_map(|(id, slots)| slots.iter().map(move |(_, label)| (*id, *label)))
     }
 
     pub(crate) fn clear(&mut self) {
@@ -595,11 +642,8 @@ pub(crate) struct SearchQuery<'q> {
     pub max_visited_edge_count: Option<usize>,
     /// Stops the search like the budget; the request reports `Cancelled`.
     pub cancellation: &'q crate::RouteCancellation,
-    /// False when the landmarks cannot bound the request (see
-    /// `analysis::override_bounds`).
-    pub use_landmarks: bool,
     /// Edges the overrides make cheaper than the column: gates of the
-    /// landmark bounds (see `gates`).
+    /// potentials (see `gates`).
     pub gates: &'q [gates::DiscountGate],
     /// Search from both ends (default) or forward only.
     pub bidirectional: bool,
@@ -612,13 +656,6 @@ pub(crate) struct SearchQuery<'q> {
     /// search; set only where the walks are exact (a stored column, no edge
     /// opened by an override, no SAR transitions or restriction penalty).
     pub pieces: Option<ColumnPieceKinds<'q>>,
-}
-
-impl<'q> SearchQuery<'q> {
-    /// The landmark tables to bound with, when the query allows them.
-    pub(crate) fn landmarks(&self) -> Option<LandmarkColumn<'q>> {
-        self.column.landmarks.filter(|_| self.use_landmarks)
-    }
 }
 
 /// A restriction broken by a path (see `SearchGraph::restriction_violations`):
@@ -835,30 +872,7 @@ impl<'q> Run<'_, '_, 'q> {
             .fold(0.0f64, f64::max)
             + g.xyz_margin_m();
         let k = self.q.heuristic_cost_per_m;
-        let alt = self.q.landmarks().and_then(|landmarks| {
-            let targets = destinations.iter().map(|d| d.source).collect::<Vec<_>>();
-            let seeds = origins
-                .iter()
-                .map(|edge| g.edge_target[*edge as usize])
-                .collect::<Vec<_>>();
-            let base = AltBound::new(
-                landmarks.from,
-                landmarks.to,
-                landmarks.scales,
-                landmarks.count,
-                landmarks.active,
-                g.node_count,
-                landmarks.column,
-                &targets,
-                &seeds,
-            )?;
-            gates::GatedAlt::new(landmarks, vec![base], &seeds, false, self.q.gates)
-        });
-        let heuristic = |node: u32| {
-            let geometric = k * (chord_m(g.xyz(node), center) - radius_m).max(0.0);
-            alt.as_ref()
-                .map_or(geometric, |alt| alt.bound(node).max(geometric))
-        };
+        let heuristic = |node: u32| k * (chord_m(g.xyz(node), center) - radius_m).max(0.0);
 
         self.counters.origin_heuristic = origins
             .iter()
@@ -1322,7 +1336,7 @@ impl<'q> Run<'_, '_, 'q> {
     /// entering the edge to the destination point). Paths are joined at
     /// transitions e -> f where e carries a forward and f a backward label.
     /// The search stops once the two best keys sum to the best joined cost
-    /// (exact with consistent bounds, as package landmarks are), or with
+    /// (exact with consistent bounds, as the potentials are), or with
     /// `exact_stop` once either side's best key under its own bound does (see
     /// `bidirectional_body`); exhausting either side also proves optimality,
     /// because every path's first (or last) transition is checked against the
@@ -1402,23 +1416,7 @@ impl<'q> Run<'_, '_, 'q> {
             .iter()
             .map(|edge| g.edge_target[*edge as usize])
             .collect::<Vec<_>>();
-        let landmarks = |targets: &[u32], seeds: &[u32], reversed: bool| {
-            let landmarks = self.q.landmarks()?;
-            let base = AltBound::new_directed(
-                landmarks.from,
-                landmarks.to,
-                landmarks.scales,
-                landmarks.count,
-                landmarks.active,
-                g.node_count,
-                landmarks.column,
-                targets,
-                seeds,
-                reversed,
-            )?;
-            gates::GatedAlt::new(landmarks, vec![base], seeds, reversed, self.q.gates)
-        };
-        // CCH potentials in place of the landmarks where they apply.
+        // CCH potentials where they apply, else the straight-line bound.
         let plan = Self::potentials(g, self.q);
         let cch = plan.as_ref().map(|plan| {
             (
@@ -1426,36 +1424,24 @@ impl<'q> Run<'_, '_, 'q> {
                 plan.potential(&origin_nodes, true, self.q.gates, &scratch[1], &scratch[3]),
             )
         });
-        let (forward_alt, backward_alt) = if cch.is_some() {
-            (None, None)
-        } else {
-            (
-                landmarks(&target_nodes, &origin_nodes, false),
-                landmarks(&origin_nodes, &target_nodes, true),
-            )
-        };
         let forward_h = |node: u32| {
             let geometric = k * (chord_m(g.xyz(node), d_center) - d_radius).max(0.0);
-            if let Some((forward, _)) = &cch {
-                return forward.get(node).max(geometric);
+            match &cch {
+                Some((forward, _)) => forward.get(node).max(geometric),
+                None => geometric,
             }
-            forward_alt
-                .as_ref()
-                .map_or(geometric, |alt| alt.bound(node).max(geometric))
         };
         let backward_h = |node: u32| {
             let geometric = k * (chord_m(g.xyz(node), o_center) - o_radius).max(0.0);
-            if let Some((_, backward)) = &cch {
-                return backward.get(node).max(geometric);
+            match &cch {
+                Some((_, backward)) => backward.get(node).max(geometric),
+                None => geometric,
             }
-            backward_alt
-                .as_ref()
-                .map_or(geometric, |alt| alt.bound(node).max(geometric))
         };
         // Average potentials (Ikeda et al.): p_f = (h_f - h_b) / 2 and
         // p_b = -p_f, and the search stops once the two best keys sum to at
         // least the best joined cost. That stop assumes consistent bounds,
-        // which package landmark bounds are (see `package::landmarks`). With
+        // which the potentials are (see `package::cch`). With
         // `exact`, each side is keyed by its own bound instead (the symmetric approach):
         // labels are queued again whenever they improve, so each side alone
         // is an A* that keeps an open label of optimal cost on the optimal
@@ -1834,55 +1820,29 @@ impl<'q> Run<'_, '_, 'q> {
             .is_some_and(|walk| walk.kinds.kind(node) == PieceKind::Tree)
     }
 
-    /// The edge continuing a piece's chain after `edge`, which ends at a
-    /// chain node: its usable out-edge to the node's other core neighbour
-    /// (not back, not into a tree). A marked chain node has at most one.
+    /// See [`chain_continuation`].
     fn continuation(&self, edge: u32) -> Option<u32> {
-        let g = &self.g;
-        let (back, node) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
-        let mut found = None;
-        for next in g.first_out[node as usize]..g.first_out[node as usize + 1] {
-            let target = g.edge_target[next as usize];
-            if target == back || self.is_tree(target) || !self.edge_cost(next).is_finite() {
-                continue;
-            }
-            debug_assert!(found.is_none(), "a chain node continues one way");
-            found = Some(next);
-            if !cfg!(debug_assertions) {
-                break;
-            }
-        }
-        found
+        chain_continuation(
+            &self.g,
+            edge,
+            |node| self.is_tree(node),
+            |edge| self.edge_cost(edge).is_finite(),
+        )
     }
 
-    /// The edge before `edge` along a piece's chain, which starts at a chain
-    /// node: the inverse of [`Self::continuation`].
+    /// See [`chain_predecessor`].
     fn chain_predecessor(&self, edge: u32) -> Option<u32> {
-        let g = &self.g;
-        let (node, ahead) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
-        let mut found = None;
-        for (previous, source) in g.in_edges(node as usize) {
-            if source == ahead || self.is_tree(source) || !self.edge_cost(previous).is_finite() {
-                continue;
-            }
-            debug_assert!(found.is_none(), "a chain node continues one way");
-            found = Some(previous);
-            if !cfg!(debug_assertions) {
-                break;
-            }
-        }
-        found
+        chain_predecessor(
+            &self.g,
+            edge,
+            |node| self.is_tree(node),
+            |edge| self.edge_cost(edge).is_finite(),
+        )
     }
 
-    /// The usable edge back from `edge`'s target to its source: at a marked
-    /// node at most one, of the same segment, so turning onto it costs a
-    /// U-turn.
+    /// See [`opposing_edge`].
     fn opposing(&self, edge: u32) -> Option<u32> {
-        let g = &self.g;
-        let (source, node) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
-        (g.first_out[node as usize]..g.first_out[node as usize + 1]).find(|next| {
-            g.edge_target[*next as usize] == source && self.edge_cost(*next).is_finite()
-        })
+        opposing_edge(&self.g, edge, |edge| self.edge_cost(edge).is_finite())
     }
 
     /// Relaxes `first`, out of forward label `pred` (cost `cost` at the end

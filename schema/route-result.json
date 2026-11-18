@@ -1437,7 +1437,7 @@
           "minimum": 0
         },
         "searchOptimalityGapMillicost": {
-          "description": "With `search_budget_exceeded`, how much dearer than optimal the route\ncan be, in thousandths of a cost unit (rounded up), by the lower bound\nthe search stops on: an upper bound for unidirectional searches, with\nthe exact stop (`WAYFARER_EXACT_STOP`), and with the default\nbidirectional stop (package landmark bounds are consistent).",
+          "description": "With `search_budget_exceeded`, how much dearer than optimal the route\ncan be, in thousandths of a cost unit (rounded up), by the lower bound\nthe search stops on: an upper bound for unidirectional searches, with\nthe exact stop (`WAYFARER_EXACT_STOP`), and with the default\nbidirectional stop (the CCH potentials are consistent).",
           "type": [
             "integer",
             "null"

@@ -6,8 +6,7 @@ pub(crate) const DEFAULT_CORRELATION_DISTANCE_M: f64 = 75.0;
 
 pub(crate) const DEFAULT_CANDIDATE_LIMIT: usize = 8;
 
-/// Candidates kept per endpoint at most: landmark bounds track up to 16
-/// targets (more would drop them), and candidates beyond that within the
+/// Candidates kept per endpoint at most: candidates beyond 16 within the
 /// correlation distance add only far, unlikely snaps.
 pub(crate) const MAX_CANDIDATE_LIMIT: usize = 16;
 
@@ -71,11 +70,10 @@ pub struct RouteOptions {
     /// Budget for one search: the most out-edges it may examine before it
     /// stops with `SearchBudgetExceeded`. A route is one search. A matrix
     /// applies it to each search separately, never to the request as a
-    /// whole: to each cell when cells are searched pairwise (on the compact
-    /// graph, up to 12 searchable targets on foot and 100 otherwise), and to
-    /// each source row's shared expansion otherwise (rows above that cut-off;
-    /// each backward and forward search with buckets). Cells a stopped search
-    /// had not reached fail with
+    /// whole: to each cell when cells are searched pairwise (up to 12
+    /// searchable targets on foot, and otherwise 400 on a package with CCH
+    /// potentials and 50 without), and to each source row's shared expansion
+    /// above that cut-off. Cells a stopped search had not reached fail with
     /// `search_budget_exceeded`; targets a stopped row had already reached
     /// keep their best path so far. Isochrones ignore it and use
     /// `RouteIsochroneRequest::max_expansion_edge_count`.

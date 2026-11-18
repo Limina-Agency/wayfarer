@@ -33,7 +33,7 @@
 //! the destination), joined at transitions. Both sides use admissible lower
 //! bounds on the patched graph (see [`Bounds`]): the straight-line
 //! bound with the factor lowered to the cheapest ratio any patch arc
-//! realises, raised to connector-aware landmark bounds when landmarks apply.
+//! realises, raised to connector-aware CCH potentials when they apply.
 //! Results are exact shortest paths under these semantics (the former
 //! tile-backed overlay search was not: its heuristic was in metres while
 //! costs are in seconds, and it ignored complex restrictions); the reference
@@ -42,11 +42,10 @@
 use rustc_hash::FxHashMap;
 use wayfarer_package::format::ColumnPieceKinds;
 
-use super::gates::{DiscountGate, gate_clusters, gate_ends};
+use super::gates::{DiscountGate, gate_ends};
 use super::{HeapEntry, NO_LABEL, SearchState, tie_window};
 use crate::package::cch::{CchPotential, GateDistances, PotentialScratch};
-use crate::package::columns::{CostColumn, LandmarkColumn};
-use crate::package::landmarks::{AltBound, GroupBound};
+use crate::package::columns::CostColumn;
 use crate::package::restrictions::{ComplexAutomata, ROOT};
 use crate::package::search::{PotentialPlan, potential_plan};
 use crate::package::{
@@ -712,11 +711,6 @@ pub(crate) mod dijkstra {
     }
 }
 
-/// Connector gates bounded individually; more share one constant bound.
-const MAX_GATE_BOUNDS: usize = 32;
-/// `AltBound` tracks at most this many targets.
-const ALT_TARGET_CHUNK: usize = 16;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Gate {
     /// The connector starts (forward) or ends (backward) at a real node.
@@ -735,103 +729,32 @@ enum Side {
     Backward,
 }
 
-/// Landmark bounds that survive the patch, for one side. Every path from a
-/// real node to the destination either uses no connector, and then reaches a
-/// final-approach node (the source of a destination edge), or has a first
-/// connector `c`, reached through its *gate*: the connector's own start
-/// node, or the source of the edge it attaches to. So
+/// Lower bounds that survive the patch, for one side, on CCH potentials.
+/// Every path from a real node to the destination either uses no connector,
+/// and then reaches a final-approach node (the source of a destination
+/// edge), or has a first connector `c`, reached through its *gate*: the
+/// connector's own start node, or the source of the edge it attaches to. So
 ///
-/// `pi(v) = min(ALT(v, final), min over gates g of ALT(v, g) + off(g))`
+/// `pi(v) = min(pot(v, final), min over gates g of d(v, g) + off(g))`
 ///
 /// where `off(g)` is the least `cost(c) + pi(end of c)` over the gate's
-/// connectors. At a virtual point on edge `e`, the path runs along `e` to its
-/// end (`pi(target) + cost of the rest of e`), finishes on `e`, or leaves by
-/// a connector attached to `e`. The offsets solve that system as a shortest
-/// path problem over gates, so `pi` is a lower bound that is consistent on
-/// every arc, real or patch (the minimum of consistent bounds is consistent,
-/// and `pi(start of c) <= cost(c) + pi(end of c)` holds by construction).
-/// Beyond [`MAX_GATE_BOUNDS`] gates, the rest share one constant offset. The
-/// backward side mirrors this with reversed landmarks, connector ends as
-/// gates and the origin's first nodes in place of the final approach.
-struct PatchAlt<'g> {
-    base: Vec<AltBound<'g>>,
-    gates: Vec<(AltBound<'g>, f64)>,
-    /// Offset of every gate without its own bound (reached at no cost).
-    rest: f64,
-    /// Offsets of bounded edge gates, used at virtual points of the edge.
+/// connectors: one elimination-tree query towards the final-approach nodes
+/// at 0 and every gate's node at its offset. At a virtual point on edge `e`,
+/// the path runs along `e` to its end (`pi(target) + cost of the rest of
+/// e`), finishes on `e`, or leaves by a connector attached to `e`. The
+/// offsets solve that system as a shortest path problem over gates, so `pi`
+/// is a lower bound that is consistent on every arc, real or patch (the
+/// minimum of consistent bounds is consistent, and `pi(start of c) <=
+/// cost(c) + pi(end of c)` holds by construction). The backward side mirrors
+/// this with connector ends as gates and the origin's first nodes in place
+/// of the final approach. The request's discount gates join as gates too
+/// (see `gates`).
+struct PatchCch<'g> {
+    potential: CchPotential<'g>,
+    /// Offsets of edge gates, used at virtual points of the edge.
     edge_gates: FxHashMap<u32, f64>,
     /// Offsets of endpoint gates, used at the endpoint node itself.
     endpoint_gates: FxHashMap<u32, f64>,
-    /// The discount gates' clusters with their offsets (see `gates`).
-    discount: Option<GroupBound<'g>>,
-}
-
-impl PatchAlt<'_> {
-    fn base_at(&self, node: u32) -> f64 {
-        self.base
-            .iter()
-            .map(|bound| bound.bound(node))
-            .fold(f64::INFINITY, f64::min)
-    }
-
-    fn at_real(&self, node: u32) -> f64 {
-        let mut value = self.base_at(node).min(self.rest);
-        for (bound, offset) in &self.gates {
-            if offset.is_finite() {
-                value = value.min(bound.bound(node) + offset);
-            }
-        }
-        match &self.discount {
-            Some(discount) => discount.bound_below(node, value, 0.0),
-            None => value,
-        }
-    }
-}
-
-/// The same bounds on CCH potentials: one elimination-tree query towards
-/// the final-approach nodes at 0 and every gate's node at its offset, so
-/// every gate has its own term (no `rest`).
-struct PatchCch<'g> {
-    potential: CchPotential<'g>,
-    edge_gates: FxHashMap<u32, f64>,
-    endpoint_gates: FxHashMap<u32, f64>,
-}
-
-/// The connector-aware bounds of one side: landmarks or CCH potentials.
-enum PatchBound<'g> {
-    Landmarks(Box<PatchAlt<'g>>),
-    Cch(PatchCch<'g>),
-}
-
-impl PatchBound<'_> {
-    fn at_real(&self, node: u32) -> f64 {
-        match self {
-            Self::Landmarks(alt) => alt.at_real(node),
-            Self::Cch(cch) => cch.potential.get(node),
-        }
-    }
-
-    /// The offset of every gate without its own term.
-    fn rest(&self) -> f64 {
-        match self {
-            Self::Landmarks(alt) => alt.rest,
-            Self::Cch(_) => f64::INFINITY,
-        }
-    }
-
-    fn edge_gate(&self, edge: u32) -> Option<f64> {
-        match self {
-            Self::Landmarks(alt) => alt.edge_gates.get(&edge).copied(),
-            Self::Cch(cch) => cch.edge_gates.get(&edge).copied(),
-        }
-    }
-
-    fn endpoint_gate(&self, node: u32) -> Option<f64> {
-        match self {
-            Self::Landmarks(alt) => alt.endpoint_gates.get(&node).copied(),
-            Self::Cch(cch) => cch.endpoint_gates.get(&node).copied(),
-        }
-    }
 }
 
 /// A virtual node, as the bounds see it.
@@ -862,7 +785,7 @@ struct Bounds<'g> {
     center: [f64; 3],
     radius: f64,
     k: f64,
-    alt: Option<PatchBound<'g>>,
+    potential: Option<PatchCch<'g>>,
     /// Request cost of each discount gate's edge, below its column cost.
     cheaper: FxHashMap<u32, f64>,
 }
@@ -874,11 +797,9 @@ impl<'g> Bounds<'g> {
         arcs: &RunArcs<'_, '_>,
         side: Side,
         column: CostColumn<'g>,
-        landmarks: Option<LandmarkColumn<'g>>,
         k: f64,
         goal_points: &[[f64; 3]],
         terminal_edges: &[u32],
-        seed_nodes: &[u32],
         gates: &[DiscountGate],
         cch: Option<(
             &'g PotentialPlan<'g>,
@@ -925,20 +846,11 @@ impl<'g> Bounds<'g> {
             center,
             radius,
             k,
-            alt: None,
+            potential: None,
             cheaper: gates.iter().map(|gate| (gate.edge, gate.cost)).collect(),
         };
         if let Some((plan, scratch)) = cch {
-            bounds.alt = bounds
-                .build_cch(arcs, plan, scratch, terminal_edges, gates)
-                .map(PatchBound::Cch);
-        }
-        if bounds.alt.is_none()
-            && let Some(landmarks) = landmarks
-        {
-            bounds.alt = bounds
-                .build_alt(arcs, landmarks, terminal_edges, seed_nodes, gates)
-                .map(|alt| PatchBound::Landmarks(Box::new(alt)));
+            bounds.potential = bounds.build_cch(arcs, plan, scratch, terminal_edges, gates);
         }
         bounds
     }
@@ -962,254 +874,9 @@ impl<'g> Bounds<'g> {
         }
     }
 
-    fn build_alt(
-        &self,
-        arcs: &RunArcs<'_, '_>,
-        landmarks: LandmarkColumn<'g>,
-        terminal_edges: &[u32],
-        seed_nodes: &[u32],
-        gates: &[DiscountGate],
-    ) -> Option<PatchAlt<'g>> {
-        let g = self.graph;
-        let reversed = self.side == Side::Backward;
-        let alt = |targets: &[u32]| {
-            AltBound::new_directed(
-                landmarks.from,
-                landmarks.to,
-                landmarks.scales,
-                landmarks.count,
-                landmarks.active,
-                g.node_count,
-                landmarks.column,
-                targets,
-                seed_nodes,
-                reversed,
-            )
-        };
-        // Connector-free approach: through the source of a destination edge
-        // (forward) or the target of an origin edge (backward).
-        let mut finals = terminal_edges
-            .iter()
-            .map(|edge| match self.side {
-                Side::Forward => g.edge_source(*edge as usize),
-                Side::Backward => g.edge_target[*edge as usize],
-            })
-            .collect::<Vec<_>>();
-        finals.sort_unstable();
-        finals.dedup();
-        let base = finals
-            .chunks(ALT_TARGET_CHUNK)
-            .map(alt)
-            .collect::<Option<Vec<_>>>()?;
-
-        // Gates of every connector, and its far end.
-        let node_count = self.node_count;
-        let gate_of = |node: u32| -> Gate {
-            if node < node_count {
-                Gate::Real(node)
-            } else {
-                match self.virtual_nodes[(node - node_count) as usize] {
-                    VirtualNode::Point { edge, .. } => Gate::Edge(edge),
-                    _ => Gate::Endpoint(node),
-                }
-            }
-        };
-        let connectors = arcs
-            .all()
-            .filter(|arc| matches!(arc.kind, ArcKind::Connector(_)))
-            .map(|arc| match self.side {
-                Side::Forward => (gate_of(arc.from), arc.to, arc.cost),
-                Side::Backward => (gate_of(arc.to), arc.from, arc.cost),
-            })
-            .collect::<Vec<_>>();
-        let mut gate_keys = connectors
-            .iter()
-            .map(|(gate, _, _)| *gate)
-            .collect::<Vec<_>>();
-        gate_keys.sort_unstable();
-        gate_keys.dedup();
-        // Gate slots: bounded real/edge gates, endpoint gates, then `rest`.
-        let mut bounded = Vec::<(Gate, AltBound<'g>)>::new();
-        let mut slot_of = FxHashMap::<Gate, usize>::default();
-        let mut endpoint_slots = Vec::<(u32, usize)>::new();
-        for gate in &gate_keys {
-            match gate {
-                Gate::Real(_) | Gate::Edge(_) if bounded.len() < MAX_GATE_BOUNDS => {
-                    let node = match (gate, self.side) {
-                        (Gate::Real(node), _) => *node,
-                        (Gate::Edge(edge), Side::Forward) => g.edge_source(*edge as usize),
-                        (Gate::Edge(edge), Side::Backward) => g.edge_target[*edge as usize],
-                        (Gate::Endpoint(_), _) => unreachable!(),
-                    };
-                    slot_of.insert(*gate, bounded.len());
-                    bounded.push((*gate, alt(&[node])?));
-                }
-                _ => {}
-            }
-        }
-        // Discount gates in clusters, slotted after the connector gates: a
-        // cluster's bound holds for each of its nodes, its offset is the
-        // least over its gates (see `gates`).
-        let connector_count = bounded.len();
-        let discount_clusters = gate_clusters(gates, reversed);
-        let group_count = discount_clusters.len();
-        let mut discount = if discount_clusters.is_empty() {
-            None
-        } else {
-            Some(GroupBound::new(
-                landmarks.from,
-                landmarks.to,
-                landmarks.scales,
-                landmarks.count,
-                landmarks.active,
-                landmarks.column,
-                &discount_clusters,
-                seed_nodes,
-                reversed,
-            )?)
-        };
-        let discount_slot = discount_clusters
-            .iter()
-            .enumerate()
-            .flat_map(|(index, nodes)| nodes.iter().map(move |node| (*node, index)))
-            .map(|(node, index)| (node, connector_count + index))
-            .collect::<FxHashMap<_, _>>();
-        for gate in &gate_keys {
-            if let Gate::Endpoint(node) = gate {
-                let slot = connector_count + group_count + endpoint_slots.len();
-                slot_of.insert(*gate, slot);
-                endpoint_slots.push((*node, slot));
-            }
-        }
-        let rest = connector_count + group_count + endpoint_slots.len();
-        let slot_count = rest + 1;
-
-        // Per connector: (slot, cost, base at its far end, cost from its far
-        // end to each slot's gate). Gates without a bound (`rest`) are
-        // reached at no cost from anywhere.
-        let real_terms = |node: u32| -> (f64, Vec<f64>) {
-            let base = base
-                .iter()
-                .map(|bound| bound.bound(node))
-                .fold(f64::INFINITY, f64::min);
-            let mut terms = vec![f64::INFINITY; slot_count];
-            for (slot, (_, bound)) in bounded.iter().enumerate() {
-                terms[slot] = bound.bound(node);
-            }
-            if let Some(discount) = &discount {
-                for group in 0..group_count {
-                    terms[connector_count + group] = discount.group_bound(group, node);
-                }
-            }
-            terms[rest] = 0.0;
-            (base, terms)
-        };
-        let discount_rows = gates.iter().map(|gate| {
-            let (node, end) = gate_ends(gate, reversed);
-            let (base, terms) = real_terms(end);
-            (discount_slot[&node], gate.cost, base, terms)
-        });
-        let rows = connectors
-            .iter()
-            .map(|(gate, end, cost)| {
-                let slot = slot_of.get(gate).copied().unwrap_or(rest);
-                let (base, terms) = if *end < node_count {
-                    real_terms(*end)
-                } else {
-                    match self.virtual_nodes[(*end - node_count) as usize] {
-                        VirtualNode::Point {
-                            edge,
-                            fraction,
-                            reaches_end,
-                            terminal,
-                        } => {
-                            let mut base = if terminal { 0.0 } else { f64::INFINITY };
-                            let mut terms = vec![f64::INFINITY; slot_count];
-                            if reaches_end {
-                                let (node, along) = self.along(edge, fraction);
-                                let (far_base, far_terms) = real_terms(node);
-                                base = base.min(along + far_base);
-                                for (term, far) in terms.iter_mut().zip(far_terms) {
-                                    *term = along + far;
-                                }
-                            }
-                            if let Some(own) = slot_of.get(&Gate::Edge(edge))
-                                && *own < bounded.len()
-                            {
-                                terms[*own] = 0.0;
-                            }
-                            terms[rest] = 0.0;
-                            (base, terms)
-                        }
-                        VirtualNode::OwnEndpoint => (0.0, vec![f64::INFINITY; slot_count]),
-                        VirtualNode::OtherEndpoint => {
-                            let mut terms = vec![f64::INFINITY; slot_count];
-                            if let Some(own) = slot_of.get(&Gate::Endpoint(*end)) {
-                                terms[*own] = 0.0;
-                            }
-                            terms[rest] = 0.0;
-                            (f64::INFINITY, terms)
-                        }
-                    }
-                };
-                (slot, *cost, base, terms)
-            })
-            .chain(discount_rows)
-            .collect::<Vec<_>>();
-        // Bellman-Ford over gates: off(g) = min over g's connectors of
-        // cost + min(base(end), min over g' of term(end, g') + off(g')).
-        let mut offsets = vec![f64::INFINITY; slot_count];
-        for _ in 0..=slot_count {
-            let mut changed = false;
-            for (slot, cost, base, terms) in &rows {
-                let far = terms
-                    .iter()
-                    .zip(&offsets)
-                    .map(|(term, offset)| term + offset)
-                    .fold(*base, f64::min);
-                let value = cost + far;
-                if value < offsets[*slot] {
-                    offsets[*slot] = value;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        let edge_gates = bounded
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, (gate, _))| match gate {
-                Gate::Edge(edge) => Some((*edge, offsets[slot])),
-                _ => None,
-            })
-            .collect();
-        let endpoint_gates = endpoint_slots
-            .iter()
-            .map(|(node, slot)| (*node, offsets[*slot]))
-            .collect();
-        if let Some(discount) = &mut discount {
-            discount.set_offsets(offsets[connector_count..connector_count + group_count].to_vec());
-        }
-        let gates = bounded
-            .into_iter()
-            .enumerate()
-            .map(|(slot, (_, bound))| (bound, offsets[slot]))
-            .collect();
-        Some(PatchAlt {
-            base,
-            gates,
-            rest: offsets[rest],
-            edge_gates,
-            endpoint_gates,
-            discount,
-        })
-    }
-
-    /// [`build_alt`](Self::build_alt) on CCH potentials: every real or
-    /// edge gate and every discount gate node is a slot of its own, its
-    /// terms the CCH distances from a connector's far end (`GateDistances`).
+    /// The bounds of [`PatchCch`]: every real or edge gate and every
+    /// discount gate node is a slot of its own, its terms the CCH distances
+    /// from a connector's far end (`GateDistances`).
     /// `None` with more slots than `cch::EXACT_GATE_NODES`.
     fn build_cch(
         &self,
@@ -1429,11 +1096,11 @@ impl<'g> Bounds<'g> {
     /// The lower bound at `node` (infinite: the goal is unreachable).
     fn at(&self, node: u32) -> f64 {
         let geometric = self.k * (chord_m(self.position(node), self.center) - self.radius).max(0.0);
-        let Some(alt) = &self.alt else {
+        let Some(cch) = &self.potential else {
             return geometric;
         };
         let bound = if node < self.node_count {
-            alt.at_real(node)
+            cch.potential.get(node)
         } else {
             match self.virtual_nodes[(node - self.node_count) as usize] {
                 VirtualNode::Point {
@@ -1442,21 +1109,22 @@ impl<'g> Bounds<'g> {
                     reaches_end,
                     terminal,
                 } => {
-                    let mut value = if terminal { 0.0 } else { alt.rest() };
-                    if let Some(offset) = alt.edge_gate(edge) {
-                        value = value.min(offset);
+                    let mut value = if terminal { 0.0 } else { f64::INFINITY };
+                    if let Some(offset) = cch.edge_gates.get(&edge) {
+                        value = value.min(*offset);
                     }
                     if reaches_end && value > 0.0 {
                         let (far, along) = self.along(edge, fraction);
-                        value = value.min(along + alt.at_real(far));
+                        value = value.min(along + cch.potential.get(far));
                     }
                     value
                 }
                 VirtualNode::OwnEndpoint => 0.0,
-                VirtualNode::OtherEndpoint => alt
-                    .endpoint_gate(node)
-                    .unwrap_or(f64::INFINITY)
-                    .min(alt.rest()),
+                VirtualNode::OtherEndpoint => cch
+                    .endpoint_gates
+                    .get(&node)
+                    .copied()
+                    .unwrap_or(f64::INFINITY),
             }
         };
         if bound.is_finite() {
@@ -1473,14 +1141,12 @@ impl<'g> Bounds<'g> {
 
 pub(crate) struct PatchQuery<'q> {
     pub costs: PatchCosts<'q>,
-    /// Landmark tables, unless request overrides void them.
-    pub landmarks: Option<LandmarkColumn<'q>>,
     /// Whether the CCH potentials, where the package has them, bound the
     /// request: false in the scaled fallback (see `analysis::override_bounds`),
     /// which does not cover the virtual points either.
     pub potentials: bool,
     /// Edges and split edges the request makes cheaper than the column:
-    /// gates of the landmark bounds (see `gates`).
+    /// gates of the potentials (see `gates`).
     pub gates: &'q [DiscountGate],
     pub profile_bit: u8,
     pub origins: &'q [CorrelatedLocation],
@@ -1538,7 +1204,6 @@ impl<'q> PatchQuery<'q> {
                 edge_cost: self.costs.edge_cost,
                 split_cost: self.costs.split_cost,
             },
-            landmarks: self.landmarks,
             potentials: self.potentials,
             gates: self.gates,
             profile_bit: self.profile_bit,
@@ -1780,30 +1445,12 @@ pub(crate) fn run(
     }
     let forced = dijkstra::forced();
     let k = if forced { 0.0 } else { k.max(0.0) };
-    let landmarks = query.landmarks.filter(|_| !forced);
     // CCH potentials on the column's metric; the patch's connectors and the
     // request's discount gates join them as gates of their own.
     let plan = (query.potentials && !forced)
         .then(|| potential_plan(graph, &costs.column, &FxHashMap::default(), false))
         .flatten();
     let scratch = std::mem::take(&mut state.cch_scratch).map(std::cell::RefCell::new);
-    // Real nodes the search starts from, to pick landmarks by.
-    let seed_nodes = seeds
-        .iter()
-        .filter_map(|(arc, _)| {
-            let node = arcs.arc(*arc).to;
-            if node < patch.node_count {
-                return Some(node);
-            }
-            patch.point_edges[(node - patch.node_count) as usize]
-                .map(|(edge, _)| graph.edge_target[edge as usize])
-        })
-        .collect::<Vec<_>>();
-    let destination_nodes = query
-        .destination_edges
-        .iter()
-        .map(|edge| graph.edge_source(*edge as usize))
-        .collect::<Vec<_>>();
     let (origin_terminals, destination_terminals) = (
         if patch.origin_endpoint.is_some() {
             Vec::new()
@@ -1821,11 +1468,9 @@ pub(crate) fn run(
         &arcs,
         Side::Forward,
         costs.column,
-        landmarks,
         k,
         &destination_points,
         &destination_terminals,
-        &seed_nodes,
         query.gates,
         plan.as_ref().map(|plan| (plan, &scratch[0])),
     );
@@ -1858,11 +1503,9 @@ pub(crate) fn run(
             &arcs,
             Side::Backward,
             costs.column,
-            landmarks,
             k,
             &origin_points,
             &origin_terminals,
-            &destination_nodes,
             query.gates,
             plan.as_ref().map(|plan| (plan, &scratch[1])),
         );

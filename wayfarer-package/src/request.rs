@@ -830,7 +830,7 @@ pub struct RequestView<'g> {
 
 impl PackageFile {
     /// Faults the whole package into memory, so the first requests do not
-    /// pay a page fault per touched page (landmark rows, adjacency, shapes).
+    /// pay a page fault per touched page (adjacency, costs, shapes).
     /// Returns the bytes touched. Call it from a background thread after
     /// opening; it is safe to route concurrently.
     pub fn prefetch_pages(&self) -> usize {

@@ -11,7 +11,7 @@
 use rustc_hash::FxHashSet;
 use wayfarer_package::format::{ColumnPieceKinds, PieceKind};
 
-use super::super::U_TURN_COST;
+use super::super::{U_TURN_COST, chain_continuation, chain_predecessor, opposing_edge};
 use super::{BackwardLabel, Label, NO_LABEL, NO_NODE, PatchCosts, PatchOutcome, PatchRun, RunArcs};
 use crate::package::SearchGraph;
 
@@ -116,58 +116,29 @@ impl PatchRun<'_, '_, '_, '_, '_> {
         f64::from((self.query.costs.edge_cost)(edge))
     }
 
-    /// The edge continuing a piece's chain after `edge` (see
-    /// `search::Run::continuation`).
+    /// See [`chain_continuation`].
     fn continuation(&self, edge: u32) -> Option<u32> {
-        let g = &self.g;
-        let (back, node) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
-        let mut found = None;
-        for next in g.first_out[node as usize]..g.first_out[node as usize + 1] {
-            let target = g.edge_target[next as usize];
-            if target == back
-                || self.is_kind(target, PieceKind::Tree)
-                || !self.edge_cost(next).is_finite()
-            {
-                continue;
-            }
-            debug_assert!(found.is_none(), "a chain node continues one way");
-            found = Some(next);
-            if !cfg!(debug_assertions) {
-                break;
-            }
-        }
-        found
+        chain_continuation(
+            &self.g,
+            edge,
+            |node| self.is_kind(node, PieceKind::Tree),
+            |edge| self.edge_cost(edge).is_finite(),
+        )
     }
 
-    /// The edge before `edge` along a piece's chain: the inverse of
-    /// [`Self::continuation`].
+    /// See [`chain_predecessor`].
     fn chain_predecessor(&self, edge: u32) -> Option<u32> {
-        let g = &self.g;
-        let (node, ahead) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
-        let mut found = None;
-        for (previous, source) in g.in_edges(node as usize) {
-            if source == ahead
-                || self.is_kind(source, PieceKind::Tree)
-                || !self.edge_cost(previous).is_finite()
-            {
-                continue;
-            }
-            debug_assert!(found.is_none(), "a chain node continues one way");
-            found = Some(previous);
-            if !cfg!(debug_assertions) {
-                break;
-            }
-        }
-        found
+        chain_predecessor(
+            &self.g,
+            edge,
+            |node| self.is_kind(node, PieceKind::Tree),
+            |edge| self.edge_cost(edge).is_finite(),
+        )
     }
 
-    /// The usable edge back from `edge`'s target to its source.
+    /// See [`opposing_edge`].
     fn opposing(&self, edge: u32) -> Option<u32> {
-        let g = &self.g;
-        let (source, node) = (g.edge_source(edge as usize), g.edge_target[edge as usize]);
-        (g.first_out[node as usize]..g.first_out[node as usize + 1]).find(|next| {
-            g.edge_target[*next as usize] == source && self.edge_cost(*next).is_finite()
-        })
+        opposing_edge(&self.g, edge, |edge| self.edge_cost(edge).is_finite())
     }
 
     /// Turn cost and junction delay from real edge `previous` onto real edge

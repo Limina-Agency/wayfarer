@@ -1,5 +1,5 @@
-//! Costs a request adds at transitions between edges, outside the landmark
-//! metric like turn costs (they only raise costs, so landmark bounds hold):
+//! Costs a request adds at transitions between edges, outside the bounds'
+//! metric like turn costs (they only raise costs, so the bounds hold):
 //! barriers and a SAR request's
 //! entry into a wrong-way stretch (R2). A SAR request's `barriers`
 //! relaxation (R4) replaces a barrier's normal effect on vehicles with its

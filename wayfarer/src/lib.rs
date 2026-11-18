@@ -105,12 +105,11 @@ pub mod internals {
     pub use crate::overlay::project_route_overlay_geometry;
     pub use crate::package::columns::DerivedColumnProbe;
 
-    /// Chooses the lower bound of route searches for the whole process:
-    /// `auto` (CCH potentials once prepared, the default), `alt` (landmarks
-    /// only) or `cch` (potentials, prepared on first use). False for an
-    /// unknown name. For harnesses comparing the two in one process.
-    pub fn set_potential(name: &str) -> bool {
-        crate::debug::set_potential(name)
+    /// Turns the CCH potentials of every search `on` (the default) or
+    /// `off` (the straight-line bound alone) for the whole process. False
+    /// for another name. For harnesses comparing the two in one process.
+    pub fn set_potentials(name: &str) -> bool {
+        crate::debug::set_potentials(name)
     }
 }
 pub use package::cch::PotentialStats;

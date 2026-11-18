@@ -8,8 +8,6 @@
 //! endpoints of edges, ordered along a Hilbert curve; edges are grouped by
 //! source node and ordered by edge id within a node.
 
-mod landmarks;
-pub use landmarks::DEFAULT_LANDMARK_COUNT;
 mod pieces;
 mod request;
 
@@ -55,9 +53,7 @@ use wayfarer_package::format::{
 };
 use wayfarer_package::format::{junction, road_type_rank};
 use wayfarer_package::request::derived_opposing;
-use wayfarer_package::sar::{
-    LegalReason, SarEdgeFacts, SarPackageInfo, edge_sar_bits, sar_metric_cost,
-};
+use wayfarer_package::sar::{SarPackageInfo, edge_sar_bits};
 
 const ALL_PROFILES: [MobilityProfile; PROFILE_SLOTS] = [
     MobilityProfile::Default,
@@ -73,25 +69,17 @@ pub struct PackageBuildOptions {
     /// Profiles that receive a cost/duration column. `Default` always shares
     /// the `Wheeled` column because both use the same costing policy.
     pub profiles: Vec<MobilityProfile>,
-    /// ALT landmarks per profile column (0, the default, stores none: the
-    /// engine bounds searches with CCH potentials on the stored order).
-    pub landmark_count: usize,
     /// Store the CCH elimination order (`Section::CchRank`), from which the
-    /// engine builds its potentials at open.
+    /// engine builds its potentials (the default). Without it searches
+    /// bound with the straight line alone (tests and benchmarks).
     pub cch_order: bool,
-    /// Leave out the landmark rows of nodes whose distances derive exactly
-    /// from anchors (`format::LandmarkRows`). Distances read the same either
-    /// way; `false` stores every finite row, for comparisons.
-    pub anchored_landmark_rows: bool,
 }
 
 impl Default for PackageBuildOptions {
     fn default() -> Self {
         Self {
             profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
-            landmark_count: 0,
             cch_order: true,
-            anchored_landmark_rows: true,
         }
     }
 }
@@ -133,24 +121,13 @@ pub struct PackageBuildReport {
     pub cost_tuple_count: usize,
     /// Shared infos whose way id does not fit `u32` (synthetic negative ids).
     pub way_id_wide_count: usize,
-    /// Landmark rows stored, over all columns (rows unreachable from and to
-    /// every landmark are not).
-    pub landmark_row_count: usize,
-    /// (Column, node)s whose landmark distances derive from one anchor's
-    /// row, over all columns (not stored as rows).
-    pub landmark_one_anchor_count: usize,
-    /// Likewise from two anchors' rows.
-    pub landmark_two_anchor_count: usize,
-    /// Edges the Wheeled landmark metric adds to the stored column (SAR).
-    pub sar_metric_edge_count: usize,
     /// Paths R5 `vehicle_on_paths` can open (physically drivable, no legal
     /// vehicle access), by width class: unknown, under 2.5 m, 2.5–3 m, 3 m
-    /// or more. They stay out of the landmark metric.
+    /// or more.
     pub sar_path_edge_count_by_width: [usize; 4],
     /// Barrier nodes: with an effect in normal routing or a SAR class.
     pub barrier_node_count: usize,
     pub assemble_ms: u128,
-    pub landmark_ms: u128,
     /// Computing the CCH order (nested dissection).
     pub cch_order_ms: u128,
     pub request_ms: u128,
@@ -207,15 +184,6 @@ thread_local! {
     static STORE_DERIVABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Tests: the landmark metric's `[column][edge]` costs of the last
-    /// package built on this thread (the stored columns, with the SAR
-    /// metric's edges), for checks of the landmark tables against them.
-    pub(crate) static LANDMARK_COSTS: std::cell::RefCell<Vec<f32>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
 fn store_derivable() -> bool {
     #[cfg(test)]
     return STORE_DERIVABLE.with(std::cell::Cell::get);
@@ -223,7 +191,7 @@ fn store_derivable() -> bool {
     false
 }
 
-/// The sub-phases of the package build before landmarks, in order: each
+/// The sub-phases of the package build before the CCH order, in order: each
 /// reports its share of [`CompileStage::BuildPackage`] as it ends.
 const BUILD_STEPS: [&str; 8] = [
     "nodes",
@@ -391,8 +359,8 @@ pub fn build_package(
 }
 
 /// The road graph a package is built from: borrowed, or owned so that it can
-/// be freed once every section derived from it is built (before landmarks,
-/// the build's memory peak).
+/// be freed once every section derived from it is built (before the CCH
+/// order).
 enum GraphSource<'a> {
     Borrowed(&'a RoadGraph),
     Owned(Option<Box<RoadGraph>>),
@@ -830,11 +798,6 @@ fn build_package_from(
     let costing = RouteCostingOptions::default();
     let mut edge_cost = vec![f32::INFINITY; edge_count * column_count];
     let mut edge_duration = vec![f32::INFINITY; edge_count * column_count];
-    // The Wheeled landmarks' metric (`SarPackageInfo`): the stored column,
-    // and each physically drivable edge it cannot use at its default cost
-    // with legal access, times the minimum SAR factors it needs.
-    let sar = metadata.sar;
-    let mut sar_metric = Vec::<(usize, f32)>::new();
     for (column, profile) in column_profiles.iter().enumerate() {
         let policy = CostModel::new(*profile, &costing);
         let range = column * edge_count..(column + 1) * edge_count;
@@ -856,35 +819,6 @@ fn build_package_from(
                     *duration = costed.duration_s as f32;
                 }
             });
-        if *profile == MobilityProfile::Wheeled {
-            let costs = &edge_cost[column * edge_count..(column + 1) * edge_count];
-            sar_metric = (0..edge_count)
-                .into_par_iter()
-                .filter(|edge| !costs[*edge].is_finite())
-                .filter_map(|edge| {
-                    let shared = edge_shared_info[edge];
-                    let factor = sar.landmark_factor(SarEdgeFacts {
-                        access: edge_profile_access[edge],
-                        reason: LegalReason(si_legal_reason[shared as usize]),
-                        path: classes[shared as usize].path_class,
-                        width: classes[shared as usize].width,
-                    })?;
-                    let mut inputs = EdgeCostInputs::from_parts(
-                        road_edge(edge_raw[edge]),
-                        info_of(shared).attrs,
-                        classes[shared as usize],
-                    );
-                    inputs.mobility_mode_mask = profile.mobility_mode_mask();
-                    match policy.edge_cost_inputs(&inputs, &NoOverrides) {
-                        EdgeCostDecision::Allowed(costed) => Some((
-                            column * edge_count + edge,
-                            sar_metric_cost(costed.cost, factor),
-                        )),
-                        _ => None,
-                    }
-                })
-                .collect();
-        }
     }
     let wheeled = 1u8 << profile_slot(MobilityProfile::Wheeled);
     for edge in 0..edge_count {
@@ -898,7 +832,6 @@ fn build_package_from(
         }
     }
     drop(classes);
-    report.sar_metric_edge_count = sar_metric.len();
     clock.lap("costs")?;
 
     // Restrictions, from the road graph's resolved restrictions.
@@ -1204,46 +1137,11 @@ fn build_package_from(
     clock.lap("adjacency, positions, heuristic")?;
 
     source.release();
-    let landmark_started = Instant::now();
-    let landmark_cost = if sar_metric.is_empty() {
-        None
-    } else {
-        let mut costs = edge_cost.clone();
-        for (index, cost) in &sar_metric {
-            costs[*index] = *cost;
-        }
-        Some(costs)
-    };
-    drop(sar_metric);
-    #[cfg(test)]
-    LANDMARK_COSTS.with(|costs| {
-        *costs.borrow_mut() = landmark_cost.as_deref().unwrap_or(&edge_cost).to_vec();
-    });
-    let landmarks = landmarks::build_landmarks(
-        &landmarks::LandmarkInput {
-            node_count,
-            edge_count,
-            first_out: &first_out,
-            first_in: &first_in,
-            in_edges: &in_edges,
-            edge_source: &edge_source,
-            edge_target: &edge_target,
-            edge_cost: landmark_cost.as_deref().unwrap_or(&edge_cost),
-            node_lat: &node_lat,
-            node_lng: &node_lng,
-        },
-        column_count,
-        options.landmark_count,
-        options.anchored_landmark_rows,
-        job,
-    )?;
-    drop(landmark_cost);
-    report.landmark_ms = landmark_started.elapsed().as_millis();
     // The CCH order, from the node graph and the fixed-point positions
     // (integer arithmetic: the same on every platform).
     job.report(
-        CompileStage::Landmarks,
-        Some(0.5),
+        CompileStage::CchOrder,
+        Some(0.0),
         0,
         "Ordering nodes for CCH potentials",
     );
@@ -1258,18 +1156,14 @@ fn build_package_from(
     report.cch_order_ms = order_started.elapsed().as_millis();
     job.check().map_err(|_| cancelled_error())?;
     job.report(
-        CompileStage::Landmarks,
+        CompileStage::CchOrder,
         Some(1.0),
         0,
         "Ordered nodes for CCH potentials",
     );
-
-    report.landmark_row_count = landmarks.row_count;
-    report.landmark_one_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.0).sum();
-    report.landmark_two_anchor_count = landmarks.anchored.iter().map(|kinds| kinds.1).sum();
     drop(node_lat);
     drop(node_lng);
-    clock.lap("landmarks")?;
+    clock.lap("cch order")?;
 
     // Clean pieces per column, for the route search's walks.
     // Via nodes: where a restricted transition happens.
@@ -1335,7 +1229,6 @@ fn build_package_from(
         simple_restriction_count: simple_rows.len(),
         complex_restriction_count: complex_rows.len(),
         column_count,
-        landmark_count: options.landmark_count,
     };
     let mut writer = PackageWriter::new(counts, layout, profile_columns, heuristic_cost_per_m);
     writer.put_metadata(metadata);
@@ -1409,18 +1302,6 @@ fn build_package_from(
     writer.put(Section::LoneInPresent, lone_in_present);
     writer.put(Section::LoneInEdge, lone_in_edge);
     writer.put(Section::EdgeProfileAccess, edge_profile_access);
-    writer.put(Section::LandmarkNode, landmarks.nodes);
-    writer.put(Section::LandmarkScale, landmarks.scales);
-    writer.put(Section::LandmarkFrom, landmarks.from);
-    writer.put(Section::LandmarkTo, landmarks.to);
-    writer.put(Section::LandmarkRowPresent, landmarks.present);
-    writer.put(Section::LandmarkRowRank, landmarks.rank);
-    writer.put(Section::LandmarkOneAnchorPresent, landmarks.one_present);
-    writer.put(Section::LandmarkOneAnchorRank, landmarks.one_rank);
-    writer.put(Section::LandmarkOneAnchor, landmarks.one);
-    writer.put(Section::LandmarkTwoAnchorPresent, landmarks.two_present);
-    writer.put(Section::LandmarkTwoAnchorRank, landmarks.two_rank);
-    writer.put(Section::LandmarkTwoAnchor, landmarks.two);
     writer.put(Section::PieceChain, piece_bits.chain);
     writer.put(Section::PieceTree, piece_bits.tree);
     writer.put(Section::ComplexFirst, complex_first);
@@ -1452,7 +1333,7 @@ fn build_package_from(
     report.assemble_ms = started
         .elapsed()
         .as_millis()
-        .saturating_sub(report.landmark_ms + report.cch_order_ms);
+        .saturating_sub(report.cch_order_ms);
     report.total_ms = started.elapsed().as_millis();
     Ok((writer, report))
 }
@@ -1591,8 +1472,8 @@ pub fn write_package(
     Ok(report)
 }
 
-/// [`write_package`], consuming `graph` and freeing it before the landmark
-/// phase, the build's memory peak.
+/// [`write_package`], consuming `graph` and freeing it before the CCH
+/// order.
 pub fn write_package_consuming(
     graph: RoadGraph,
     manifest: Option<&RoadGraphPackageManifest>,
@@ -1602,8 +1483,8 @@ pub fn write_package_consuming(
     without_job(|job| write_package_for_job(graph, manifest, path, options, job))
 }
 
-/// [`write_package_consuming`] for a compile job: reports the build, landmark
-/// and write stages, and stops within about a second of a cancel, leaving no
+/// [`write_package_consuming`] for a compile job: reports the build, CCH
+/// order and write stages, and stops within about a second of a cancel, leaving no
 /// file at `path` (nor its `.tmp`). After a cancel the error says only that;
 /// the job tells the caller it was a cancel.
 pub(crate) fn write_package_for_job(
@@ -1747,24 +1628,15 @@ impl Write for ProgressFile<'_, '_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use wayfarer_package::format::{LANDMARK_INFINITY, LandmarkRow};
     use wayfarer_package::{DirectionalAccess, RoadType};
     use wayfarer_road_graph::{RoadGraph, RoadGraphBuilder, RoutableWay};
 
     use super::*;
     use wayfarer::internals::GraphAccess;
 
-    /// The default options plus landmarks (the landmark code's tests).
-    fn with_landmarks() -> PackageBuildOptions {
-        PackageBuildOptions {
-            landmark_count: landmarks::DEFAULT_LANDMARK_COUNT,
-            ..PackageBuildOptions::default()
-        }
-    }
-
     /// The package of `graph`, opened by the engine.
     fn in_memory(graph: &RoadGraph) -> (wayfarer::RoutingPackage, PackageBuildReport) {
-        let (bytes, report) = package_bytes(graph, &with_landmarks()).unwrap();
+        let (bytes, report) = package_bytes(graph, &PackageBuildOptions::default()).unwrap();
         (
             wayfarer::RoutingPackage::from_bytes(&bytes).unwrap(),
             report,
@@ -1882,7 +1754,7 @@ mod tests {
 
     /// Streets with posted limits (some shared, so costing tuples repeat), a
     /// synthetic and an over-`u32` way id, steps past the end of the streets
-    /// (outside the driving column's landmark network: unlike a footway, R5
+    /// (outside the driving column's network: unlike a footway, R5
     /// never opens them) and a node that is not an E7 position.
     fn compact_layout_graph() -> RoadGraph {
         let mut builder = RoadGraphBuilder::new("compact-layout");
@@ -1984,36 +1856,12 @@ mod tests {
                 assert_eq!(view.si_way.same_way(left, right), a != 0 && a == b);
             }
         }
-        // The steps' far node has no row in the driving column, and one on
-        // foot; rows that are stored are finite for every landmark.
-        let rows = view.landmark_from.rows();
-        let far = (0..view.node_count as u32)
-            .find(|node| view.node_lat_lng(*node) == (50.002, 19.902))
-            .unwrap();
-        let drive = graph.file().column_for(MobilityProfile::Wheeled).unwrap();
-        let walk = graph.file().column_for(MobilityProfile::OnFoot).unwrap();
-        assert_eq!(rows.row(drive, far), LandmarkRow::Absent);
-        assert!(rows.row(walk, far).is_present());
-        assert_eq!(view.landmark_from.value(drive, far, 0), LANDMARK_INFINITY);
-        let mut stored = 0;
-        for column in [drive, walk] {
-            for node in 0..view.node_count as u32 {
-                let row = rows.row(column, node);
-                stored += usize::from(row.stored().is_some());
-                for landmark in 0..view.landmark_count {
-                    let finite = view.landmark_from.get(row, landmark) != LANDMARK_INFINITY
-                        || view.landmark_to.get(row, landmark) != LANDMARK_INFINITY;
-                    assert_eq!(finite, row.is_present(), "column {column} node {node}");
-                }
-            }
-        }
-        assert_eq!(stored, report.landmark_row_count);
-        assert!(stored < 2 * view.node_count);
     }
 
     #[test]
     fn open_rejects_duplicate_edge_ids() {
-        let (mut bytes, _) = package_bytes(&compact_layout_graph(), &with_landmarks()).unwrap();
+        let (mut bytes, _) =
+            package_bytes(&compact_layout_graph(), &PackageBuildOptions::default()).unwrap();
         let (offset, len) = PackageFile::from_bytes(&bytes)
             .unwrap()
             .section_range(Section::EdgeId);

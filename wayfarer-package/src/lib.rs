@@ -12,7 +12,7 @@
 //!
 //! A package is one memory-mappable file holding the road network of an
 //! OpenStreetMap extract, with per-profile edge costs, turn restrictions and
-//! landmark distances, in checksummed sections. Compiling one from OSM data is
+//! the node order of CCH potentials, in checksummed sections. Compiling one from OSM data is
 //! the route compiler's job and answering routes is the engine's; this crate
 //! opens, verifies, reads and writes the file.
 //!

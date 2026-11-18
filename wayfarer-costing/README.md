@@ -49,8 +49,8 @@ inputs (slower until it is recompiled) and refuses a newer one, so such a
 change ships the compiler and the engine together, and existing packages
 should be recompiled. Turn costs and junction delays (`junction`: the time lost turning,
 yielding and waiting at signals or signs, added to durations) are not stored:
-the engine evaluates them at query time from stored inputs and landmark bounds
-ignore them, so a change that only raises them needs no bump.
+the engine evaluates them at query time from stored inputs and the search
+bounds ignore them, so a change that only raises them needs no bump.
 
 ## Data
 

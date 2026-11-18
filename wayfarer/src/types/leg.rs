@@ -727,7 +727,7 @@ pub struct RouteDiagnostics {
     /// can be, in thousandths of a cost unit (rounded up), by the lower bound
     /// the search stops on: an upper bound for unidirectional searches, with
     /// the exact stop (`WAYFARER_EXACT_STOP`), and with the default
-    /// bidirectional stop (package landmark bounds are consistent).
+    /// bidirectional stop (the CCH potentials are consistent).
     #[serde(default)]
     pub search_optimality_gap_millicost: Option<u64>,
 }

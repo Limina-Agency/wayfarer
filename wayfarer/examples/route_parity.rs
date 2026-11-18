@@ -25,8 +25,9 @@
 //! Option sets: `ROUTE_PARITY_COSTING` takes a JSON `RouteCostingOptions` (e.g.
 //! `{"avoidMotorways":1,"preferPaved":0.5}`) applied to every request, and
 //! `ROUTE_PARITY_PROFILES` maps the corpus profiles (`wheeled=tracked,on_foot=legged`).
-//! The derived column for each profile is probed first (build time, landmark
-//! scale, and, for default options, bit equality with the stored column).
+//! The derived column for each profile is probed first (build time, how the
+//! potentials bound it, and, for default options, bit equality with the
+//! stored column).
 //! `ROUTE_PARITY_OVERLAY=1` gives each case a dynamic overlay derived from its
 //! plain route (a full block, and a partial block with a bypass connector).
 //! `ROUTE_PARITY_SKIP_REFERENCE=1` runs only the package engine (the reference
@@ -291,11 +292,10 @@ fn main() {
         for _ in 0..2 {
             match graph.derived_column_probe(profile, &costing) {
                 Some(probe) => println!(
-                    "derived {profile:?} column: {:.1} ms, landmark scale {:?} (stored landmarks {:?}, own {:?}), k {:.5}, {} usable edges, stored mismatches {:?}",
+                    "derived {profile:?} column: {:.1} ms, potential factor {:?} (own metric {}), k {:.5}, {} usable edges, stored mismatches {:?}",
                     probe.build_ms,
-                    probe.landmark_scale,
-                    probe.stored_landmark_scale,
-                    probe.own_landmarks,
+                    probe.potential_factor,
+                    probe.own_metric,
                     probe.heuristic_cost_per_m,
                     probe.usable_edge_count,
                     probe.stored_mismatch_count

@@ -33,7 +33,7 @@
 //! model, so such a change ships the compiler and the engine together and
 //! existing packages must be recompiled. Turn costs and junction delays
 //! ([`junction`]) are not stored: the engine evaluates them at query time from
-//! stored inputs, and landmark bounds ignore them, so a change that only
+//! stored inputs, and the search bounds ignore them, so a change that only
 //! raises them changes routes and durations on existing packages without a
 //! bump.
 

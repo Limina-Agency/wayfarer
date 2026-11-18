@@ -333,7 +333,7 @@ fn sar_drives_out_of_rynek_glowny_over_pedestrian_streets() {
 
 /// SAR on the Emergency profile (stage 3): the same closed road and
 /// one-way as above, relaxed together, costed by Emergency (its derived
-/// column, bounded by landmarks of its own metric). `vehicle_on_paths`
+/// column, bounded by potentials of its own metric). `vehicle_on_paths`
 /// stays Wheeled only.
 #[test]
 fn an_emergency_sar_route_uses_a_closed_road_and_drives_against_a_one_way() {

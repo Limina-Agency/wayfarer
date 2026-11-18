@@ -28,11 +28,10 @@ use super::{HeapEntry, NO_LABEL, SEED_TRAVERSED_FRACTION_EPSILON, SearchState, t
 use crate::costing::{CostingPolicy, EdgeCostDecision};
 use crate::package::SearchGraph;
 use crate::package::cch::{GatedPotential, PotentialScratch};
-use crate::package::columns::{CostColumn, LandmarkColumn};
-use crate::package::landmarks::AltBound;
+use crate::package::columns::CostColumn;
 use crate::package::profile_bit;
 use crate::package::restrictions::{ComplexAutomata, ROOT};
-use crate::package::search::gates::{DiscountGate, GatedAlt, discount_gates, gate_limit};
+use crate::package::search::gates::{DiscountGate, discount_gates, gate_limit};
 use crate::types::{MobilityProfile, RouteOptions};
 use rustc_hash::FxHashMap;
 
@@ -41,77 +40,26 @@ use rustc_hash::FxHashMap;
 const MAX_POTENTIAL_TARGET_NODES: usize = 8;
 /// Open target nodes up to which a matrix row bounds with CCH potentials
 /// (one elimination-tree query for all of them);
-/// `WAYFARER_CCH_ROW_TARGETS` overrides it (benchmarking).
+/// [`crate::debug::cch_row_targets`] overrides it.
 fn cch_max_target_nodes() -> usize {
-    static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    OVERRIDE
-        .get_or_init(|| {
-            std::env::var("WAYFARER_CCH_ROW_TARGETS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-        })
-        .unwrap_or(MAX_POTENTIAL_TARGET_NODES)
+    crate::debug::cch_row_targets().unwrap_or(MAX_POTENTIAL_TARGET_NODES)
 }
 
-/// `AltBound` tracks at most this many targets.
-const ALT_TARGET_CHUNK: usize = 16;
-
 /// Lower bound on the cost from a node to the closest of a set of target
-/// nodes (zero when no landmark bound applies). Taking the minimum of
-/// per-target landmark bounds keeps it consistent; the request's discount
-/// gates add their terms (see `gates`).
+/// nodes: CCH potentials towards every open target at once, with the
+/// request's discount gates (see `gates`), or none.
 enum TargetPotential<'g> {
     /// No goal direction: plain Dijkstra.
     None,
-    Landmarks(Box<GatedAlt<'g>>),
     /// CCH potentials (`package::cch`), towards every open target at once.
     Cch(GatedPotential<'g>),
 }
 
-impl<'g> TargetPotential<'g> {
-    fn none() -> Self {
-        Self::None
-    }
-
-    fn new(
-        graph: SearchGraph<'g>,
-        landmarks: LandmarkColumn<'g>,
-        targets: &[u32],
-        origins: &[u32],
-        gates: &[DiscountGate],
-    ) -> Self {
-        if targets.is_empty() || targets.len() > MAX_POTENTIAL_TARGET_NODES {
-            return Self::none();
-        }
-        let bounds = targets
-            .chunks(ALT_TARGET_CHUNK)
-            .map(|chunk| {
-                AltBound::new(
-                    landmarks.from,
-                    landmarks.to,
-                    landmarks.scales,
-                    landmarks.count,
-                    landmarks.active,
-                    graph.node_count,
-                    landmarks.column,
-                    chunk,
-                    origins,
-                )
-            })
-            .collect::<Option<Vec<_>>>()
-            .unwrap_or_default();
-        if bounds.is_empty() {
-            return Self::none();
-        }
-        GatedAlt::new(landmarks, bounds, origins, false, gates)
-            .map_or(Self::None, |bound| Self::Landmarks(Box::new(bound)))
-    }
-
+impl TargetPotential<'_> {
     #[inline]
     fn bound(&self, node: u32) -> f64 {
         match self {
             Self::None => 0.0,
-            Self::Landmarks(bound) => bound.bound(node),
             Self::Cch(potential) => potential.get(node),
         }
     }
@@ -165,12 +113,8 @@ pub(crate) struct AnalysisQuery<'c> {
     /// options (see [`request_cost_overrides`]); every other edge keeps its
     /// column cost.
     pub cost_overrides: FxHashMap<u32, f32>,
-    /// False when the overrides void the landmark lower bounds (see
-    /// [`override_bounds`]; in its fallback the column carries landmarks
-    /// scaled for them).
-    pub use_landmarks: bool,
     /// Edges the overrides make cheaper than the column: gates of the
-    /// landmark bounds (see `gates`).
+    /// potentials (see `gates`).
     pub gates: Vec<DiscountGate>,
     /// The SAR `turn_restrictions` penalty per violated restriction (`None`:
     /// restrictions ban; see `SearchQuery::restriction_penalty`).
@@ -403,31 +347,18 @@ pub(crate) fn overlay_split_costs(
 pub(crate) struct OverrideBounds {
     /// The column's straight-line factor, lowered for the overrides.
     pub heuristic_cost_per_m: f64,
-    /// False when the landmarks cannot bound the request (the fallback with
-    /// an edge the column cannot use).
-    pub use_landmarks: bool,
     /// Edges the request makes cheaper than the column, bounded through
     /// gates (see `gates`); empty in the fallback.
     pub gates: Vec<DiscountGate>,
-    /// The fallback: the column's landmark quanta scaled by the least
-    /// override/column cost ratio.
-    landmark_scales: Option<Vec<f32>>,
+    /// Whether the request needed the fallback (too many gates): only the
+    /// straight-line factor, scaled, bounds it then.
+    fallback: bool,
 }
 
 impl OverrideBounds {
-    /// `column` with its landmark bounds scaled for the overrides (the
-    /// fallback only).
-    pub(crate) fn column<'a>(&'a self, column: CostColumn<'a>) -> CostColumn<'a> {
-        let mut column = column;
-        if let (Some(scales), Some(landmarks)) = (&self.landmark_scales, &mut column.landmarks) {
-            landmarks.scales = scales;
-        }
-        column
-    }
-
     /// Whether the request needed the fallback.
     pub(crate) fn fell_back(&self) -> bool {
-        self.landmark_scales.is_some() || !self.use_landmarks
+        self.fallback
     }
 }
 
@@ -435,18 +366,18 @@ impl OverrideBounds {
 /// `overrides` and a patch's split fragment costs (`split_cost`).
 ///
 /// Every edge they make cheaper than its column cost, or usable where the
-/// column is not, becomes a discount gate (`gates`): the landmark bounds stay
-/// at scale 1 and searches add the gates' terms, so a route that does not use
-/// a discount searches as without it. The straight-line factor drops to the
+/// column is not, becomes a discount gate (`gates`): the potentials stay at
+/// scale 1 and searches add the gates' terms, so a route that does not use a
+/// discount searches as without it. The straight-line factor drops to the
 /// least cost per metre of those edges.
 ///
-/// With more gates than `gates::MAX_GATE_CLUSTERS` clusters hold (a whole
+/// With more than `gates::MAX_GATE_NODES` gate nodes on a side (a whole
 /// region discounted), the fallback: with `r = min override / column cost`
 /// over the edges an override lowers, every path costs at least `r` times its
-/// column cost, so the straight-line factor and the landmark bounds are
-/// scaled by `r` (as for derived columns, see `package::columns`); an edge
-/// the column cannot use drops the landmarks and lowers the factor to that
-/// edge's cost per metre.
+/// column cost, so the straight-line factor is scaled by `r`; an edge the
+/// column cannot use lowers the factor to that edge's cost per metre. (The
+/// route searches' potentials scale the same way, see
+/// `search::potential_plan`.)
 pub(crate) fn override_bounds(
     graph: SearchGraph<'_>,
     column: CostColumn<'_>,
@@ -482,7 +413,7 @@ pub(crate) fn override_bounds_with_limit(
             }
         }
         // Every edge also costs at least the least ratio times its column
-        // cost when the column can use every gate (see `GatedAlt`).
+        // cost when the column can use every gate.
         let ratio = gates.iter().map(|gate| gate.ratio).fold(1.0, f64::min);
         if ratio > 0.0 {
             heuristic_cost_per_m =
@@ -490,13 +421,11 @@ pub(crate) fn override_bounds_with_limit(
         }
         return OverrideBounds {
             heuristic_cost_per_m,
-            use_landmarks: true,
             gates,
-            landmark_scales: None,
+            fallback: false,
         };
     }
     let mut heuristic_cost_per_m = column.heuristic_cost_per_m;
-    let mut use_landmarks = true;
     let mut ratio = 1.0f64;
     for (edge, cost) in overrides.iter().chain(split_cost) {
         let base = column.cost(*edge);
@@ -508,30 +437,16 @@ pub(crate) fn override_bounds_with_limit(
                 ratio = ratio.min(f64::from(*cost) / f64::from(base) * MARGIN);
             }
         } else {
-            use_landmarks = false;
             let span = span(*edge);
             if span > 0.0 {
                 heuristic_cost_per_m = heuristic_cost_per_m.min(f64::from(*cost) / span * 0.999);
             }
         }
     }
-    let landmark_scales = Some(
-        column
-            .landmarks
-            .map(|landmarks| {
-                landmarks
-                    .scales
-                    .iter()
-                    .map(|quantum| (f64::from(*quantum) * ratio) as f32)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    );
     OverrideBounds {
         heuristic_cost_per_m: heuristic_cost_per_m * ratio.max(0.0),
-        use_landmarks: use_landmarks && ratio > 0.0,
         gates: Vec::new(),
-        landmark_scales,
+        fallback: true,
     }
 }
 
@@ -727,7 +642,7 @@ impl Expansion<'_, '_> {
                 continue;
             }
             entry.priority = label.cost + potential.bound(self.g.edge_target[label.edge as usize]);
-            // Landmarks prove no open target is reachable from here.
+            // The potentials prove no open target is reachable from here.
             if entry.priority.is_finite() {
                 live.push(entry);
             }
@@ -830,7 +745,7 @@ pub(super) fn direct_same_edge(
 }
 
 /// One matrix cell as a point-to-point search: the route engine's
-/// bidirectional ALT search between the source's and the target's candidates,
+/// bidirectional A* search between the source's and the target's candidates,
 /// so the cell agrees with the route between the same two points.
 /// `heuristic_cost_per_m` must already be scaled for the query's overrides
 /// (see [`override_bounds`]).
@@ -870,7 +785,6 @@ pub(crate) fn matrix_cell(
         cost_overrides: &query.cost_overrides,
         max_visited_edge_count: query.max_visited_edge_count,
         cancellation: query.cancellation,
-        use_landmarks: query.use_landmarks,
         gates: &query.gates,
         bidirectional: true,
         restriction_penalty: query.restriction_penalty,
@@ -1018,16 +932,12 @@ fn matrix_row_with(
         return row;
     }
 
-    // Goal-directed: A* on a landmark bound to the closest still-open target.
+    // Goal-directed: A* on a bound to the closest still-open target.
     // A target is settled once the queue's priority reaches its best finish
     // (every later finish costs at least that much); the potential is then
     // rebuilt over the remaining targets and the queue re-keyed. Raising a
     // consistent potential mid-search keeps settled labels exact, so the last,
     // most expensive target gets a focused search rather than a flood.
-    let origin_nodes = origins
-        .iter()
-        .map(|origin| graph.edge_target[origin.edge as usize])
-        .collect::<Vec<_>>();
     let open_target_nodes = |open: &[bool]| {
         let mut nodes = candidates
             .iter()
@@ -1045,14 +955,11 @@ fn matrix_row_with(
         &query.cost_overrides,
         !query.gates.is_empty(),
     );
-    let potential_for = |open: &[bool]| match (
-        &plan,
-        query.column.landmarks.filter(|_| query.use_landmarks),
-    ) {
-        (Some(plan), _) => {
+    let potential_for = |open: &[bool]| match &plan {
+        Some(plan) => {
             let targets = open_target_nodes(open);
             if targets.is_empty() || targets.len() > cch_max_target_nodes() {
-                TargetPotential::none()
+                TargetPotential::None
             } else {
                 TargetPotential::Cch(plan.potential(
                     &targets,
@@ -1063,14 +970,7 @@ fn matrix_row_with(
                 ))
             }
         }
-        (None, Some(landmarks)) => TargetPotential::new(
-            graph,
-            landmarks,
-            &open_target_nodes(open),
-            &origin_nodes,
-            &query.gates,
-        ),
-        (None, None) => TargetPotential::none(),
+        None => TargetPotential::None,
     };
     let mut potential = potential_for(&open);
 
@@ -1300,7 +1200,7 @@ fn matrix_row_with(
             let duration_s =
                 label.duration_s + search.junction_delay(label.edge, next) + search.duration(next);
             let priority = cost + potential.bound(graph.edge_target[next as usize]);
-            // Landmarks prove no open target is reachable through `next`; the
+            // The potentials prove no open target is reachable through `next`; the
             // open set only shrinks, so that stays true.
             if !priority.is_finite() {
                 continue;

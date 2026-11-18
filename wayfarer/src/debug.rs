@@ -20,8 +20,8 @@ pub(crate) fn unidirectional() -> bool {
 
 /// `WAYFARER_EXACT_STOP`: end bidirectional route searches on the
 /// symmetric stop, exact under merely admissible bounds (about 5x the
-/// visited edges of the default stop on regional routes). Package landmark
-/// bounds are consistent, so the default stop is exact too.
+/// visited edges of the default stop on regional routes). CCH potentials
+/// are consistent, so the default stop is exact too.
 pub(crate) fn exact_stop() -> bool {
     #[cfg(test)]
     if EXACT_STOP.with(std::cell::Cell::get) {
@@ -41,58 +41,69 @@ pub(crate) fn force_exact_stop(value: bool) {
     EXACT_STOP.with(|flag| flag.set(value));
 }
 
-/// Which lower bound route searches use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Potential {
-    /// CCH potentials once `RoutingPackage::prepare_potentials` built them,
-    /// landmarks before (the default).
-    Auto,
-    /// Landmarks only, even with potentials prepared.
-    Alt,
-    /// CCH potentials, prepared on the first search that wants them.
-    Cch,
-}
+const POTENTIALS_UNSET: u8 = u8::MAX;
+static POTENTIALS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(POTENTIALS_UNSET);
 
-const POTENTIAL_UNSET: u8 = u8::MAX;
-static POTENTIAL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(POTENTIAL_UNSET);
-
-fn potential_code(name: &str) -> Option<u8> {
+/// `on` (or empty) → 0, `off` → 1.
+fn potentials_code(name: &str) -> Option<u8> {
     match name {
-        "auto" | "" => Some(0),
-        "alt" => Some(1),
-        "cch" => Some(2),
+        "on" | "" => Some(0),
+        "off" => Some(1),
         _ => None,
     }
 }
 
-/// `WAYFARER_POTENTIAL=auto|alt|cch` (default `auto`), or what
-/// [`set_potential`] set.
-pub(crate) fn potential() -> Potential {
+/// `WAYFARER_POTENTIALS=off`: searches bound with the straight line alone,
+/// not the CCH potentials (or what [`set_potentials`] set).
+pub(crate) fn potentials_off() -> bool {
     use std::sync::atomic::Ordering;
-    let mut code = POTENTIAL.load(Ordering::Relaxed);
-    if code == POTENTIAL_UNSET {
-        code = env_value("WAYFARER_POTENTIAL")
-            .and_then(|value| potential_code(&value))
+    let mut code = POTENTIALS.load(Ordering::Relaxed);
+    if code == POTENTIALS_UNSET {
+        code = env_value("WAYFARER_POTENTIALS")
+            .and_then(|value| potentials_code(&value))
             .unwrap_or(0);
-        POTENTIAL.store(code, Ordering::Relaxed);
+        POTENTIALS.store(code, Ordering::Relaxed);
     }
-    match code {
-        1 => Potential::Alt,
-        2 => Potential::Cch,
-        _ => Potential::Auto,
-    }
+    code == 1
 }
 
-/// Sets [`potential`] for the whole process (harnesses); false for an
-/// unknown name.
-pub(crate) fn set_potential(name: &str) -> bool {
-    match potential_code(name) {
+/// Sets [`potentials_off`] for the whole process (harnesses): `on` or
+/// `off`; false for another name.
+pub(crate) fn set_potentials(name: &str) -> bool {
+    match potentials_code(name) {
         Some(code) => {
-            POTENTIAL.store(code, std::sync::atomic::Ordering::Relaxed);
+            POTENTIALS.store(code, std::sync::atomic::Ordering::Relaxed);
             true
         }
         None => false,
     }
+}
+
+/// `WAYFARER_MATRIX_MODE` (`pairwise` or `rows`): the search mode every
+/// matrix uses (benchmarking).
+pub(crate) fn matrix_mode() -> Option<String> {
+    static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VALUE
+        .get_or_init(|| env_value("WAYFARER_MATRIX_MODE"))
+        .clone()
+}
+
+/// `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS`: the most targets a matrix
+/// searches pairwise, for every profile (benchmarking).
+pub(crate) fn matrix_pairwise_max_targets() -> Option<usize> {
+    static VALUE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| parsed("WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS"))
+}
+
+/// `WAYFARER_CCH_ROW_TARGETS`: the most open target nodes a matrix row
+/// bounds with CCH potentials (benchmarking).
+pub(crate) fn cch_row_targets() -> Option<usize> {
+    static VALUE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| parsed("WAYFARER_CCH_ROW_TARGETS"))
+}
+
+fn parsed(name: &str) -> Option<usize> {
+    env_value(name).and_then(|value| value.parse().ok())
 }
 
 #[cfg(feature = "debug-env")]

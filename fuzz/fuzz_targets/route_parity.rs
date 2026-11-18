@@ -1,7 +1,6 @@
-//! Route parity between the bounds, on the Monaco package (format 2, no
-//! landmarks): CCH potentials on its stored order against plain A* on the
-//! straight-line bound alone (`internals::set_potential("alt")` on a package
-//! without landmarks). Both are exact.
+//! Route parity between the bounds, on the Monaco package: CCH potentials on
+//! its stored order against plain A* on the straight-line bound alone
+//! (`internals::set_potentials("off")`). Both are exact.
 //!
 //! The input picks a profile, two points in Monaco, costing options,
 //! alternatives, and blocks, cost multipliers (raising and discounting) and
@@ -67,8 +66,8 @@ fn summary(result: &Result<LegResult, wayfarer::RouteFailure>) -> String {
     }
 }
 
-fn route(request: &LegRequest, potential: &str) -> Result<LegResult, wayfarer::RouteFailure> {
-    assert!(wayfarer::internals::set_potential(potential));
+fn route(request: &LegRequest, potentials: &str) -> Result<LegResult, wayfarer::RouteFailure> {
+    assert!(wayfarer::internals::set_potentials(potentials));
     engine().route_leg(request.clone())
 }
 
@@ -94,7 +93,7 @@ fuzz_target!(|data: &[u8]| {
     if flags & 4 != 0 {
         // Edges of the plain route: blocked, avoided, or costed by a
         // multiplier below or above 1.
-        let Ok(plain) = route(&request, "auto") else {
+        let Ok(plain) = route(&request, "on") else {
             return;
         };
         if plain.edge_ids.is_empty() {
@@ -116,8 +115,8 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
-    let expected = route(&request, "alt");
-    let actual = route(&request, "auto");
+    let expected = route(&request, "off");
+    let actual = route(&request, "on");
     let context = format!("{profile:?} {origin:?} -> {destination:?}");
     match (&expected, &actual) {
         (Ok(expected), Ok(actual)) => {

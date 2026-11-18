@@ -36,7 +36,7 @@ pub(crate) fn info(args: InfoArgs) -> Result<(), Failure> {
     let counts = package.counts();
     print_json(&json!({
         "formatVersion": package.format_version(),
-        "readableFormats": [MIN_READ_FORMAT_VERSION, ROUTING_PACKAGE_FORMAT_VERSION],
+        "readableFormats": (MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION).collect::<Vec<_>>(),
         "costingModelVersion": metadata.costing_model_version,
         "graphId": metadata.graph_id,
         "countryCode": metadata.country_code,
@@ -46,7 +46,6 @@ pub(crate) fn info(args: InfoArgs) -> Result<(), Failure> {
         "edgeCount": counts.edge_count,
         "sharedInfoCount": counts.shared_info_count,
         "profileColumnCount": counts.column_count,
-        "landmarkCount": counts.landmark_count,
         "quality": {
             "status": metadata.quality.status,
             "reasons": metadata.quality.reasons,

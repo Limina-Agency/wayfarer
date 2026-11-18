@@ -2,8 +2,8 @@
 //!
 //! A request carries a [`RouteCancellation`] in `RouteOptions::cancellation`:
 //! any number of [`CancelToken`]s and an optional deadline. Every search loop
-//! (routes in both directions, overlay patch searches, matrix cells, rows and
-//! buckets, isochrones) checks it on its first visited edge and every
+//! (routes in both directions, overlay patch searches, matrix cells and rows,
+//! isochrones) checks it on its first visited edge and every
 //! [`CHECK_INTERVAL`] after that, on
 //! the same path as the visited-edge budget, and stops; the request then fails
 //! with `RouteError::Cancelled` (a matrix fails each searchable cell with
@@ -187,7 +187,7 @@ mod tests {
             GeoPoint::new(lat, lng + 0.0007)
         }
 
-        /// A residential grid without landmarks (the searches run on their
+        /// A residential grid without a CCH order (the searches run on their
         /// geometric bounds alone and explore widely).
         fn engine() -> &'static RoutingEngine {
             static ENGINE: OnceLock<RoutingEngine> = OnceLock::new();
@@ -221,11 +221,9 @@ mod tests {
                 enhance_road_graph(&mut graph);
                 let options = PackageBuildOptions {
                     profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
-                    // No goal direction: searches flood the grid, so that a
-                    // cancel lands mid-search.
-                    landmark_count: 0,
+                    // No goal direction (no CCH order): searches flood the
+                    // grid, so that a cancel lands mid-search.
                     cch_order: false,
-                    ..PackageBuildOptions::default()
                 };
                 let (package, _) = crate::test_support::package(&graph, &options).unwrap();
                 RoutingEngine::from_package(std::sync::Arc::new(package))
@@ -238,17 +236,15 @@ mod tests {
             OverlayRoute,
             PairwiseMatrix,
             RowMatrix,
-            BucketMatrix,
             Isochrone,
             OverlayIsochrone,
         }
 
-        const KINDS: [Kind; 7] = [
+        const KINDS: [Kind; 6] = [
             Kind::Route,
             Kind::OverlayRoute,
             Kind::PairwiseMatrix,
             Kind::RowMatrix,
-            Kind::BucketMatrix,
             Kind::Isochrone,
             Kind::OverlayIsochrone,
         ];
@@ -357,12 +353,6 @@ mod tests {
                     MatrixMode::Rows,
                     vec![point(0, 0), point(SIDE - 1, 0)],
                     diagonal(16),
-                    MobilityProfile::Wheeled,
-                ),
-                Kind::BucketMatrix => matrix(
-                    MatrixMode::Buckets,
-                    diagonal(8),
-                    diagonal(8),
                     MobilityProfile::Wheeled,
                 ),
                 Kind::Isochrone => isochrone(None),
