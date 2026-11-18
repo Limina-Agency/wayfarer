@@ -1,11 +1,14 @@
-//! Route parity between the two lower bounds, on a Monaco package: the
-//! landmarks, and the CCH potentials of `RoutingPackage::prepare_potentials`.
+//! Route parity between the bounds, on the Monaco package (format 2, no
+//! landmarks): CCH potentials on its stored order against plain A* on the
+//! straight-line bound alone (`internals::set_potential("alt")` on a package
+//! without landmarks). Both are exact.
 //!
 //! The input picks a profile, two points in Monaco, costing options,
 //! alternatives, and blocks, cost multipliers (raising and discounting) and
-//! avoidances on edges of the plain route. Both bounds are exact, so both
-//! engines must agree on the status, the cost and the edge path of the route
-//! and its alternatives.
+//! avoidances on edges of the plain route. Both runs must agree on the
+//! status, the cost and the edge path of the route. Alternatives differ by
+//! design (penalties against via edges); those of the potentials must be
+//! distinct routes within the policy's cost limit.
 
 #![no_main]
 
@@ -17,19 +20,14 @@ use wayfarer::{
     RoutingPackage,
 };
 
-fn engines() -> &'static (RoutingEngine, RoutingEngine) {
-    static ENGINES: OnceLock<(RoutingEngine, RoutingEngine)> = OnceLock::new();
-    ENGINES.get_or_init(|| {
-        let path = wayfarer_fuzz::monaco_package();
-        let landmarks = RoutingPackage::open(path).expect("the Monaco package opens");
-        let potentials = RoutingPackage::open(path).expect("the Monaco package opens");
-        potentials
-            .prepare_potentials()
-            .expect("potentials for Monaco");
-        (
-            RoutingEngine::from_package(Arc::new(landmarks)),
-            RoutingEngine::from_package(Arc::new(potentials)),
-        )
+fn engine() -> &'static RoutingEngine {
+    static ENGINE: OnceLock<RoutingEngine> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let package = RoutingPackage::open(wayfarer_fuzz::monaco_package())
+            .expect("the Monaco package opens");
+        assert_eq!(package.format_version(), 2);
+        package.prepare_potentials().expect("potentials for Monaco");
+        RoutingEngine::from_package(Arc::new(package))
     })
 }
 
@@ -69,15 +67,19 @@ fn summary(result: &Result<LegResult, wayfarer::RouteFailure>) -> String {
     }
 }
 
+fn route(request: &LegRequest, potential: &str) -> Result<LegResult, wayfarer::RouteFailure> {
+    assert!(wayfarer::internals::set_potential(potential));
+    engine().route_leg(request.clone())
+}
+
 fuzz_target!(|data: &[u8]| {
-    let (landmarks, potentials) = engines();
     let mut input = Input(data);
     let profile = PROFILES[usize::from(input.byte()) % PROFILES.len()];
     let (origin, destination) = (input.point(), input.point());
     let flags = input.byte();
     let mut request = LegRequest::new(origin, destination, profile);
     request.options.max_correlation_distance_m = 150;
-    request.options.max_visited_edge_count = Some(500_000);
+    request.options.max_visited_edge_count = Some(2_000_000);
     if flags & 1 != 0 {
         request.options.costing = RouteCostingOptions {
             avoid_motorways: f64::from(input.byte()) / 255.0,
@@ -92,7 +94,7 @@ fuzz_target!(|data: &[u8]| {
     if flags & 4 != 0 {
         // Edges of the plain route: blocked, avoided, or costed by a
         // multiplier below or above 1.
-        let Ok(plain) = landmarks.route_leg(request.clone()) else {
+        let Ok(plain) = route(&request, "auto") else {
             return;
         };
         if plain.edge_ids.is_empty() {
@@ -114,26 +116,35 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
-    let expected = landmarks.route_leg(request.clone());
-    let actual = potentials.route_leg(request);
+    let expected = route(&request, "alt");
+    let actual = route(&request, "auto");
     let context = format!("{profile:?} {origin:?} -> {destination:?}");
     match (&expected, &actual) {
         (Ok(expected), Ok(actual)) => {
             assert!(
                 (expected.cost - actual.cost).abs() <= 1e-9 * expected.cost.abs().max(1.0),
-                "{context}: landmarks {} vs potentials {}",
+                "{context}: straight-line {} vs potentials {}",
                 expected.cost,
                 actual.cost
             );
             assert_eq!(expected.edge_ids, actual.edge_ids, "{context}");
-            let paths = |result: &LegResult| {
-                result
-                    .alternatives
-                    .iter()
-                    .map(|alternative| alternative.edge_ids.clone())
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(paths(expected), paths(actual), "{context}: alternatives");
+            let policy = request.options.alternatives.normalized();
+            assert!(actual.alternatives.len() <= policy.requested_alternative_count);
+            let mut seen = vec![actual.edge_ids.clone()];
+            for alternative in &actual.alternatives {
+                assert!(!alternative.edge_ids.is_empty(), "{context}");
+                assert!(!seen.contains(&alternative.edge_ids), "{context}: duplicate");
+                seen.push(alternative.edge_ids.clone());
+                assert!(
+                    alternative.cost.is_finite() && alternative.cost >= 0.0,
+                    "{context}: {}",
+                    alternative.cost
+                );
+                assert!(
+                    alternative.shared_edge_ratio <= policy.max_shared_edge_ratio + 1e-9,
+                    "{context}"
+                );
+            }
         }
         (Err(expected), Err(actual)) => {
             assert_eq!(
@@ -145,7 +156,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         _ => panic!(
-            "{context}: landmarks {} vs potentials {}",
+            "{context}: straight-line {} vs potentials {}",
             summary(&expected),
             summary(&actual)
         ),
