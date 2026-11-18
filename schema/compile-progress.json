@@ -59,7 +59,7 @@
           "const": "build_package"
         },
         {
-          "description": "ALT landmarks for each profile column.",
+          "description": "ALT landmarks for each profile column (none by default), then the\nnode order of CCH potentials.",
           "type": "string",
           "const": "landmarks"
         },

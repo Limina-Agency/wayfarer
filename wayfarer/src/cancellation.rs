@@ -221,7 +221,10 @@ mod tests {
                 enhance_road_graph(&mut graph);
                 let options = PackageBuildOptions {
                     profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
+                    // No goal direction: searches flood the grid, so that a
+                    // cancel lands mid-search.
                     landmark_count: 0,
+                    cch_order: false,
                     ..PackageBuildOptions::default()
                 };
                 let (package, _) = crate::test_support::package(&graph, &options).unwrap();

@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RouteStatus, RoutingEngine, RoutingPackage};
 use wayfarer_package::format::{
-    HEADER_COUNTS, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, MIN_READ_FORMAT_VERSION, PackageFile,
-    ROUTING_PACKAGE_FORMAT_VERSION, SECTION_COUNT, Section, TABLE_ENTRY_BYTES,
+    HEADER_COUNTS, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, HEADER_VERSION,
+    MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION, Section,
+    TABLE_ENTRY_BYTES, section_count,
 };
 
 #[test]
@@ -81,7 +82,12 @@ fn short_road_request(profile: MobilityProfile) -> LegRequest {
 /// `bytes` with a root checksum that matches its header and section table, as
 /// a hostile package would carry: the checksum guards against corruption only.
 fn resigned(mut bytes: Vec<u8>) -> Vec<u8> {
-    let table_end = HEADER_FIXED_BYTES + SECTION_COUNT * TABLE_ENTRY_BYTES;
+    let version = u32::from_le_bytes(
+        bytes[HEADER_VERSION..HEADER_VERSION + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let table_end = HEADER_FIXED_BYTES + section_count(version) * TABLE_ENTRY_BYTES;
     let mut header = bytes[..HEADER_FIXED_BYTES].to_vec();
     header[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32].fill(0);
     let mut root = blake3::Hasher::new();
@@ -97,7 +103,9 @@ fn resigned(mut bytes: Vec<u8>) -> Vec<u8> {
 /// the `package` fuzz target).
 #[test]
 fn a_landmark_node_out_of_range_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    // Format 1 stores landmarks; format 2 packages, by default, do not.
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/format-1/short_road.mrt");
     let mut bytes = std::fs::read(path).unwrap();
     let entry = HEADER_FIXED_BYTES + Section::LandmarkNode as usize * TABLE_ENTRY_BYTES;
     let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
@@ -152,4 +160,22 @@ fn overflowing_header_counts_are_rejected() {
             );
         }
     }
+}
+
+/// A stored CCH order that is not a permutation of the nodes is rejected
+/// when the package opens: the potentials index by it.
+#[test]
+fn a_cch_order_that_is_not_a_permutation_is_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let mut bytes = std::fs::read(path).unwrap();
+    let entry = HEADER_FIXED_BYTES + Section::CchRank as usize * TABLE_ENTRY_BYTES;
+    let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
+    let len = u64::from_le_bytes(bytes[entry + 8..entry + 16].try_into().unwrap()) as usize;
+    assert!(len >= 8, "the fixture stores a CCH order");
+    // Two nodes of the same rank, then a rank out of range.
+    let first = bytes[offset..offset + 4].to_vec();
+    bytes[offset + 4..offset + 8].copy_from_slice(&first);
+    assert!(RoutingPackage::from_bytes(&resigned(bytes.clone())).is_err());
+    bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(RoutingPackage::from_bytes(&resigned(bytes)).is_err());
 }

@@ -227,7 +227,7 @@ fn persist(graph: &RoadGraph, path: &Path) -> Fixture {
         graph,
         Some(&manifest),
         path,
-        &PackageBuildOptions::default(),
+        &crate::test_support::test_options(),
     )
     .unwrap();
     Fixture {
@@ -7885,21 +7885,37 @@ fn derived_column_walks_match_where_the_column_opens_an_edge_at_a_marked_node() 
     );
 }
 
-/// Engines over the same package file: the fixture's, bounded by landmarks,
-/// and a second opening of the file with CCH potentials prepared.
+/// Engines over the fixture's graph: one package with landmarks and no CCH
+/// order (format 1's bounds), one with the order and no landmarks (what the
+/// compiler writes by default), its potentials prepared.
 fn landmark_and_potential_engines(
     fixture: &Fixture,
     path: &Path,
 ) -> (RoutingEngine, RoutingEngine) {
-    let package = RoutingPackage::open(path).unwrap();
-    let stats = package.prepare_potentials().expect("potentials");
+    let build = |name: &str, landmark_count: usize, cch_order: bool| {
+        let file = path.with_file_name(name);
+        let options = PackageBuildOptions {
+            landmark_count,
+            cch_order,
+            ..PackageBuildOptions::default()
+        };
+        wayfarer_compiler::package_build::write_package(&fixture.graph, None, &file, &options)
+            .unwrap();
+        RoutingPackage::open(&file).unwrap()
+    };
+    let landmarks = build("landmarks.mrt", 16, false);
+    assert!(landmarks.file.view().cch_rank.is_empty());
+    let potentials = build("potentials.mrt", 0, true);
+    assert_eq!(potentials.file.view().landmark_count, 0);
+    let stats = potentials.prepare_potentials().expect("potentials");
+    assert!(stats.stored_order);
     assert_eq!(
         stats.column_count,
-        package.file.view().edge_cost.len() / package.counts().edge_count
+        potentials.file.view().edge_cost.len() / potentials.counts().edge_count
     );
     (
-        RoutingEngine::from_package(fixture.package.clone()),
-        RoutingEngine::from_package(Arc::new(package)),
+        RoutingEngine::from_package(Arc::new(landmarks)),
+        RoutingEngine::from_package(Arc::new(potentials)),
     )
 }
 

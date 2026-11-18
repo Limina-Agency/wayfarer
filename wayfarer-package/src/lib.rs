@@ -57,6 +57,7 @@
 
 pub mod barrier;
 mod cancel;
+pub mod cch_order;
 #[doc(hidden)]
 pub mod codec;
 pub mod format;

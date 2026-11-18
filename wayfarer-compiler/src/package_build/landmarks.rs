@@ -51,7 +51,9 @@ use crate::job::{Job, UnitCounter};
 /// milliseconds of work).
 const CANCEL_CHECK_NODES: usize = 1 << 16;
 
-pub(crate) const DEFAULT_LANDMARK_COUNT: usize = 16;
+/// Landmarks per column a package stores when asked for them
+/// ([`super::PackageBuildOptions::landmark_count`]; the default stores none).
+pub const DEFAULT_LANDMARK_COUNT: usize = 16;
 /// Candidates measured per landmark kept (at most 64 in all: the cover masks
 /// are `u64`).
 const CANDIDATES_PER_LANDMARK: usize = 2;

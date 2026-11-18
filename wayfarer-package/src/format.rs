@@ -16,7 +16,11 @@ compile_error!("the routing package format assumes a little-endian target");
 
 pub const MAGIC: &[u8; 8] = b"MRRPKG\0\x01";
 /// Bump whenever the layout or the meaning of any section changes.
-pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 1;
+///
+/// Format 2 adds [`Section::CchRank`], the node order of CCH potentials, at
+/// the end of the section table; format 1 packages (one section fewer, no
+/// order) still open.
+pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 2;
 /// The oldest format this build still opens. A layout change bumps
 /// [`ROUTING_PACKAGE_FORMAT_VERSION`] and keeps reading the previous format
 /// for at least one release; raising this drops a format, which the release
@@ -224,9 +228,23 @@ pub enum Section {
     LoneInEdge,
     /// The end headings of the `LoneInEdge` edges, in its order.
     LoneHeadingEnd,
+    /// Per node, its rank in the CCH elimination order
+    /// ([`crate::cch_order`]); empty when the package has no order (format
+    /// 1). Format 2 only.
+    CchRank,
 }
 
-pub const SECTION_COUNT: usize = Section::LoneHeadingEnd as usize + 1;
+pub const SECTION_COUNT: usize = Section::CchRank as usize + 1;
+
+/// The sections a package of `version` lists: format 1 ends before
+/// [`Section::CchRank`].
+pub fn section_count(version: u32) -> usize {
+    if version >= 2 {
+        SECTION_COUNT
+    } else {
+        Section::CchRank as usize
+    }
+}
 
 /// The [`Section::EdgeJunction`] byte: bits 0-2 the [`TrafficControl`] a
 /// vehicle meets on the edge before leaving it at its end, bit 3 set when the
@@ -345,6 +363,7 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     8, // LoneInPresent: [node / 64] targets of edges without a twin
     4, // LoneInEdge: edges without a twin, sorted by (target, edge)
     2, // LoneHeadingEnd: their end headings
+    4, // CchRank: [node] rank in the CCH elimination order (format 2)
 ];
 
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
@@ -441,6 +460,7 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "LoneInPresent",
     "LoneInEdge",
     "LoneHeadingEnd",
+    "CchRank",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1269,6 +1289,12 @@ impl PackageFile {
                 }
             }
         }
+        let rank = self.slice::<u32>(Section::CchRank);
+        if !rank.is_empty()
+            && (rank.len() != c.node_count || !crate::cch_order::is_permutation(rank))
+        {
+            return Err(invalid());
+        }
         let present = self.slice::<u64>(Section::LoneInPresent);
         let list = self.slice::<u32>(Section::LoneInEdge);
         if present.len() != c.node_count.div_ceil(64)
@@ -1489,6 +1515,7 @@ impl PackageFile {
             edge_shared_info: self.slice(Section::EdgeSharedInfo),
             heading_start: self.slice(Section::EdgeHeadingStart),
             lone_heading_end: self.slice(Section::LoneHeadingEnd),
+            cch_rank: self.slice(Section::CchRank),
             edge_flags: self.slice(Section::EdgeFlags),
             road_rank: self.slice(Section::EdgeRoadRank),
             edge_junction: self.slice(Section::EdgeJunction),
@@ -1629,10 +1656,11 @@ pub fn parse_header(
             "routing package format {version}, this build reads formats {readable:?}"
         )));
     }
-    if read_u32(HEADER_SECTION_COUNT) as usize != SECTION_COUNT {
+    let listed = section_count(version);
+    if read_u32(HEADER_SECTION_COUNT) as usize != listed {
         return Err(invalid("unexpected section count"));
     }
-    let table_len = SECTION_COUNT * TABLE_ENTRY_BYTES;
+    let table_len = listed * TABLE_ENTRY_BYTES;
     let table_end = HEADER_FIXED_BYTES + table_len;
     if file_len < table_end {
         return Err(invalid("truncated section table"));
@@ -1674,10 +1702,11 @@ pub fn parse_header(
     for (slot, value) in heuristic_cost_per_m.iter_mut().enumerate() {
         *value = read_f64(HEADER_HEURISTIC + slot * 8);
     }
+    // Sections a format does not list stay empty.
     let mut sections = [(0usize, 0usize); SECTION_COUNT];
-    let mut section_hashes = Vec::with_capacity(SECTION_COUNT);
+    let mut section_hashes = Vec::with_capacity(listed);
     let mut previous_end = table_end;
-    for (index, section) in sections.iter_mut().enumerate() {
+    for (index, section) in sections.iter_mut().enumerate().take(listed) {
         let entry = &table[index * TABLE_ENTRY_BYTES..(index + 1) * TABLE_ENTRY_BYTES];
         let read = |at: usize| {
             usize::try_from(u64::from_le_bytes(entry[at..at + 8].try_into().unwrap())).ok()
@@ -1717,6 +1746,9 @@ pub fn parse_header(
 #[derive(Clone, Copy)]
 pub struct Sections<'g> {
     pub first_out: &'g [u32],
+    /// Per node, its rank in the CCH elimination order; empty without one
+    /// (format 1). Checked to be a permutation at open.
+    pub cch_rank: &'g [u32],
     /// Per node its unit vector in fixed point ([`fixed_xyz`]); read through
     /// [`Self::xyz`].
     pub node_xyz_fixed: &'g [i32],

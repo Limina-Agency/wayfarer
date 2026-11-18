@@ -1,12 +1,12 @@
 {
-  "byteLen": 995392,
+  "byteLen": 665408,
   "costingModelVersion": 1,
   "countryCode": "MC",
-  "datasetHash": "0ec999cd93bfbd4c0ed88478eeb8ab81e7dfe8a5667225653bd309449e756732",
+  "datasetHash": "2c86fe9f9e0b22b3c240f53788e8b82444156f629ab4d1ec9b11d6a37863c92e",
   "edgeCount": 8550,
-  "formatVersion": 1,
+  "formatVersion": 2,
   "graphId": "monaco",
-  "landmarkCount": 16,
+  "landmarkCount": 0,
   "nodeCount": 3184,
   "profileColumnCount": 2,
   "quality": {
@@ -21,7 +21,7 @@
   },
   "readableFormats": [
     1,
-    1
+    2
   ],
   "sharedInfoCount": 4307
 }

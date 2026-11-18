@@ -313,7 +313,10 @@ impl RoutingPackage {
         let sections = self.file.view();
         let cch = match crate::debug::potential() {
             crate::debug::Potential::Alt => None,
-            crate::debug::Potential::Auto => self.cch.get(),
+            // A package that stores its order (format 2) builds the
+            // potentials on first use; otherwise only once prepared.
+            crate::debug::Potential::Auto if sections.cch_rank.is_empty() => self.cch.get(),
+            crate::debug::Potential::Auto => self.cch.prepare(&sections),
             crate::debug::Potential::Cch => self.cch.prepare(&sections),
         };
         SearchGraph {

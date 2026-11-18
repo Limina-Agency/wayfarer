@@ -124,6 +124,13 @@
           "default": 0,
           "minimum": 0
         },
+        "cchOrderMs": {
+          "description": "Computing the CCH order (nested dissection).",
+          "type": "integer",
+          "format": "uint128",
+          "default": 0,
+          "minimum": 0
+        },
         "complexRestrictionCount": {
           "type": "integer",
           "format": "uint",
@@ -360,6 +367,7 @@
         "barrierNodeCount",
         "assembleMs",
         "landmarkMs",
+        "cchOrderMs",
         "requestMs",
         "totalMs"
       ]
