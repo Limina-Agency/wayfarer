@@ -80,10 +80,20 @@ pub(crate) struct CostColumn<'c> {
     /// The profile's junction delay model; `None` for walking profiles (see
     /// `SearchGraph::junction_delay`).
     pub junction: Option<JunctionDelay>,
-    /// The stored column whose CCH potentials bound this column, and the
-    /// factor to scale them by: every edge this column can use is usable
-    /// there and costs at least `factor` times as much.
-    pub potential: Option<(usize, f64)>,
+    /// The metric whose CCH potentials bound this column, and the factor to
+    /// scale them by: every edge this column can use is usable there and
+    /// costs at least `factor` times as much.
+    pub potential: Option<(PotentialBase, f64)>,
+}
+
+/// The metric a column's CCH potentials are customized on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PotentialBase {
+    /// A stored cost column (customized with the potentials).
+    Stored(usize),
+    /// A profile's own metric (see [`metric_costs`]), customized on first
+    /// use.
+    Metric(MetricKey),
 }
 
 /// A landmark column: its tables (the package's, or a derived metric's over
@@ -144,9 +154,8 @@ pub(crate) struct DerivedColumn {
     pub build_ms: f64,
     /// The piece kinds the route search walks with (see [`ColumnMarks`]).
     marks: Option<ColumnMarks>,
-    /// See [`CostColumn::potential`]; `None` with landmarks of its own
-    /// metric (scaled potentials would bound worse).
-    potential: Option<(usize, f64)>,
+    /// See [`CostColumn::potential`].
+    potential: Option<(PotentialBase, f64)>,
 }
 
 /// The piece kinds valid for a derived column: those of the stored column
@@ -265,7 +274,7 @@ impl ColumnHandle {
                     }),
                     heuristic_cost_per_m: *heuristic_cost_per_m,
                     junction: *junction,
-                    potential: Some((*column, 1.0)),
+                    potential: Some((PotentialBase::Stored(*column), 1.0)),
                 }
             }
             Self::Derived(derived) => CostColumn {
@@ -388,7 +397,7 @@ impl DerivedColumnCache {
 /// normalized costing options (without the evaluation time), with or without
 /// the paths R5 opens.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct MetricKey {
+pub(crate) struct MetricKey {
     profile: MobilityProfile,
     costing: RouteCostingOptions,
     /// Every path R5 can open, at its package minimum factor: the metric of
@@ -906,9 +915,25 @@ pub(super) fn derive_column(
             } else {
                 1.0
             };
-            (column, factor)
+            (PotentialBase::Stored(column), factor)
         })
         .filter(|(_, factor)| *factor > 0.0);
+    // Where the stored column bounds it poorly (scaled below
+    // `OWN_LANDMARKS_BELOW_SCALE`: Emergency, Tracked) or not at all (SAR
+    // relaxations open edges it cannot use), the profile's own metric does,
+    // when the package has potentials to customize it with.
+    let potential = match potential {
+        Some((base, factor)) if factor >= OWN_LANDMARKS_BELOW_SCALE => Some((base, factor)),
+        stored if view.cch.is_some() => {
+            let metric = key.metric();
+            let costs = metric_costs(view, metric);
+            own_metric_factor(&cost, &costs)
+                .map(|factor| (PotentialBase::Metric(metric), factor))
+                .filter(|(_, own)| stored.is_none_or(|(_, factor)| *own > factor))
+                .or(stored)
+        }
+        stored => stored,
+    };
     DerivedColumn {
         potential,
         duration,
@@ -923,6 +948,33 @@ pub(super) fn derive_column(
         build_ms: started.elapsed().as_secs_f64() * 1e3,
         cost,
     }
+}
+
+/// The factor scaling a metric's costs (`metric`) below a column's
+/// (`cost`): the least ratio over the edges the column can use, with a
+/// margin; `None` when the column can use an edge the metric cannot.
+fn own_metric_factor(cost: &[f32], metric: &[f32]) -> Option<f64> {
+    let (ratio, subset) = cost
+        .par_iter()
+        .zip(metric)
+        .map(|(cost, base)| {
+            if !cost.is_finite() {
+                (f64::INFINITY, true)
+            } else if !base.is_finite() {
+                (f64::INFINITY, false)
+            } else if *base > 0.0 {
+                (f64::from(*cost) / f64::from(*base), true)
+            } else {
+                (f64::INFINITY, true)
+            }
+        })
+        .reduce(|| (f64::INFINITY, true), |a, b| (a.0.min(b.0), a.1 && b.1));
+    let factor = if ratio.is_finite() {
+        ratio * LANDMARK_SCALE_MARGIN
+    } else {
+        1.0
+    };
+    (subset && factor > 0.0).then_some(factor)
 }
 
 /// Whether `derived` should get landmarks of its own metric: its stored
@@ -970,7 +1022,7 @@ fn metric_policy_sar(view: &SearchGraph<'_>, metric: MetricKey) -> Option<SarEdg
 /// SAR relaxations R1 and R2 can open at its cost times their package
 /// minimum factors (and for an R5 metric every path too, at R5's). Every
 /// column of the profile and options costs each edge at least this.
-fn metric_costs(view: &SearchGraph<'_>, metric: MetricKey) -> Vec<f32> {
+pub(crate) fn metric_costs(view: &SearchGraph<'_>, metric: MetricKey) -> Vec<f32> {
     let options = RouteOptions {
         costing: metric.costing,
         ..RouteOptions::default()
@@ -1036,6 +1088,5 @@ impl DerivedColumn {
         self.landmark_column = Some(own.column);
         self.landmark_scale = Some(scale);
         self.own_landmarks = Some(own);
-        self.potential = None;
     }
 }

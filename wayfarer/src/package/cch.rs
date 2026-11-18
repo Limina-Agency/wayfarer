@@ -36,13 +36,14 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::Sections;
+use super::columns::MetricKey;
 
 const NO_NODE: u32 = u32::MAX;
 /// Marks an edge's arc as lower → higher rank in [`CchTopology::edge_arc`].
@@ -114,6 +115,52 @@ pub(crate) struct CchPotentials {
     /// By stored column.
     pub metrics: Vec<CchMetric>,
     pub stats: PotentialStats,
+    /// Metrics of profiles' own costs (`columns::metric_costs`), customized
+    /// on first use, least recently used first.
+    own: Mutex<Vec<(MetricKey, Arc<OwnMetric>)>>,
+}
+
+/// Own metrics kept customized (see [`CchPotentials::own_metric`]).
+const OWN_METRIC_CAPACITY: usize = 4;
+
+/// A metric customized from per-edge costs other than a stored column's,
+/// with those costs.
+pub(crate) struct OwnMetric {
+    pub costs: Vec<f32>,
+    pub metric: CchMetric,
+}
+
+impl CchPotentials {
+    /// The metric of `key`, customized from `costs()` on a miss.
+    pub(crate) fn own_metric(
+        &self,
+        key: MetricKey,
+        costs: impl FnOnce() -> Vec<f32>,
+    ) -> Arc<OwnMetric> {
+        if let Ok(mut own) = self.own.lock()
+            && let Some(at) = own.iter().position(|(k, _)| *k == key)
+        {
+            let entry = own.remove(at);
+            let metric = entry.1.clone();
+            own.push(entry);
+            return metric;
+        }
+        let costs = costs();
+        let metric = Arc::new(OwnMetric {
+            metric: self.topology.customize(&costs),
+            costs,
+        });
+        if let Ok(mut own) = self.own.lock() {
+            if let Some(at) = own.iter().position(|(k, _)| *k == key) {
+                return own[at].1.clone();
+            }
+            if own.len() >= OWN_METRIC_CAPACITY {
+                own.remove(0);
+            }
+            own.push((key, metric.clone()));
+        }
+        metric
+    }
 }
 
 /// A package's potentials, once prepared.
@@ -158,6 +205,7 @@ impl CchPotentials {
             topology,
             metrics,
             stats,
+            own: Mutex::new(Vec::new()),
         })
     }
 }

@@ -18,8 +18,10 @@ use std::collections::BinaryHeap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use wayfarer_package::format::{ColumnPieceKinds, PieceKind};
 
-use super::cch::{CchPotentials, GatedPotential, PotentialGate, PotentialScratch};
-use super::columns::{CostColumn, LandmarkColumn};
+use super::cch::{
+    CchMetric, CchPotentials, GatedPotential, OwnMetric, PotentialGate, PotentialScratch,
+};
+use super::columns::{CostColumn, LandmarkColumn, PotentialBase, metric_costs};
 use super::landmarks::AltBound;
 use super::restrictions::{ComplexAutomata, ROOT};
 use super::{
@@ -46,10 +48,33 @@ type NodeBoundsCache = std::cell::RefCell<(Vec<(f64, f64)>, Vec<u32>)>;
 /// forward, backward, and each side's gated potential.
 type PotentialScratches = [std::cell::RefCell<PotentialScratch>; 4];
 
+/// The metric a [`PotentialPlan`] bounds with, and the costs it was
+/// customized from.
+enum PlanMetric<'g> {
+    Stored(&'g CchMetric, &'g [f32]),
+    Own(std::sync::Arc<OwnMetric>),
+}
+
+impl PlanMetric<'_> {
+    fn metric(&self) -> &CchMetric {
+        match self {
+            Self::Stored(metric, _) => metric,
+            Self::Own(own) => &own.metric,
+        }
+    }
+
+    fn costs(&self) -> &[f32] {
+        match self {
+            Self::Stored(_, costs) => costs,
+            Self::Own(own) => &own.costs,
+        }
+    }
+}
+
 /// How the CCH potentials bound a query (see `Run::potentials`).
 struct PotentialPlan<'g> {
     potentials: &'g CchPotentials,
-    column: usize,
+    metric: PlanMetric<'g>,
     /// Scales the stored column's metric to the query's costs.
     factor: f64,
     /// Whether the query's discount gates join the potentials.
@@ -1242,13 +1267,18 @@ impl<'q> Run<'_, '_, 'q> {
         /// Safety margin on override ratios against rounding in f32 weights.
         const MARGIN: f64 = 1.0 - 1e-6;
         let potentials = g.cch?;
-        let (column, factor) = q.column.potential?;
-        if column >= potentials.metrics.len() {
-            return None;
-        }
-        let stored = g
-            .edge_cost
-            .get(column * g.edge_count..(column + 1) * g.edge_count)?;
+        let (base, factor) = q.column.potential?;
+        let metric = match base {
+            PotentialBase::Stored(column) => PlanMetric::Stored(
+                potentials.metrics.get(column)?,
+                g.edge_cost
+                    .get(column * g.edge_count..(column + 1) * g.edge_count)?,
+            ),
+            PotentialBase::Metric(key) => {
+                PlanMetric::Own(potentials.own_metric(key, || metric_costs(&g, key)))
+            }
+        };
+        let stored = metric.costs();
         let (mut below, mut opened, mut ratio) = (false, false, 1.0f64);
         for (edge, cost) in q.cost_overrides {
             if !cost.is_finite() {
@@ -1265,21 +1295,23 @@ impl<'q> Run<'_, '_, 'q> {
                 }
             }
         }
-        let plan = |factor: f64, gated: bool, floor: f64| PotentialPlan {
+        let (factor, gated, floor) = if !below {
+            (factor, false, 0.0)
+        } else if !q.gates.is_empty() {
+            let floor = if opened { 0.0 } else { ratio.min(1.0) * MARGIN };
+            (factor, true, floor)
+        } else if !opened && ratio > 0.0 {
+            (factor * ratio * MARGIN, false, 0.0)
+        } else {
+            return None;
+        };
+        Some(PotentialPlan {
             potentials,
-            column,
+            metric,
             factor,
             gated,
             floor,
-        };
-        if !below {
-            return Some(plan(factor, false, 0.0));
-        }
-        if !q.gates.is_empty() {
-            let floor = if opened { 0.0 } else { ratio.min(1.0) * MARGIN };
-            return Some(plan(factor, true, floor));
-        }
-        (!opened && ratio > 0.0).then(|| plan(factor * ratio * MARGIN, false, 0.0))
+        })
     }
 
     fn bidirectional_search(
@@ -1338,8 +1370,9 @@ impl<'q> Run<'_, '_, 'q> {
             gates::GatedAlt::new(landmarks, vec![base], seeds, reversed, self.q.gates)
         };
         // CCH potentials in place of the landmarks where they apply.
-        let cch = Self::potentials(g, self.q).map(|plan| {
-            let metric = &plan.potentials.metrics[plan.column];
+        let plan = Self::potentials(g, self.q);
+        let cch = plan.as_ref().map(|plan| {
+            let metric = plan.metric.metric();
             let side = |targets: &[u32], reversed: bool, slot: usize| {
                 let gates = if plan.gated {
                     self.q
