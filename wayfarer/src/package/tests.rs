@@ -7938,6 +7938,40 @@ fn cch_potentials_reuse_a_memo_only_for_the_same_query() {
     }
 }
 
+/// Paged potential slots read the same values as dense ones, and freeing
+/// the pages drops the memo: the next potential for the same query is
+/// computed again rather than read from entries no slot names any more.
+#[test]
+fn cch_paged_potential_slots_match_dense_and_forget_on_release() {
+    use std::cell::RefCell;
+    let dir = tempdir().unwrap();
+    let fixture = persist(&costing_grid_graph(), &dir.path().join("costing.mrt"));
+    let package = &fixture.package;
+    let view = package.file.view();
+    let potentials = package.cch.prepare(&view).expect("potentials").clone();
+    let topology = &potentials.topology;
+    let metric = &potentials.metrics[0];
+    let targets = vec![(0u32, 0.0)];
+    let paged = RefCell::new(cch::PotentialScratch::paged());
+    for release in [false, true, false] {
+        if release {
+            paged.borrow_mut().release();
+            assert_eq!(paged.borrow().page_bytes(), 0);
+        }
+        let dense = RefCell::new(cch::PotentialScratch::default());
+        let expected = cch::CchPotential::new(topology, metric, &targets, false, 0.5, &dense);
+        let actual = cch::CchPotential::new(topology, metric, &targets, false, 0.5, &paged);
+        for node in 0..view.node_count as u32 {
+            assert_eq!(
+                actual.get(node).to_bits(),
+                expected.get(node).to_bits(),
+                "release {release}: node {node}"
+            );
+        }
+        assert!(paged.borrow().page_bytes() > 0);
+    }
+}
+
 #[test]
 fn via_candidates_match_the_reference_listing() {
     let dir = tempdir().unwrap();

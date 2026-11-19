@@ -39,6 +39,7 @@ use wayfarer_package::cch_order::{NodeGraph, is_permutation};
 
 use super::Sections;
 use super::columns::MetricKey;
+use super::paged::PagedSlots;
 
 const NO_NODE: u32 = u32::MAX;
 /// Marks an edge's arc as lower → higher rank in [`CchTopology::edge_arc`].
@@ -511,13 +512,11 @@ fn round_down(value: f64) -> f32 {
 // Potentials
 // -------------------------------------------------------------------------
 
-/// Per-direction query scratch, sized to the node count once and reset by
-/// epochs.
-#[derive(Default)]
+/// Per-direction query scratch, reset by epochs.
 pub(crate) struct PotentialScratch {
     /// By rank: the node's entry in `entries`, valid only when that entry
-    /// names the rank back (a sparse set: never cleared, 4 bytes per node).
-    slot: Vec<u32>,
+    /// names the rank back (a sparse set: never cleared).
+    slot: RankSlots,
     /// The nodes this query touched: rank, `B` (infinite unless an ancestor
     /// of a target, see the module docs) and the memoised potential (NaN
     /// until computed).
@@ -549,12 +548,89 @@ struct ScratchEntry {
 /// Entries a scratch keeps its capacity for between queries.
 const SCRATCH_KEEP: usize = 1 << 16;
 
+/// A scratch's slots by rank. Potential evaluation looks a slot up for
+/// every upward arc on a node's elimination-tree path, so the slots are its
+/// hottest memory: dense (4 bytes per rank of the package, allocated by the
+/// first query) they are a single load; paged they hold only the ranks
+/// queries touched, at a few percent of a drive's time.
+enum RankSlots {
+    Dense(Vec<u32>),
+    Paged(PagedSlots<u32>),
+}
+
+impl RankSlots {
+    #[inline]
+    fn get(&self, rank: u32) -> u32 {
+        match self {
+            Self::Dense(slots) => slots[rank as usize],
+            Self::Paged(slots) => slots.get(rank),
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, rank: u32, index: u32) {
+        match self {
+            Self::Dense(slots) => slots[rank as usize] = index,
+            Self::Paged(slots) => slots.set(rank, index),
+        }
+    }
+
+    fn ensure_len(&mut self, n: usize) {
+        match self {
+            Self::Dense(slots) => {
+                if slots.len() < n {
+                    slots.resize(n, u32::MAX);
+                }
+            }
+            Self::Paged(slots) => slots.ensure_len(n),
+        }
+    }
+}
+
+impl Default for PotentialScratch {
+    /// A scratch with dense slots.
+    fn default() -> Self {
+        Self::with_slots(RankSlots::Dense(Vec::new()))
+    }
+}
+
 impl PotentialScratch {
+    /// A scratch whose slots are allocated in pages as queries touch ranks.
+    pub(crate) fn paged() -> Self {
+        Self::with_slots(RankSlots::Paged(PagedSlots::new(0, u32::MAX)))
+    }
+
+    fn with_slots(slot: RankSlots) -> Self {
+        Self {
+            slot,
+            entries: Vec::new(),
+            ancestors: Vec::new(),
+            path: Vec::new(),
+            key: None,
+        }
+    }
+
+    /// Bytes held by paged slots (dense slots are not counted: they stay for
+    /// the scratch's life).
+    pub(crate) fn page_bytes(&self) -> usize {
+        match &self.slot {
+            RankSlots::Dense(_) => 0,
+            RankSlots::Paged(slots) => slots.page_bytes(),
+        }
+    }
+
+    /// Frees paged slots (and with them the memo: `entries` can no longer
+    /// be found by rank).
+    pub(crate) fn release(&mut self) {
+        if let RankSlots::Paged(slots) = &mut self.slot {
+            slots.release();
+            self.key = None;
+        }
+    }
+
     fn begin(&mut self, n: usize) {
         self.key = None;
-        if self.slot.len() != n {
-            self.slot = vec![u32::MAX; n];
-        }
+        self.slot.ensure_len(n);
         if self.entries.capacity() > SCRATCH_KEEP {
             self.entries = Vec::new();
         } else {
@@ -564,7 +640,7 @@ impl PotentialScratch {
 
     #[inline]
     fn find(&self, rank: u32) -> Option<usize> {
-        let index = self.slot[rank as usize] as usize;
+        let index = self.slot.get(rank) as usize;
         (index < self.entries.len() && self.entries[index].rank == rank).then_some(index)
     }
 
@@ -575,7 +651,7 @@ impl PotentialScratch {
             return index;
         }
         let index = self.entries.len();
-        self.slot[rank as usize] = index as u32;
+        self.slot.set(rank, index as u32);
         self.entries.push(ScratchEntry {
             rank,
             b: f64::INFINITY,
@@ -661,14 +737,14 @@ impl<'a> CchPotential<'a> {
         let toward = if self.reversed { self.up } else { self.down };
         for i in 0..s.ancestors.len() {
             let x = s.ancestors[i];
-            let bx = s.entries[s.slot[x as usize] as usize].b;
+            let bx = s.entries[s.slot.get(x) as usize].b;
             if !bx.is_finite() {
                 continue;
             }
             let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
             for (y, w) in t.up_head[arcs.clone()].iter().zip(&toward[arcs]) {
                 let value = bx + f64::from(*w);
-                let b = &mut s.entries[s.slot[*y as usize] as usize].b;
+                let b = &mut s.entries[s.slot.get(*y) as usize].b;
                 if value < *b {
                     *b = value;
                 }
@@ -733,7 +809,7 @@ impl<'a> CchPotential<'a> {
                     best = b;
                     let arcs = t.first_up[x as usize] as usize..t.first_up[x as usize + 1] as usize;
                     for (y, w) in t.up_head[arcs.clone()].iter().zip(&away[arcs]) {
-                        let value = f64::from(*w) + s.entries[s.slot[*y as usize] as usize].pot;
+                        let value = f64::from(*w) + s.entries[s.slot.get(*y) as usize].pot;
                         if value < best {
                             best = value;
                         }

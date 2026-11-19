@@ -27,6 +27,7 @@
 pub(crate) mod cch;
 pub(crate) mod columns;
 pub(crate) mod destination;
+pub(crate) mod paged;
 pub(crate) mod request;
 pub(crate) mod restrictions;
 pub(crate) mod search;
@@ -61,15 +62,37 @@ pub enum RoutePackageMemoryProfile {
 }
 
 impl RoutePackageMemoryProfile {
-    /// Search states kept between requests (each holds per-edge label slots,
-    /// about 16 bytes per edge once a bidirectional search has run): one per
-    /// matrix thread, so a matrix allocates its states once rather than per
-    /// cell or row.
+    /// Search states kept between requests (each holds the per-edge and
+    /// per-node slots of the parts of the graph its searches reached, up to
+    /// a limit per profile): one per matrix thread, so a matrix allocates its
+    /// states once rather than per cell or row.
     pub fn pooled_search_states(self) -> usize {
         match self {
             Self::Desktop => rayon::current_num_threads().max(4),
             Self::Mobile => self.matrix_threads().unwrap_or(1),
         }
+    }
+
+    /// Bytes of per-edge and per-node search slots a pooled search state
+    /// keeps between requests. A search allocates the slots of the parts of
+    /// the graph it reaches (pages of 1,024 ids); a returned state holding
+    /// more than this frees them all, so a large isochrone or matrix does
+    /// not keep graph-sized memory per pooled state.
+    pub(crate) fn kept_search_page_bytes(self) -> usize {
+        match self {
+            Self::Desktop => 64 << 20,
+            Self::Mobile => 8 << 20,
+        }
+    }
+
+    /// Whether search states of a package of `node_count` nodes page their
+    /// CCH potential slots as well. Dense they cost 4 bytes per node in each
+    /// of a state's (two to four) potential scratches for as long as the
+    /// state is pooled; paged they cost a few percent of a drive's time.
+    /// Desktop keeps them dense up to 4 Mi nodes (16 MiB per scratch).
+    pub(crate) fn paged_potential_slots(self, node_count: usize) -> bool {
+        const DENSE_MAX_NODES: usize = 4 << 20;
+        self == Self::Mobile || node_count > DENSE_MAX_NODES
     }
 
     /// Derived cost columns kept in the LRU (8 bytes per edge each).
@@ -249,14 +272,13 @@ impl RoutingPackage {
         self.memory
     }
 
-    /// Faults the mapped file in, pools one search state with its route
-    /// buffers allocated and derives the cost column a default drive starts
-    /// on, as a service does in the background after opening a source.
+    /// Faults the mapped file in, pools one search state and derives the
+    /// cost column a default drive starts on, as a service does in the
+    /// background after opening a source.
     /// Returns the bytes touched.
     pub fn prefetch(&self) -> usize {
         let bytes = self.file.prefetch_pages();
-        let mut state = self.take_state();
-        state.preallocate_route_buffers(self.counts().edge_count, self.counts().node_count);
+        let state = self.take_state();
         self.return_state(state);
         // The strict column of a default drive (see `destination`), so that
         // it is not derived on the first request.
@@ -311,7 +333,14 @@ impl RoutingPackage {
             .lock()
             .ok()
             .and_then(|mut pool| pool.pop())
-            .unwrap_or_else(|| SearchState::new(self.counts().edge_count))
+            .unwrap_or_else(|| {
+                let counts = self.counts();
+                SearchState::new(
+                    counts.edge_count,
+                    counts.node_count,
+                    self.memory.paged_potential_slots(counts.node_count),
+                )
+            })
     }
 
     pub(crate) fn return_state(&self, mut state: SearchState) {
@@ -319,6 +348,7 @@ impl RoutingPackage {
         if self.memory == RoutePackageMemoryProfile::Mobile {
             state.trim();
         }
+        state.release_pages_over(self.memory.kept_search_page_bytes());
         if let Ok(mut pool) = self.state_pool.lock()
             && pool.len() < self.memory.pooled_search_states()
         {
