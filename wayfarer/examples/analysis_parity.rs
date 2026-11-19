@@ -215,6 +215,13 @@ fn cases(engine: &RoutingEngine) -> Vec<Case> {
             MobilityProfile::OnFoot,
         ),
         (
+            "matrix_krakow_100x100_walk",
+            &krakow,
+            KRAKOW_BOX,
+            100,
+            MobilityProfile::OnFoot,
+        ),
+        (
             "matrix_region_50x50_drive",
             &regional,
             REGION_BOX,
