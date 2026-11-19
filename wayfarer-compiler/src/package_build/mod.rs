@@ -266,19 +266,9 @@ fn without_job<T>(build: impl FnOnce(&Job<'_>) -> T) -> T {
     build(&Job::new(&never, &mut ignore))
 }
 
-/// Profiles whose mode mask overlaps the restriction's (zero applies to all).
+/// Profiles whose mode mask overlaps an edge's or a restriction's (none for
+/// zero: a restriction that binds no routed mode binds no profile).
 fn profile_bits(mobility_mode_mask: u32) -> u8 {
-    ALL_PROFILES.iter().fold(0u8, |bits, profile| {
-        if mobility_mode_mask == 0 || mobility_mode_mask & profile.mobility_mode_mask() != 0 {
-            bits | (1 << profile_slot(*profile))
-        } else {
-            bits
-        }
-    })
-}
-
-/// Profiles whose mode mask overlaps the edge's (no wildcard for zero).
-fn profile_bits_strict(mobility_mode_mask: u32) -> u8 {
     ALL_PROFILES.iter().fold(0u8, |bits, profile| {
         if mobility_mode_mask & profile.mobility_mode_mask() != 0 {
             bits | (1 << profile_slot(*profile))
@@ -286,6 +276,17 @@ fn profile_bits_strict(mobility_mode_mask: u32) -> u8 {
             bits
         }
     })
+}
+
+fn restriction_mobility_mode_mask(restriction: &ResolvedEdgeRestriction) -> u32 {
+    match restriction {
+        ResolvedEdgeRestriction::Simple {
+            mobility_mode_mask, ..
+        }
+        | ResolvedEdgeRestriction::Complex {
+            mobility_mode_mask, ..
+        } => *mobility_mode_mask,
+    }
 }
 
 /// Hilbert index of (x, y) on a 2^16 grid; keeps spatially close nodes close
@@ -632,7 +633,7 @@ fn build_package_from(
         .zip(&edge_shared_info)
         .map(|(raw, shared)| {
             let edge = road_edge(*raw);
-            profile_bits_strict(edge.mobility_mode_mask)
+            profile_bits(edge.mobility_mode_mask)
                 | edge_sar_bits(
                     info_of(*shared).attrs,
                     edge.traversal_direction,
@@ -844,7 +845,13 @@ fn build_package_from(
     };
     let mut simple_by_pair = BTreeMap::<(u64, u64), Vec<(i64, u32)>>::new();
     let mut complex_by_to = BTreeMap::<u64, Vec<(Vec<u64>, u32)>>::new();
-    for restriction in &graph.resolved_restrictions {
+    // A row that binds no profile (a road graph resolved before such
+    // restrictions were left out) would only flag its edges.
+    for restriction in graph
+        .resolved_restrictions
+        .iter()
+        .filter(|restriction| restriction_mobility_mode_mask(restriction) != 0)
+    {
         match restriction {
             ResolvedEdgeRestriction::Simple {
                 from_edge_id,

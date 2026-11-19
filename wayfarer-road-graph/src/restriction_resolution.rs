@@ -107,9 +107,17 @@ pub fn resolve_turn_restrictions_with_report(
         // The mobility modes have no bicycle, bus or truck profile: bicycles
         // share the on-foot modes, which no vehicle's restriction binds, and
         // the wheeled modes are cars. So only the motorcar and foot bits reach
-        // the mobility modes; a `restriction:hgv` stays in the OSM mask alone.
+        // the mobility modes.
         let mobility_mode_mask =
             mobility_mode_mask_from_osm(osm_mode_mask & (OsmMode::MOTOR_VEHICLE | OsmMode::FOOT));
+        // A restriction that binds none of them (`restriction:hgv`, `:bus`,
+        // `:bicycle`, or a plain one with `except=motorcar`) binds no profile,
+        // so it is not resolved: a row with no profile bits would read as one
+        // for every profile. Its modes stay on the raw restriction.
+        if mobility_mode_mask == 0 {
+            report.mode_not_routed_restriction_count += 1;
+            continue;
+        }
         let only = restriction.restriction.starts_with("only_");
         // An `only_*` restriction resolves to bans on the turns it rules out,
         // which may be none at all; it is resolved once its turn is found.
