@@ -865,6 +865,51 @@ mod tests {
     }
 
     #[test]
+    fn active_conditional_destination_access_makes_the_edge_destination_only() {
+        let mut record = first_edge_record(Some("asphalt"));
+        record.shared_info.conditional_restrictions =
+            vec!["motor_vehicle:conditional=destination @ (2026 May 01-2026 Jun 30)".to_string()];
+        let mut request = LegRequest::new(
+            crate::GeoPoint::new(50.0, 20.0),
+            crate::GeoPoint::new(50.0, 20.001),
+            MobilityProfile::Wheeled,
+        );
+        request.options.costing.conditional_restriction_eval_at_ms = Some(1_778_832_000_000);
+        // Usable to reach somewhere on it, not closed ...
+        let EdgeCostDecision::Allowed(plain) =
+            CostingPolicy::new(MobilityProfile::Wheeled, &request.options).edge_cost(&record)
+        else {
+            panic!("a destination-only edge was closed");
+        };
+        // ... but not on the strict pass, and penalized when avoided.
+        assert_eq!(
+            CostingPolicy::with_destination_only_policy(
+                MobilityProfile::Wheeled,
+                &request.options,
+                false
+            )
+            .edge_cost(&record),
+            EdgeCostDecision::NotAccessible
+        );
+        request.options.costing.avoid_destination_only = 1.0;
+        let EdgeCostDecision::Allowed(avoided) =
+            CostingPolicy::new(MobilityProfile::Wheeled, &request.options).edge_cost(&record)
+        else {
+            panic!("a destination-only edge was closed");
+        };
+        assert!(avoided.is_destination_only_penalized);
+        assert!(avoided.cost > plain.cost);
+        // Outside the window the edge is a plain one again.
+        request.options.costing.conditional_restriction_eval_at_ms = Some(1_782_892_800_000);
+        let EdgeCostDecision::Allowed(outside) =
+            CostingPolicy::new(MobilityProfile::Wheeled, &request.options).edge_cost(&record)
+        else {
+            panic!("the edge was closed outside the window");
+        };
+        assert!(!outside.is_destination_only_penalized);
+    }
+
+    #[test]
     fn active_conditional_access_supports_yearless_seasonal_date_ranges() {
         let mut record = first_edge_record(Some("asphalt"));
         record.shared_info.conditional_restrictions =
