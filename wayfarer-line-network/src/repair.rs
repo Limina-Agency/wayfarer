@@ -48,8 +48,8 @@ pub(crate) fn repair_road_crossings(raw_lines: &mut [RawLine], stats: &mut Share
                 .windows(2)
                 .enumerate()
                 .filter_map(move |(segment_index, window)| {
-                    let a = window[0].key;
-                    let b = window[1].key;
+                    let a = window[0].key();
+                    let b = window[1].key();
                     (a != b).then(|| RepairSegment {
                         line_index: line_index as u32,
                         segment_index: u32::try_from(segment_index)
@@ -123,11 +123,19 @@ pub(crate) fn repair_road_crossings(raw_lines: &mut [RawLine], stats: &mut Share
         if line.points.len() < 2 {
             continue;
         }
+        // Lines without a crossing keep their points.
+        if insertions
+            .range((line_index, 0)..(line_index + 1, 0))
+            .next()
+            .is_none()
+        {
+            continue;
+        }
         let mut repaired = Vec::with_capacity(line.points.len());
-        repaired.push(line.points[0].clone());
+        repaired.push(line.points[0]);
         for segment_index in 0..(line.points.len() - 1) {
-            let start = line.points[segment_index].key;
-            let end = line.points[segment_index + 1].key;
+            let start = line.points[segment_index].key();
+            let end = line.points[segment_index + 1].key();
             if let Some(points) = insertions.get(&(line_index, segment_index)) {
                 let mut points = points.iter().copied().collect::<Vec<_>>();
                 points.sort_by(|left, right| {
@@ -135,16 +143,13 @@ pub(crate) fn repair_road_crossings(raw_lines: &mut [RawLine], stats: &mut Share
                         .total_cmp(&point_position_along_segment(start, end, *right))
                 });
                 for point in points {
-                    if repaired.last().map(|last| last.key) != Some(point) {
-                        repaired.push(RawPoint {
-                            key: point,
-                            source_node_id: None,
-                        });
+                    if repaired.last().map(RawPoint::key) != Some(point) {
+                        repaired.push(RawPoint::new(point, None));
                     }
                 }
             }
-            if repaired.last().map(|last| last.key) != Some(end) {
-                repaired.push(line.points[segment_index + 1].clone());
+            if repaired.last().map(RawPoint::key) != Some(end) {
+                repaired.push(line.points[segment_index + 1]);
             }
         }
         stats.topology_repair_split_edges += repaired.len().saturating_sub(line.points.len());

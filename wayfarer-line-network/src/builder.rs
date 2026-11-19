@@ -77,45 +77,54 @@ impl SharedLineNetworkBuilder {
         render_products: bool,
     ) -> SharedLineNetwork {
         // Layer processing order decides topology id assignment; do not reorder.
-        // Stable, as `sort_by` was, so equal inputs keep their push order.
-        self.inputs.par_sort_by(|left, right| {
+        // Equal inputs keep their push order (the index breaks ties), as the
+        // stable `sort_by` this replaces kept them. Sorting indices and
+        // permuting in place needs 4 bytes an input, where sorting the
+        // ~250-byte inputs themselves allocated a buffer as large as them.
+        let inputs = &self.inputs;
+        let mut order =
+            (0..u32::try_from(inputs.len()).expect("fewer than 2^32 inputs")).collect::<Vec<u32>>();
+        order.par_sort_unstable_by(|&left, &right| {
+            let (l, r) = (&inputs[left as usize], &inputs[right as usize]);
             (
-                left.layer,
-                left.min_zoom,
-                left.sort_order,
-                left.feature_id,
-                &left.attrs,
+                l.layer,
+                l.min_zoom,
+                l.sort_order,
+                l.feature_id,
+                &l.attrs,
+                left,
             )
                 .cmp(&(
-                    right.layer,
-                    right.min_zoom,
-                    right.sort_order,
-                    right.feature_id,
-                    &right.attrs,
+                    r.layer,
+                    r.min_zoom,
+                    r.sort_order,
+                    r.feature_id,
+                    &r.attrs,
+                    right,
                 ))
         });
+        permute_in_place(&mut self.inputs, &order);
+        drop(order);
 
         let mut network = SharedLineNetwork::default();
         network.stats.input_lines = self.inputs.len();
 
-        // Move each input into its layer's bucket rather than cloning the
-        // matching ones per layer. The clone was cheap in time (~2% of this
-        // function) but duplicated every input's geometry, node chain and tag
-        // strings, which is a large share of the build's peak memory. Draining
-        // preserves the sorted order within each layer, and the buckets are
-        // consumed in `SHARED_LINE_LAYERS` order so topology node and edge ids
-        // are assigned exactly as before.
+        // Sorted by layer, each layer's inputs are one run: the later layers
+        // are split off the end, and the first keeps the inputs' buffer, so no
+        // input is copied. The buckets are consumed in `SHARED_LINE_LAYERS`
+        // order (the layers' sort order) so topology node and edge ids are
+        // assigned exactly as before.
         let mut buckets: [Vec<SharedLineInput>; SHARED_LINE_LAYERS.len()] =
             std::array::from_fn(|_| Vec::new());
-        for input in self.inputs.drain(..) {
-            if let Some(slot) = SHARED_LINE_LAYERS
-                .iter()
-                .position(|candidate| *candidate == input.layer)
-            {
-                buckets[slot].push(input);
-            }
+        for (slot, layer) in SHARED_LINE_LAYERS.iter().enumerate().rev() {
+            let start = self.inputs.partition_point(|input| input.layer < *layer);
+            buckets[slot] = if start == 0 {
+                std::mem::take(&mut self.inputs)
+            } else {
+                self.inputs.split_off(start)
+            };
         }
-        drop(self.inputs);
+        debug_assert!(self.inputs.is_empty());
 
         observer("inputs_bucketed");
         for layer_inputs in buckets {
@@ -151,8 +160,31 @@ impl SharedLineNetworkBuilder {
     }
 }
 
+/// Puts `items[order[i]]` at `i`, following each cycle of the permutation
+/// with swaps.
+pub(crate) fn permute_in_place<T>(items: &mut [T], order: &[u32]) {
+    debug_assert_eq!(items.len(), order.len());
+    let mut placed = vec![false; items.len()];
+    for start in 0..items.len() {
+        if placed[start] {
+            continue;
+        }
+        let mut at = start;
+        loop {
+            placed[at] = true;
+            let from = order[at] as usize;
+            if from == start {
+                break;
+            }
+            items.swap(at, from);
+            at = from;
+        }
+    }
+}
+
 /// Layer processing order. `append_layer_network` assigns topology node and
-/// edge ids by appending, so this order is part of the output contract.
+/// edge ids by appending, so this order is part of the output contract (and
+/// is the layers' sort order).
 const SHARED_LINE_LAYERS: [SharedLineLayer; 3] = [
     SharedLineLayer::Roads,
     SharedLineLayer::WaterLines,
