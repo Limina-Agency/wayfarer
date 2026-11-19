@@ -85,6 +85,22 @@ impl SharedInfoClasses {
         }
     }
 
+    /// Rebuilds the hash chains for the classes in their current order, as
+    /// interning them in that order would (the classes are distinct).
+    fn reindex(&mut self) {
+        self.by_hash.clear();
+        self.next.clear();
+        for (class, attrs) in self.classes.iter().enumerate() {
+            let head = self
+                .by_hash
+                .insert(class_hash(attrs), class as u32)
+                .unwrap_or(u32::MAX);
+            self.next.push(head);
+        }
+        self.by_hash.shrink_to_fit();
+        self.next.shrink_to_fit();
+    }
+
     pub(crate) fn into_vec(self) -> Vec<SharedEdgeInfo> {
         self.classes
     }
@@ -316,24 +332,34 @@ impl SharedEdgeInfos {
         {
             return;
         }
-        // The used classes move to an exactly sized table, in their new order.
-        let mut by_new = vec![0u32; used as usize];
-        for (old_class, &new) in renumbered.iter().enumerate() {
-            if new != u32::MAX {
-                by_new[new as usize] = old_class as u32;
-            }
-        }
-        let mut old = std::mem::take(&mut self.classes.classes);
-        let mut classes = SharedInfoClasses::with_capacity(by_new.len());
-        for old_class in by_new {
-            let interned = classes.intern(std::mem::take(&mut old[old_class as usize]));
-            debug_assert_eq!(interned as usize, classes.len() - 1);
-        }
-        drop(old);
         for edge in &mut self.edges {
             edge.class = renumbered[edge.class as usize];
         }
-        self.classes = classes;
+        // The classes move to their new places within the table, which is then
+        // cut to the used ones: a second table, built while the first was still
+        // held, was the class table's size again (3M classes of 616 bytes on
+        // Germany). The unused classes are emptied and go after the used ones.
+        let classes = &mut self.classes.classes;
+        let mut place = renumbered;
+        let mut next_unused = used;
+        for (class, slot) in place.iter_mut().enumerate() {
+            if *slot == u32::MAX {
+                classes[class] = SharedEdgeInfo::default();
+                *slot = next_unused;
+                next_unused += 1;
+            }
+        }
+        // Each swap puts one class in its final place.
+        for at in 0..classes.len() {
+            while place[at] as usize != at {
+                let to = place[at] as usize;
+                classes.swap(at, to);
+                place.swap(at, to);
+            }
+        }
+        classes.truncate(used as usize);
+        classes.shrink_to_fit();
+        self.classes.reindex();
     }
 
     /// Every info whole, in order (for snapshots and tests).
@@ -734,5 +760,40 @@ mod class_tests {
         expected[0].name = Some(Arc::from("b"));
         expected[1].name = Some(Arc::from("b"));
         assert_eq!(shared.to_vec(), expected);
+    }
+
+    #[test]
+    fn compact_numbers_classes_by_first_use_and_still_interns() {
+        let infos = vec![
+            info(1, 10, "a"),
+            info(2, 11, "b"),
+            info(3, 12, "c"),
+            info(4, 13, "d"),
+        ];
+        let mut shared = SharedEdgeInfos::from(infos.clone());
+        // Classes a, b, c, d; the infos come to use d, c, d, a.
+        let (a, c, d) = (shared.at(0).class, shared.at(2).class, shared.at(3).class);
+        shared.set_class(0, d);
+        shared.set_class(1, c);
+        shared.set_class(2, d);
+        shared.set_class(3, a);
+        shared.compact();
+        assert_eq!(shared.class_count(), 3);
+        let names = (0..4)
+            .map(|index| (shared.at(index).class, shared.at(index).attrs.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                (0, Some(Arc::from("d"))),
+                (1, Some(Arc::from("c"))),
+                (0, Some(Arc::from("d"))),
+                (2, Some(Arc::from("a"))),
+            ]
+        );
+        // The rebuilt chains find each kept class, and a dropped one is new.
+        assert_eq!(shared.intern(info(9, 20, "a")), 2);
+        assert_eq!(shared.intern(info(9, 20, "d")), 0);
+        assert_eq!(shared.intern(info(9, 20, "b")), 3);
     }
 }
