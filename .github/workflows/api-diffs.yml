@@ -1,0 +1,53 @@
+name: API diffs
+
+# What each pull request does to the public surface, in the job summary:
+# cargo semver-checks of the published library crates against the PR's base,
+# and the diffs of the JSON Schemas, the C header and the pinned C ABI response
+# keys (against the base and the last release). Both are informational: a
+# breaking change is allowed in 0.x, it has to be seen and named in the
+# changelog. The header check is not: a header that disagrees with the library
+# is a bug.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # -eo pipefail: a failing script fails the step through `tee`.
+    shell: bash
+
+jobs:
+  semver:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: semver
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: cargo semver-checks against the base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/api-diffs.sh semver "$BASE_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  surface:
+    name: schema and C header
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The C header declares what the library exports
+        run: scripts/check-c-header.py
+      - name: Schema, header and response key diffs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/api-diffs.sh surface "$BASE_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
