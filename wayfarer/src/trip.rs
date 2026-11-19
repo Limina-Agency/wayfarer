@@ -1645,9 +1645,18 @@ fn validate_overlay(overlay: &RouteOverlay) -> Result<(), RouteFailure> {
     Ok(())
 }
 
+/// [`validate_options`] for the matrix and isochrone entry points, which
+/// fail with a bare [`RouteError`].
+pub(crate) fn validate_query_options(options: &RouteOptions) -> Result<(), RouteError> {
+    validate_options(options).map_err(|failure| failure.error)
+}
+
 fn validate_options(options: &RouteOptions) -> Result<(), RouteFailure> {
     if options.candidate_limit > crate::limits::MAX_REQUEST_CANDIDATES {
         return Err(too_large("candidate limit"));
+    }
+    if options.max_correlation_distance_m > crate::limits::MAX_CORRELATION_DISTANCE_M {
+        return Err(too_large("correlation distance"));
     }
     if options.alternatives.requested_alternative_count > 3 {
         return Err(too_large("alternatives"));
@@ -1926,7 +1935,7 @@ fn validate_dynamic_overlay_totals<'a>(
     Ok(())
 }
 
-fn invalid_point(point: GeoPoint) -> bool {
+pub(crate) fn invalid_point(point: GeoPoint) -> bool {
     !point.lat.is_finite()
         || !point.lng.is_finite()
         || !(-90.0..=90.0).contains(&point.lat)

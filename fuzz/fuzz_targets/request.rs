@@ -1,7 +1,9 @@
 //! Request JSON through the C ABI, on a Monaco package.
 //!
 //! The first byte picks the call; the rest is the request. Every call must
-//! return a status, and any text it hands back must be JSON.
+//! return a status, and any text it hands back must be JSON. A successful
+//! answer stays within `wayfarer::limits`: matrix cells, isochrone buckets
+//! and snap candidates.
 
 #![no_main]
 
@@ -10,6 +12,8 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
+use serde_json::Value;
+use wayfarer::limits::{MAX_ISOCHRONE_CONTOURS, MAX_MATRIX_CELLS, MAX_REQUEST_CANDIDATES};
 use wayfarer_ffi::{
     WAYFARER_OK, WayfarerPackage, wayfarer_isochrone, wayfarer_map_match, wayfarer_matrix,
     wayfarer_open, wayfarer_project, wayfarer_route, wayfarer_snap, wayfarer_string_free,
@@ -65,15 +69,49 @@ fuzz_target!(|data: &[u8]| {
     let Ok(request) = CString::new(request) else {
         return;
     };
-    let call = CALLS[usize::from(which) % CALLS.len()];
+    let which = usize::from(which) % CALLS.len();
     let mut text = ptr::null_mut();
     // SAFETY: a valid package handle, a NUL-terminated request and an
     // out-pointer; the returned text is freed below.
-    let _status = unsafe { call(package(), request.as_ptr(), &mut text) };
+    let status = unsafe { CALLS[which](package(), request.as_ptr(), &mut text) };
     if !text.is_null() {
         // SAFETY: the call returned a NUL-terminated string it allocated.
         let out = unsafe { CStr::from_ptr(text) }.to_str().expect("results are UTF-8");
-        serde_json::from_str::<serde_json::Value>(out).expect("results are JSON");
+        let value = serde_json::from_str::<Value>(out).expect("results are JSON");
+        if status == WAYFARER_OK {
+            check_bounds(which, &value);
+        }
         unsafe { wayfarer_string_free(text) };
     }
 });
+
+/// The number of items in `value[key]`, an array.
+fn count(value: &Value, key: &str) -> usize {
+    value[key].as_array().map_or(0, Vec::len)
+}
+
+/// A successful answer of call `which` (an index into [`CALLS`]) is within
+/// the request limits.
+fn check_bounds(which: usize, value: &Value) {
+    match which {
+        1 => {
+            let cells = count(value, "cells");
+            assert!(cells <= MAX_MATRIX_CELLS, "{cells} matrix cells");
+            let asked = value["sourceCount"].as_u64().zip(value["targetCount"].as_u64());
+            assert_eq!(
+                asked.and_then(|(sources, targets)| sources.checked_mul(targets)),
+                Some(cells as u64),
+                "a cell for every pair"
+            );
+        }
+        2 => {
+            let buckets = count(value, "buckets");
+            assert!(buckets <= MAX_ISOCHRONE_CONTOURS, "{buckets} isochrone buckets");
+        }
+        4 => {
+            let candidates = count(value, "candidates");
+            assert!(candidates <= MAX_REQUEST_CANDIDATES, "{candidates} snap candidates");
+        }
+        _ => {}
+    }
+}

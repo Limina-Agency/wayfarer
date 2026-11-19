@@ -6,6 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
+use crate::limits::MAX_MATRIX_CELLS;
 use crate::package::destination::relax_split_costs;
 use crate::package::search::analysis::{
     AnalysisPath, AnalysisPoint, AnalysisQuery, MatrixTargetCandidate, matrix_cell, matrix_row,
@@ -18,18 +19,69 @@ use crate::package::search::patch::{
 };
 use crate::package::{SearchGraph, profile_bit};
 use crate::search::RoutingEngine;
+use crate::trip::{invalid_point, validate_query_options};
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, MobilityProfile, RouteError, RouteMatrixCell,
     RouteMatrixCellStatus, RouteMatrixRequest, RouteMatrixResult,
 };
 
+impl RouteMatrixRequest {
+    /// Checks the request against [`crate::limits`]: at most
+    /// [`MAX_MATRIX_CELLS`] cells, valid coordinates, and the options a route
+    /// accepts (candidate limit, correlation distance, costing values, edge
+    /// constraints and dynamic overlay caps). [`RoutingEngine::matrix`] runs
+    /// it first; a host that wants a request-level error instead of failed
+    /// cells calls it before.
+    pub fn validate(&self) -> Result<(), RouteError> {
+        if self
+            .sources
+            .len()
+            .checked_mul(self.targets.len())
+            .is_none_or(|cells| cells > MAX_MATRIX_CELLS)
+        {
+            return Err(RouteError::RequestTooLarge {
+                what: "matrix cells",
+            });
+        }
+        if self
+            .sources
+            .iter()
+            .chain(&self.targets)
+            .copied()
+            .any(invalid_point)
+        {
+            return Err(RouteError::InvalidRequest {
+                reason: "location coordinates",
+            });
+        }
+        validate_query_options(&self.options)
+    }
+}
+
 impl RoutingEngine {
+    /// Travel between every source and every target, one cell per pair
+    /// (source-major). A request that fails [`RouteMatrixRequest::validate`]
+    /// fails every cell with the reason, except one with more than
+    /// [`MAX_MATRIX_CELLS`] cells, which gets no cells at all.
     pub fn matrix(&self, request: RouteMatrixRequest) -> RouteMatrixResult {
         let source_count = request.sources.len();
         let target_count = request.targets.len();
+        let request_error = request.validate().err();
+        if source_count.saturating_mul(target_count) > MAX_MATRIX_CELLS {
+            return RouteMatrixResult {
+                source_count,
+                target_count,
+                cells: Vec::new(),
+                source_expansion_count: 0,
+                visited_edge_count: 0,
+                settled_node_count: 0,
+            };
+        }
         let mut cells = matrix_cell_grid(source_count, target_count);
 
-        let graph_error = if !self.route_graph_view().is_ready() {
+        let graph_error = if request_error.is_some() {
+            request_error
+        } else if !self.route_graph_view().is_ready() {
             Some(RouteError::GraphNotReady)
         } else if !self
             .route_graph_view()

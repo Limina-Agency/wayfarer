@@ -577,7 +577,9 @@ pub unsafe extern "C" fn wayfarer_route_with_cancel(
 }
 
 /// Answers `request_json` (a `RouteMatrixRequest`). Unreachable cells are
-/// reported per cell in the `RouteMatrixResult`, not as an error.
+/// reported per cell in the `RouteMatrixResult`, not as an error; a request
+/// beyond the limits (more than 250,000 cells, invalid coordinates or
+/// options) fails with `request_too_large` or `invalid_request`.
 ///
 /// # Safety
 /// As for [`wayfarer_route`].
@@ -607,6 +609,7 @@ pub unsafe extern "C" fn wayfarer_matrix_with_cancel(
         respond(out_json, || {
             let engine = engine(package)?;
             let mut request: RouteMatrixRequest = read_json(request_json, "request")?;
+            request.validate().map_err(|error| Failure::route(&error))?;
             request.options.cancellation = cancellation(cancel);
             let matrix = engine.matrix(request);
             // A cancelled matrix fails every searchable cell alike.
@@ -693,7 +696,8 @@ pub unsafe extern "C" fn wayfarer_map_match(
 /// Snaps `request_json` (a `SnapRequest`: `{"point", "profile",
 /// "maxDistanceM", "candidateLimit", "options"}`) onto the roads its profile
 /// may use. `*out_json` is the `SnapResult`, best candidate first (no
-/// candidate is not an error).
+/// candidate is not an error; a request beyond
+/// [`SnapRequest::validate`]'s limits is).
 ///
 /// # Safety
 /// As for [`wayfarer_route`].
@@ -707,6 +711,7 @@ pub unsafe extern "C" fn wayfarer_snap(
         respond(out_json, || {
             let engine = engine(package)?;
             let request: SnapRequest = read_json(request_json, "request")?;
+            request.validate().map_err(|error| Failure::route(&error))?;
             Ok(engine.snap(request))
         })
     }
@@ -716,7 +721,8 @@ pub unsafe extern "C" fn wayfarer_snap(
 /// "line" | "polygon", "points", "projectionDistanceM"}`) onto the
 /// package's edges, as a route overlay with that geometry would be.
 /// `*out_json` is the `RouteOverlayGeometryProjection`: the edge ids, the
-/// partial ranges and how they were found.
+/// partial ranges and how they were found. The limits are a route overlay's
+/// ([`ProjectRequest::validate`]).
 ///
 /// # Safety
 /// As for [`wayfarer_route`].
@@ -734,6 +740,7 @@ pub unsafe extern "C" fn wayfarer_project(
             {
                 return Err(Failure::invalid("request: points"));
             }
+            request.validate().map_err(|error| Failure::route(&error))?;
             Ok(engine.project(&request))
         })
     }
