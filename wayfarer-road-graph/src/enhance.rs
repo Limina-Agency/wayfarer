@@ -4,6 +4,8 @@
 use super::*;
 
 const ENHANCEMENT_NEAR_DUPLICATE_RADIUS_FIXED: i32 = 25;
+/// Edges whose derived values are computed (in parallel) before they are set.
+const EDGE_UPDATE_CHUNK: usize = 1 << 20;
 const ENHANCEMENT_UNSNAPPED_ENDPOINT_RADIUS_FIXED: i32 = 100;
 const ENHANCEMENT_SMALL_COMPONENT_NODE_LIMIT: usize = 10;
 pub(crate) const ENHANCEMENT_WARNING_EXAMPLE_LIMIT: usize = 32;
@@ -341,116 +343,120 @@ pub fn enhance_road_graph_with(
         node.is_complex_junction = junction_kind == RoadJunctionKind::Complex;
     }
 
-    // Per-edge derivations read only the graph, so they run in parallel; the
-    // results come back in edge order and are applied sequentially below.
-    let edge_updates = graph
-        .graph
-        .raw_edges()
-        .par_iter()
-        .enumerate()
-        .map(|(raw_edge_index, edge_ref)| {
-            let edge_index = EdgeIndex::new(raw_edge_index);
-            let edge = &edge_ref.weight;
-            let component_id = component_ids
-                .get(edge_ref.source().index())
-                .copied()
-                .flatten();
-            let info = shared_edge_info(graph, &info_index_by_id, edge.shared_edge_info_id);
-            let source_index = edge_ref.source().index();
-            let target_index = edge_ref.target().index();
-            let source_degree = if source_index < adjacency.len() {
-                adjacency.degree(source_index)
-            } else {
-                0
-            };
-            let target_degree = if target_index < adjacency.len() {
-                adjacency.degree(target_index)
-            } else {
-                0
-            };
-            let hierarchy_tier = info.map(|info| {
-                promoted_hierarchy_tier(
-                    info.attrs
-                        .hierarchy_tier
-                        .unwrap_or_else(|| base_hierarchy_tier(info.attrs.road_type)),
-                    source_degree,
-                    target_degree,
-                )
-            });
-            let (start_heading, end_heading) = info
-                .and_then(|info| edge_headings_deg(info.geometry, edge.traversal_direction))
-                .unwrap_or((None, None));
-            let inferred_speed = info.map(|info| infer_speed_kph(info.attrs));
-            let minor_approach = info.is_some_and(|info| {
-                end_is_minor_approach(
-                    info.attrs,
-                    target_degree,
-                    incident_roundabout
-                        .get(target_index)
-                        .copied()
-                        .unwrap_or(false),
-                    highest_road_type.get(target_index).copied().flatten(),
-                )
-            });
-            let travel_time = inferred_speed.and_then(|speed| {
-                let speed_mps = speed as f32 * 1000.0 / 3600.0;
-                (speed_mps > 0.0).then_some(edge.distance_m / speed_mps)
-            });
-            (
-                edge_index,
-                component_id,
-                start_heading,
-                end_heading,
-                inferred_speed,
-                travel_time,
-                hierarchy_tier,
-                minor_approach,
-            )
-        })
-        .collect::<Vec<_>>();
-
     // By shared-info position (an id's last position, as `info_index_by_id`
     // answers), so the infos of one id all read the tier its last edge set.
     let mut shared_hierarchy_updates =
         vec![None::<RoadHierarchyTier>; graph.shared_edge_infos.len()];
     // Edges per tier, tallied here and named once below.
     let mut tier_edge_counts = [0usize; 4];
-    for (
-        edge_index,
-        component_id,
-        start_heading,
-        end_heading,
-        inferred_speed,
-        travel_time,
-        hierarchy_tier,
-        minor_approach,
-    ) in edge_updates
-    {
-        if minor_approach {
-            report.minor_approach_edge_count += 1;
-        }
-        if start_heading.is_some() && end_heading.is_some() {
-            report.edges_with_heading_count += 1;
-        }
-        if inferred_speed.is_some() {
-            report.edges_with_inferred_speed_count += 1;
-        }
-        if let Some(edge) = graph.graph.edge_weight_mut(edge_index) {
-            edge.component_id = component_id;
-            edge.start_heading_deg = start_heading;
-            edge.end_heading_deg = end_heading;
-            edge.inferred_speed_kph = inferred_speed;
-            edge.estimated_travel_time_s = travel_time;
-            edge.hierarchy_tier = hierarchy_tier;
-            edge.end_minor_approach = minor_approach;
-            if let Some(tier) = hierarchy_tier {
-                report.hierarchy_prepared_edge_count += 1;
-                tier_edge_counts[tier as usize] += 1;
-                if let Some(info_index) = info_index_by_id.get(edge.shared_edge_info_id) {
-                    shared_hierarchy_updates[info_index] = Some(tier);
+    let edge_count = graph.graph.edge_count();
+    for chunk_start in (0..edge_count).step_by(EDGE_UPDATE_CHUNK) {
+        let chunk_end = (chunk_start + EDGE_UPDATE_CHUNK).min(edge_count);
+        // Per-edge derivations read only the graph, so they run in parallel;
+        // the results come back in edge order and are applied sequentially
+        // below, a chunk at a time, so they are held for one chunk only (a
+        // record of some 40 bytes per edge, over 2 GB on Germany at once).
+        let edge_updates = graph.graph.raw_edges()[chunk_start..chunk_end]
+            .par_iter()
+            .enumerate()
+            .map(|(offset, edge_ref)| {
+                let edge_index = EdgeIndex::new(chunk_start + offset);
+                let edge = &edge_ref.weight;
+                let component_id = component_ids
+                    .get(edge_ref.source().index())
+                    .copied()
+                    .flatten();
+                let info = shared_edge_info(graph, &info_index_by_id, edge.shared_edge_info_id);
+                let source_index = edge_ref.source().index();
+                let target_index = edge_ref.target().index();
+                let source_degree = if source_index < adjacency.len() {
+                    adjacency.degree(source_index)
+                } else {
+                    0
+                };
+                let target_degree = if target_index < adjacency.len() {
+                    adjacency.degree(target_index)
+                } else {
+                    0
+                };
+                let hierarchy_tier = info.map(|info| {
+                    promoted_hierarchy_tier(
+                        info.attrs
+                            .hierarchy_tier
+                            .unwrap_or_else(|| base_hierarchy_tier(info.attrs.road_type)),
+                        source_degree,
+                        target_degree,
+                    )
+                });
+                let (start_heading, end_heading) = info
+                    .and_then(|info| edge_headings_deg(info.geometry, edge.traversal_direction))
+                    .unwrap_or((None, None));
+                let inferred_speed = info.map(|info| infer_speed_kph(info.attrs));
+                let minor_approach = info.is_some_and(|info| {
+                    end_is_minor_approach(
+                        info.attrs,
+                        target_degree,
+                        incident_roundabout
+                            .get(target_index)
+                            .copied()
+                            .unwrap_or(false),
+                        highest_road_type.get(target_index).copied().flatten(),
+                    )
+                });
+                let travel_time = inferred_speed.and_then(|speed| {
+                    let speed_mps = speed as f32 * 1000.0 / 3600.0;
+                    (speed_mps > 0.0).then_some(edge.distance_m / speed_mps)
+                });
+                (
+                    edge_index,
+                    component_id,
+                    start_heading,
+                    end_heading,
+                    inferred_speed,
+                    travel_time,
+                    hierarchy_tier,
+                    minor_approach,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (
+            edge_index,
+            component_id,
+            start_heading,
+            end_heading,
+            inferred_speed,
+            travel_time,
+            hierarchy_tier,
+            minor_approach,
+        ) in edge_updates
+        {
+            if minor_approach {
+                report.minor_approach_edge_count += 1;
+            }
+            if start_heading.is_some() && end_heading.is_some() {
+                report.edges_with_heading_count += 1;
+            }
+            if inferred_speed.is_some() {
+                report.edges_with_inferred_speed_count += 1;
+            }
+            if let Some(edge) = graph.graph.edge_weight_mut(edge_index) {
+                edge.component_id = component_id;
+                edge.start_heading_deg = start_heading;
+                edge.end_heading_deg = end_heading;
+                edge.inferred_speed_kph = inferred_speed;
+                edge.estimated_travel_time_s = travel_time;
+                edge.hierarchy_tier = hierarchy_tier;
+                edge.end_minor_approach = minor_approach;
+                if let Some(tier) = hierarchy_tier {
+                    report.hierarchy_prepared_edge_count += 1;
+                    tier_edge_counts[tier as usize] += 1;
+                    if let Some(info_index) = info_index_by_id.get(edge.shared_edge_info_id) {
+                        shared_hierarchy_updates[info_index] = Some(tier);
+                    }
+                } else {
+                    report.missing_hierarchy_tier_edge_count += 1;
                 }
-            } else {
-                report.missing_hierarchy_tier_edge_count += 1;
             }
         }
     }
