@@ -43,7 +43,7 @@ pub use package_build::{PackageBuildOptions, PackageBuildReport};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wayfarer_line_network::{
     DirectionalAccessModel, RoadRoutingAttrs, SharedLineInput, SharedLineLayer, SharedLineNetwork,
@@ -82,8 +82,8 @@ use route_memberships::CollectedRouteMemberships;
 #[derive(Debug, Clone)]
 pub(crate) struct RoadGraphCompileRequest {
     pub input_pbf_path: PathBuf,
-    /// Scratch space, if the compile needs any (today it writes none: node
-    /// locations are kept in memory). The compile owns it:
+    /// Scratch space (the encoded way facts while the graph is built). The
+    /// compile owns it:
     /// it is removed when the compile ends, whether it succeeds, fails or is
     /// cancelled.
     pub temp_dir: PathBuf,
@@ -430,7 +430,9 @@ fn compile_road_graph_from_pbf(
     drop(phase);
     let phase = Phase::start("shared_line_network_finish");
     report_finalize_checkpoint(job, "before_line_network_finish", 0)?;
-    let inputs = roads.finish();
+    let inputs = roads
+        .finish(&request.temp_dir)
+        .map_err(CompileError::Failed)?;
     drop(phase);
     build_road_graph(
         &request.graph_id,
@@ -485,11 +487,18 @@ struct PendingFerry {
 /// a map for a region (~1M ways) it was ~1.1 GiB live through line-network
 /// finish, graph building and enrichment. Encoded, Małopolskie's 670k ways
 /// take 57 MB plus a 16-byte index entry per way.
+///
+/// Between collection and enrichment the bytes wait in a scratch file
+/// ([`spill`](EncodedWayFacts::spill)): nothing reads them while the line
+/// network and the graph are built, the compile's highest steps before the
+/// package build.
 #[derive(Default)]
 struct EncodedWayFacts {
     /// `(way id, byte offset)`, sorted by way id once collection ends.
     index: Vec<(i64, u64)>,
     bytes: Vec<u8>,
+    /// Where the bytes are while spilled.
+    spilled: Option<PathBuf>,
 }
 
 impl EncodedWayFacts {
@@ -530,7 +539,30 @@ impl EncodedWayFacts {
         self.bytes.shrink_to_fit();
     }
 
+    /// Moves the bytes to a file in `dir` until [`restore`](Self::restore).
+    fn spill(&mut self, dir: &Path) -> Result<(), String> {
+        let path = dir.join("way-facts.spill");
+        std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::write(&path, &self.bytes))
+            .map_err(|error| format!("Failed to spill way facts to {path:?}: {error}"))?;
+        self.bytes = Vec::new();
+        self.spilled = Some(path);
+        Ok(())
+    }
+
+    /// Reads spilled bytes back and removes their file.
+    fn restore(&mut self) -> Result<(), String> {
+        let Some(path) = self.spilled.take() else {
+            return Ok(());
+        };
+        self.bytes = std::fs::read(&path)
+            .and_then(|bytes| std::fs::remove_file(&path).map(|()| bytes))
+            .map_err(|error| format!("Failed to read spilled way facts {path:?}: {error}"))?;
+        Ok(())
+    }
+
     fn get(&self, way_id: i64) -> Result<Option<RoadWayFacts>, String> {
+        debug_assert!(self.spilled.is_none(), "way facts read while spilled");
         let Ok(position) = self.index.binary_search_by_key(&way_id, |(id, _)| *id) else {
             return Ok(None);
         };
@@ -622,8 +654,10 @@ struct UnfinishedRoadInputs {
 }
 
 impl UnfinishedRoadInputs {
-    fn finish(mut self) -> CollectedRoadInputs {
+    /// Builds the line network; the way facts wait in `scratch` meanwhile.
+    fn finish(mut self, scratch: &Path) -> Result<CollectedRoadInputs, String> {
         self.way_facts.seal();
+        self.way_facts.spill(scratch)?;
         // Routing consumes topology only: render products belong exclusively
         // to vector compilation and are never derived here.
         #[cfg(not(feature = "benchmark-profiling"))]
@@ -632,14 +666,14 @@ impl UnfinishedRoadInputs {
         let network = self
             .builder
             .finish_topology_only_with_observer(&mut |name| profiling::checkpoint(name));
-        CollectedRoadInputs {
+        Ok(CollectedRoadInputs {
             network,
             turn_restrictions: self.turn_restrictions,
             route_memberships: self.route_memberships,
             barrier_node_tags: self.barrier_node_tags,
             traffic_controls: self.traffic_controls,
             way_facts: self.way_facts,
-        }
+        })
     }
 }
 
@@ -765,7 +799,7 @@ fn collect_way(way: osm_pbf_ingest::NormalizedWay) -> Result<CollectedWay, Strin
                 min_zoom: road_min_zoom(road_class),
                 max_zoom: 14,
                 sort_order: road_sort_order(road_class),
-                routing: Some(routing),
+                routing: Some(Arc::new(routing)),
             },
             ferry,
         }),
@@ -806,7 +840,7 @@ fn build_road_graph(
         route_memberships,
         barrier_node_tags,
         traffic_controls,
-        way_facts,
+        mut way_facts,
     } = inputs;
     let phase = Phase::start("topology_to_graph_builder");
     let topology_repair_report = topology_repair_report(&network);
@@ -863,6 +897,7 @@ fn build_road_graph(
 
     let phase = Phase::start("graph_source_enrichment");
     let graph_way_ids = graph_way_ids(&road_graph);
+    way_facts.restore().map_err(CompileError::Failed)?;
     road_graph.refresh_shared_edge_way_facts_par_with(|way_id| way_facts.get(way_id))?;
     // Not read again.
     drop(way_facts);

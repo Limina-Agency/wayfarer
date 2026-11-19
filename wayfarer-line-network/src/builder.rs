@@ -10,6 +10,9 @@ pub struct SharedLineNetworkBuilder {
     /// the raw lines and the topology edges built from them all share one
     /// allocation per distinct list rather than one per feature.
     attrs: AttrListInterner,
+    /// Each distinct routing value once, shared by the inputs, their raw
+    /// lines and their topology edges.
+    routing: FxHashSet<Arc<RoadRoutingAttrs>>,
 }
 
 impl SharedLineNetworkBuilder {
@@ -22,6 +25,15 @@ impl SharedLineNetworkBuilder {
             self.attrs.intern(attrs)
         };
         input.compile_inputs = self.attrs.intern_slice(&input.compile_inputs);
+        input.routing = input
+            .routing
+            .map(|routing| match self.routing.get(&*routing) {
+                Some(shared) => Arc::clone(shared),
+                None => {
+                    self.routing.insert(Arc::clone(&routing));
+                    routing
+                }
+            });
         if input.source_lineage_ids.is_empty() {
             input.source_lineage_ids.push(input.feature_id);
         }

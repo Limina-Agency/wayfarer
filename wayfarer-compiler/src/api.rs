@@ -41,11 +41,11 @@ pub struct CompileRequest {
     /// the compile fails with access denied and leaves it intact, so compile
     /// to a new path and switch the engine over.
     pub output: PathBuf,
-    /// Where the compile keeps scratch files, if it needs any (today it
-    /// writes none: node locations are kept in memory). The compile works in
-    /// a fresh directory of its own inside it and removes that directory when
-    /// it ends, whatever the outcome; nothing else in `scratch_dir` is
-    /// touched. Default: the directory of `output`.
+    /// Where the compile keeps scratch files (the encoded way facts while the
+    /// graph is built). The compile works in a fresh directory of its own
+    /// inside it and removes that directory when it ends, whatever the
+    /// outcome; nothing else in `scratch_dir` is touched. Default: the
+    /// directory of `output`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch_dir: Option<PathBuf>,
     /// The package's graph id. Default: the input's file name without
