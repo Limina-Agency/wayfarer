@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rayon::prelude::*;
+
 use crate::correlator::{CandidateSearch, Correlator};
 use crate::costing::{CostedEdge, CostingPolicy, EdgeCostDecision};
 use crate::graph_view::{GraphViewEdge, PackageGraphView};
@@ -16,6 +18,45 @@ use crate::types::{
 };
 
 mod dispatch;
+
+/// Plateaus shorter than this share of the shortest distance are not
+/// locally optimal enough to offer as via alternatives.
+const VIA_MIN_PLATEAU: f64 = 0.15;
+
+/// A plain package route's via candidates (see
+/// `RoutingEngine::via_alternatives`): the plateaus, then the trees the
+/// single-edge candidates are listed from once the plateaus run out.
+struct ViaCandidates {
+    listed: Vec<crate::package::cch::ViaCandidate>,
+    trees: Option<crate::package::cch::ViaTrees>,
+}
+
+/// What a plain package route's via candidates are listed on: the package
+/// graph, its CCH topology, the request column's metric and costs, the
+/// primary's first and last nodes, and its edges (which no candidate uses).
+struct ViaPlan<'g> {
+    graph: crate::package::SearchGraph<'g>,
+    topology: &'g crate::package::cch::CchTopology,
+    metric: &'g crate::package::cch::CchMetric,
+    costs: &'g [f32],
+    source: u32,
+    target: u32,
+    excluded: rustc_hash::FxHashSet<u32>,
+}
+
+/// A via alternative accepted before its legs are built: the found route,
+/// its edges, the primary's diagnostics before it was accepted, and how it
+/// was judged.
+struct AcceptedVia {
+    route: SearchRoute,
+    edges: BTreeSet<u64>,
+    diagnostics: Box<RouteDiagnostics>,
+    label: RouteAlternativeLabel,
+    shared_edge_ratio: f64,
+    warning_edge_count: usize,
+    quality_score: f64,
+    quality_reasons: Vec<String>,
+}
 
 /// A found route before its legs are built: the correlated endpoints, the
 /// traversed edges (with overlay steps when a dynamic overlay shaped it),
@@ -140,13 +181,24 @@ impl RoutingEngine {
                     .collect::<Option<Vec<_>>>()
             })
             .flatten();
-        let mut primary = self.build_result(&request, route, total_started)?;
+        // Via candidates need only the primary's compact edges, not its
+        // legs: they are listed while the legs are built.
+        let policy = request.options.alternatives.normalized();
+        let (primary, listed) = match primary_compact.as_deref() {
+            Some(compact) if policy.requested_alternative_count > 0 => rayon::join(
+                || self.build_result(&request, route, total_started),
+                || self.via_candidates(&request, compact, &policy),
+            ),
+            _ => (self.build_result(&request, route, total_started), None),
+        };
+        let mut primary = primary?;
         primary.alternatives = self
             .find_alternatives(
                 &request,
                 &correlated,
                 &mut primary,
                 primary_compact.as_deref(),
+                listed,
             )
             .map_err(|error| RouteFailure::new(error, primary.diagnostics.clone()))?;
         // Alternatives that stopped are dropped, not reported: the request
@@ -437,6 +489,7 @@ impl RoutingEngine {
         correlated: &Correlated,
         primary: &mut LegResult,
         primary_compact: Option<&[u32]>,
+        listed: Option<ViaCandidates>,
     ) -> Result<Vec<RouteAlternative>, RouteError> {
         let policy = request.options.alternatives.normalized();
         if policy.requested_alternative_count == 0 {
@@ -444,7 +497,7 @@ impl RoutingEngine {
         }
         if let Some(compact) = primary_compact
             && let Some(alternatives) =
-                self.via_alternatives(request, correlated, primary, compact, &policy)?
+                self.via_alternatives(request, correlated, primary, compact, &policy, listed)?
         {
             return Ok(alternatives);
         }
@@ -580,15 +633,16 @@ impl RoutingEngine {
         Ok(alternatives)
     }
 
-    /// Alternatives through via edges (see `package::cch::via_candidates`):
+    /// Alternatives through via edges (see `package::cch::via_plateaus`):
     /// the middles of plateaus, stretches on both the shortest-path tree from
-    /// the origin and the one to the destination, longest first. Each
-    /// candidate is routed as two searches meeting at the middle of its via
-    /// edge (so no turn is made there), then judged as the penalty method's
-    /// candidates are, against the primary and every alternative accepted
-    /// before it. `None` when the request is not a plain package route on a
-    /// package with CCH potentials (overlays, SAR relaxations): the penalty
-    /// method runs instead.
+    /// the origin and the one to the destination, longest first, then single
+    /// edges. Each candidate is routed as two searches meeting at the middle
+    /// of its via edge (so no turn is made there), then judged as the penalty
+    /// method's candidates are, against the primary and every alternative
+    /// accepted before it. `listed`: the candidates, if
+    /// [`RoutingEngine::via_candidates`] already listed them. `None` when the
+    /// request is not a plain package route on a package with CCH potentials
+    /// (overlays, SAR relaxations): the penalty method runs instead.
     fn via_alternatives(
         &self,
         request: &LegRequest,
@@ -596,52 +650,43 @@ impl RoutingEngine {
         primary: &mut LegResult,
         primary_compact: &[u32],
         policy: &RouteAlternativePolicy,
+        listed: Option<ViaCandidates>,
     ) -> Result<Option<Vec<RouteAlternative>>, RouteError> {
-        /// Plateaus shorter than this share of the shortest distance are not
-        /// locally optimal enough to offer.
-        const MIN_PLATEAU: f64 = 0.15;
-        if request.options.dynamic_overlay.is_some()
-            || request.options.sar.is_some()
-            || primary_compact.len() < 3
-        {
-            return Ok(None);
-        }
-        let package = self.route_view().routing_package();
-        let graph = package.view();
-        let Some(potentials) = graph.cch else {
-            return Ok(None);
-        };
-        let handle =
-            package.request_column_sar(request.profile, &request.options.costing, true, None);
-        let column = handle.column(&graph);
-        let Some(plan) = crate::package::search::potential_plan(
-            graph,
-            &column,
-            &rustc_hash::FxHashMap::default(),
-            false,
-        ) else {
-            return Ok(None);
-        };
-        let source = graph.edge_target[primary_compact[0] as usize];
-        let target = graph.edge_source(primary_compact[primary_compact.len() - 1] as usize);
-        if source == target {
-            return Ok(None);
-        }
-        let excluded = primary_compact.iter().copied().collect();
-        let candidates = crate::package::cch::via_candidates(
-            &graph,
-            &potentials.topology,
-            plan.metric.metric(),
-            plan.metric.costs(),
-            source,
-            target,
-            policy.max_cost_ratio,
-            MIN_PLATEAU,
-            &excluded,
-        );
+        self.with_via_plan(request, primary_compact, |plan| {
+            self.via_alternatives_on(plan, request, correlated, primary, policy, listed)
+        })
+        .transpose()
+    }
 
-        let mut alternatives = Vec::<RouteAlternative>::new();
-        let mut accepted_edges = Vec::<BTreeSet<u64>>::new();
+    fn via_alternatives_on(
+        &self,
+        plan: &ViaPlan<'_>,
+        request: &LegRequest,
+        correlated: &Correlated,
+        primary: &mut LegResult,
+        policy: &RouteAlternativePolicy,
+        listed: Option<ViaCandidates>,
+    ) -> Result<Vec<RouteAlternative>, RouteError> {
+        let ViaCandidates {
+            listed: mut candidates,
+            mut trees,
+        } = listed.unwrap_or_else(|| {
+            let (listed, trees) = crate::package::cch::via_plateaus(
+                &plan.graph,
+                plan.topology,
+                plan.metric,
+                plan.costs,
+                plan.source,
+                plan.target,
+                policy.max_cost_ratio,
+                VIA_MIN_PLATEAU,
+                &plan.excluded,
+            );
+            ViaCandidates { listed, trees }
+        });
+
+        // Accepted routes, their legs built once the search is done.
+        let mut accepted = Vec::<AcceptedVia>::new();
         let primary_edges = primary.edge_ids.iter().copied().collect::<BTreeSet<_>>();
         let primary_warning_count =
             warning_edge_count(&primary.edge_ids, &request.options.warning_edge_ids);
@@ -659,10 +704,31 @@ impl RoutingEngine {
         // skipped (they would find it again).
         let attempts = policy.requested_alternative_count.saturating_mul(3).max(1) + 2;
         let mut covered = rustc_hash::FxHashSet::<u32>::default();
-        for candidate in &candidates {
+        let mut next = 0;
+        loop {
             if primary.diagnostics.alternative_attempt_count >= attempts {
                 break;
             }
+            if next == candidates.len() {
+                // The single edges come after the plateaus, so they are
+                // listed only once the plateaus have run out.
+                let Some(trees) = trees.take() else {
+                    break;
+                };
+                candidates = crate::package::cch::via_singles(
+                    &plan.graph,
+                    plan.topology,
+                    plan.costs,
+                    &trees,
+                    &plan.excluded,
+                );
+                next = 0;
+                if candidates.is_empty() {
+                    break;
+                }
+            }
+            let candidate = candidates[next];
+            next += 1;
             if covered.contains(&candidate.edge) {
                 continue;
             }
@@ -674,23 +740,30 @@ impl RoutingEngine {
                 continue;
             };
             let via = via_location(&record, 0.5);
-            let first = self.search_correlated(
-                &half_request,
-                &Correlated {
-                    origins: correlated.origins.clone(),
-                    destinations: vec![via.clone()],
-                    diagnostics: correlated.diagnostics.clone(),
+            // The two halves are independent searches.
+            let (first, second) = rayon::join(
+                || {
+                    self.search_correlated(
+                        &half_request,
+                        &Correlated {
+                            origins: correlated.origins.clone(),
+                            destinations: vec![via.clone()],
+                            diagnostics: correlated.diagnostics.clone(),
+                        },
+                        Instant::now(),
+                    )
                 },
-                Instant::now(),
-            );
-            let second = self.search_correlated(
-                &half_request,
-                &Correlated {
-                    origins: vec![via],
-                    destinations: correlated.destinations.clone(),
-                    diagnostics: correlated.diagnostics.clone(),
+                || {
+                    self.search_correlated(
+                        &half_request,
+                        &Correlated {
+                            origins: vec![via.clone()],
+                            destinations: correlated.destinations.clone(),
+                            diagnostics: correlated.diagnostics.clone(),
+                        },
+                        Instant::now(),
+                    )
                 },
-                Instant::now(),
             );
             let (Ok(first), Ok(second)) = (first, second) else {
                 primary.diagnostics.rejected_alternative_search_failed_count += 1;
@@ -712,7 +785,8 @@ impl RoutingEngine {
                 covered.extend(edges.iter().copied());
             }
             if compact.is_none_or(|edges| {
-                !graph
+                !plan
+                    .graph
                     .restriction_violations(&edges, crate::package::profile_bit(request.profile))
                     .is_empty()
             }) {
@@ -720,18 +794,18 @@ impl RoutingEngine {
                 continue;
             }
             if route.edge_ids == primary.edge_ids
-                || alternatives
+                || accepted
                     .iter()
-                    .any(|alternative| alternative.edge_ids == route.edge_ids)
+                    .any(|alternative| alternative.route.edge_ids == route.edge_ids)
             {
                 primary.diagnostics.rejected_alternative_duplicate_count += 1;
                 continue;
             }
             let pieces = self.traversed_pieces(&route);
             let shared_edge_ratio = shared_length_ratio(&primary_edges, &pieces);
-            let shared_with_accepted = accepted_edges
+            let shared_with_accepted = accepted
                 .iter()
-                .map(|edges| shared_length_ratio(edges, &pieces))
+                .map(|alternative| shared_length_ratio(&alternative.edges, &pieces))
                 .fold(0.0f64, f64::max);
             let route_total = total(route.cost, &route.origin, &route.destination);
             let cost_ratio = if primary_total > f64::EPSILON {
@@ -771,31 +845,136 @@ impl RoutingEngine {
                 warning_difference,
                 policy,
             );
-            accepted_edges.push(route.edge_ids.iter().copied().collect());
-            let route = self
-                .build_result(request, route, Instant::now())
-                .map_err(|failure| failure.error)?;
-            primary.diagnostics.accepted_alternative_count += 1;
-            alternatives.push(RouteAlternative {
+            accepted.push(AcceptedVia {
+                edges: route.edge_ids.iter().copied().collect(),
+                diagnostics: Box::new(primary.diagnostics.clone()),
                 label,
-                edge_ids: route.edge_ids,
-                distance_m: route.distance_m,
-                cost: route.cost,
-                duration_s: route.duration_s,
                 shared_edge_ratio,
                 warning_edge_count: candidate_warning_count,
                 quality_score,
                 quality_reasons,
-                geometry: route.geometry,
-                legs: route.legs,
-                maneuvers: route.maneuvers,
-                diagnostics: route.diagnostics,
+                route,
             });
-            if alternatives.len() >= policy.requested_alternative_count {
+            primary.diagnostics.accepted_alternative_count += 1;
+            if accepted.len() >= policy.requested_alternative_count {
                 break;
             }
         }
-        Ok(Some(alternatives))
+
+        // Legs under the request's own options, as for the primary, all at
+        // once. A failed build fails the request with the diagnostics as they
+        // stood when that route was accepted.
+        let built = accepted
+            .into_par_iter()
+            .map(|alternative| {
+                let AcceptedVia {
+                    route,
+                    diagnostics,
+                    label,
+                    shared_edge_ratio,
+                    warning_edge_count,
+                    quality_score,
+                    quality_reasons,
+                    ..
+                } = alternative;
+                self.build_result(request, route, Instant::now())
+                    .map(|route| RouteAlternative {
+                        label,
+                        edge_ids: route.edge_ids,
+                        distance_m: route.distance_m,
+                        cost: route.cost,
+                        duration_s: route.duration_s,
+                        shared_edge_ratio,
+                        warning_edge_count,
+                        quality_score,
+                        quality_reasons,
+                        geometry: route.geometry,
+                        legs: route.legs,
+                        maneuvers: route.maneuvers,
+                        diagnostics: route.diagnostics,
+                    })
+                    .map_err(|failure| (failure.error, diagnostics))
+            })
+            .collect::<Vec<_>>();
+        let mut alternatives = Vec::with_capacity(built.len());
+        for alternative in built {
+            match alternative {
+                Ok(alternative) => alternatives.push(alternative),
+                Err((error, diagnostics)) => {
+                    primary.diagnostics = *diagnostics;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(alternatives)
+    }
+
+    /// Lists the via candidates of a plain package route (see
+    /// [`RoutingEngine::via_alternatives`]): its plateaus, and the trees for
+    /// its single-edge candidates. `None` when the via method does not apply.
+    fn via_candidates(
+        &self,
+        request: &LegRequest,
+        primary_compact: &[u32],
+        policy: &RouteAlternativePolicy,
+    ) -> Option<ViaCandidates> {
+        self.with_via_plan(request, primary_compact, |plan| {
+            let (listed, trees) = crate::package::cch::via_plateaus(
+                &plan.graph,
+                plan.topology,
+                plan.metric,
+                plan.costs,
+                plan.source,
+                plan.target,
+                policy.max_cost_ratio,
+                VIA_MIN_PLATEAU,
+                &plan.excluded,
+            );
+            ViaCandidates { listed, trees }
+        })
+    }
+
+    /// Runs `work` on what a plain package route's via candidates are
+    /// listed on; `None` when the request is not a plain package route on a
+    /// package with CCH potentials (overlays, SAR relaxations).
+    fn with_via_plan<T>(
+        &self,
+        request: &LegRequest,
+        primary_compact: &[u32],
+        work: impl FnOnce(&ViaPlan<'_>) -> T,
+    ) -> Option<T> {
+        if request.options.dynamic_overlay.is_some()
+            || request.options.sar.is_some()
+            || primary_compact.len() < 3
+        {
+            return None;
+        }
+        let package = self.route_view().routing_package();
+        let graph = package.view();
+        let potentials = graph.cch?;
+        let handle =
+            package.request_column_sar(request.profile, &request.options.costing, true, None);
+        let column = handle.column(&graph);
+        let plan = crate::package::search::potential_plan(
+            graph,
+            &column,
+            &rustc_hash::FxHashMap::default(),
+            false,
+        )?;
+        let source = graph.edge_target[primary_compact[0] as usize];
+        let target = graph.edge_source(primary_compact[primary_compact.len() - 1] as usize);
+        if source == target {
+            return None;
+        }
+        Some(work(&ViaPlan {
+            graph,
+            topology: &potentials.topology,
+            metric: plan.metric.metric(),
+            costs: plan.metric.costs(),
+            source,
+            target,
+            excluded: primary_compact.iter().copied().collect(),
+        }))
     }
 
     /// The pieces a found route traverses: (edge id, compact edge, fraction,
