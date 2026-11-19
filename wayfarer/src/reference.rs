@@ -500,7 +500,9 @@ impl<'a> ReferenceEngine<'a> {
     }
 
     /// One pass over every row, strict or relaxed (see `records`); returns
-    /// the rows expanded.
+    /// the rows expanded. A strict pass unblocks, for each cell, the pockets
+    /// of its own two points only, as a route between them does: a row
+    /// searches its targets in groups by those pockets.
     fn matrix_pass(
         &self,
         request: &RouteMatrixRequest,
@@ -532,6 +534,18 @@ impl<'a> ReferenceEngine<'a> {
         // Connectors, and roads a SAR request opens, may join weak components.
         let has_connectors = model.as_ref().is_some_and(|model| model.has_connectors())
             || crate::sar::SarOpenEdges::of(&request.options).is_some();
+        let pockets = (!allow_destination_only).then(|| self.destination_pockets(request.profile));
+        let pockets_of = |locations: &[CorrelatedLocation]| {
+            let mut found = pockets.map_or_else(Vec::new, |pockets| {
+                locations
+                    .iter()
+                    .filter_map(|location| pockets.pocket_of.get(&location.edge_id).copied())
+                    .collect()
+            });
+            found.sort_unstable();
+            found.dedup();
+            found
+        };
         let mut expansions = 0;
         for (source, origins) in sources.iter().enumerate() {
             if origins.is_empty() {
@@ -554,58 +568,42 @@ impl<'a> ReferenceEngine<'a> {
                 continue;
             }
             expansions += 1;
-            let candidates = open
-                .iter()
-                .flat_map(|target| {
-                    targets[*target]
+            let origin_pockets = pockets_of(origins);
+            let mut groups = std::collections::BTreeMap::<Vec<usize>, Vec<usize>>::new();
+            for target in open {
+                let mut key = origin_pockets.clone();
+                key.extend(pockets_of(&targets[target]));
+                key.sort_unstable();
+                key.dedup();
+                groups.entry(key).or_default().push(target);
+            }
+            let mut paths = vec![None; target_count];
+            for group in groups.into_values() {
+                let records = self.records(
+                    request.profile,
+                    &request.options,
+                    allow_destination_only,
+                    origins
                         .iter()
-                        .map(move |location| (*target, location))
-                })
-                .collect::<Vec<_>>();
-            let paths: Vec<Option<MatrixPath>> = match &model {
-                Some(model) => overlay_search(
+                        .chain(group.iter().flat_map(|target| &targets[*target]))
+                        .map(|location| location.edge_id),
+                );
+                let model = overlay
+                    .as_ref()
+                    .map(|overlay| OverlayModel::new(&records, overlay))
+                    .filter(|model| !model.is_empty());
+                let mut found = self.matrix_row(
                     &records,
-                    model,
+                    model.as_ref(),
                     origins,
-                    candidates,
+                    targets,
+                    &group,
                     target_count,
-                    self.path_context,
-                )
-                .into_iter()
-                .map(|path| path.map(OverlayPath::matrix_path))
-                .collect(),
-                None => {
-                    let mut paths = plain_search(
-                        &records,
-                        origins,
-                        candidates,
-                        target_count,
-                        self.path_context,
-                    );
-                    // A target ahead of an origin on the same edge may be
-                    // reached directly, at the cheapest such pair.
-                    for target in &open {
-                        if let Some(direct) = cheapest_direct(&records, origins, &targets[*target])
-                            && paths[*target].as_ref().is_none_or(|searched| {
-                                direct.total <= searched.total + 1e-7 * searched.total.max(1.0)
-                            })
-                        {
-                            paths[*target] = Some(direct);
-                        }
-                    }
-                    paths
-                        .into_iter()
-                        .map(|path| {
-                            path.map(|path| MatrixPath {
-                                edge_ids: path.edge_ids,
-                                distance_m: path.distance_m,
-                                duration_s: path.duration_s,
-                                cost: path.cost,
-                            })
-                        })
-                        .collect()
+                );
+                for target in group {
+                    paths[target] = found[target].take();
                 }
-            };
+            }
             for (target, path) in paths.into_iter().enumerate() {
                 if targets[target].is_empty() {
                     continue;
@@ -627,6 +625,71 @@ impl<'a> ReferenceEngine<'a> {
             }
         }
         expansions
+    }
+
+    /// The paths from `origins` to the `open` targets, on `records` (with an
+    /// overlay's `model`), by target.
+    fn matrix_row(
+        &self,
+        records: &Records<'_>,
+        model: Option<&OverlayModel<'_>>,
+        origins: &[CorrelatedLocation],
+        targets: &[Vec<CorrelatedLocation>],
+        open: &[usize],
+        target_count: usize,
+    ) -> Vec<Option<MatrixPath>> {
+        let candidates = open
+            .iter()
+            .flat_map(|target| {
+                targets[*target]
+                    .iter()
+                    .map(move |location| (*target, location))
+            })
+            .collect::<Vec<_>>();
+        match model {
+            Some(model) => overlay_search(
+                records,
+                model,
+                origins,
+                candidates,
+                target_count,
+                self.path_context,
+            )
+            .into_iter()
+            .map(|path| path.map(OverlayPath::matrix_path))
+            .collect(),
+            None => {
+                let mut paths = plain_search(
+                    records,
+                    origins,
+                    candidates,
+                    target_count,
+                    self.path_context,
+                );
+                // A target ahead of an origin on the same edge may be
+                // reached directly, at the cheapest such pair.
+                for target in open {
+                    if let Some(direct) = cheapest_direct(records, origins, &targets[*target])
+                        && paths[*target].as_ref().is_none_or(|searched| {
+                            direct.total <= searched.total + 1e-7 * searched.total.max(1.0)
+                        })
+                    {
+                        paths[*target] = Some(direct);
+                    }
+                }
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        path.map(|path| MatrixPath {
+                            edge_ids: path.edge_ids,
+                            distance_m: path.distance_m,
+                            duration_s: path.duration_s,
+                            cost: path.cost,
+                        })
+                    })
+                    .collect()
+            }
+        }
     }
 
     /// One bounded expansion from the origin's candidates. Overlays may only
