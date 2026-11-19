@@ -28,8 +28,8 @@ the costing model releases both.
    `wayfarer-<version>-<target>`) and the C libraries with the header and
    attaches them to the GitHub release, with the package hash of the Monaco
    fixture each `wayfarer` binary writes, for Linux (x86_64,
-   aarch64) and Windows. There are no macOS archives: build from source or
-   `cargo install`.
+   aarch64), Windows and macOS (Apple silicon). There are no Intel macOS
+   archives: build from source or `cargo install`.
 5. **Publish** the crates to crates.io in dependency order:
    `wayfarer-package`, `wayfarer-costing`,
    `wayfarer-road-graph`, `wayfarer`, `wayfarer-service`
