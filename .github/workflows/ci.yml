@@ -102,7 +102,18 @@ jobs:
       TARGET: i686-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      # GitHub-hosted runners fetch from Ubuntu's mirrors, which sometimes
+      # answer 503 for a few minutes: retry rather than fail the job.
+      - name: Install gcc-multilib
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=5 update &&
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends gcc-multilib &&
+              exit 0
+            echo "apt failed (attempt $attempt); retrying in 60 s"
+            sleep 60
+          done
+          exit 1
       - run: rustup toolchain install && rustup target add "$TARGET"
       - uses: Swatinem/rust-cache@v2
         with:
