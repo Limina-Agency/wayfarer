@@ -1,12 +1,15 @@
 # Wayfarer roadmap to 1.0
 
 Status: proposal, written against 0.1.3 (2026-11-17) and updated on
-2026-11-19 against `main` after #23 (to ship as 0.2). Section 2.1 says what
-has landed since. The plan now also covers off-network legs blended with the
-network (sub-lane `FEAT-X`, 6.2.1) and routing across regions, larger
-compiles and streamed cells (lane `REG`, 6.7). It is meant to be argued
-with: every lane lists what it delivers, why, and what has to be decided
-first. Open questions are collected at the end.
+2026-11-19 after the 0.2.0 release. Section 2.1 says what 0.2.0 shipped.
+The plan covers off-network legs blended with the network (sub-lane
+`FEAT-X`, 6.2.1) and routing across regions, larger compiles and streamed
+cells (lane `REG`, 6.7). The lane tables in section 7 include the
+corrections from the feature and regions analyses of 2026-11-19 (code read
+against 0.2.0, Poland compiled on a cloud runner), and 7.14 splits the next
+releases into work packages that can run in parallel. It is meant to be
+argued with: every lane lists what it delivers, why, and what has to be
+decided first. Open questions are collected at the end.
 
 ## 1. What 1.0 means
 
@@ -66,7 +69,7 @@ change gates on two regions, and a quality comparison with Valhalla 3.9.
 - The public API surface is very wide and was not designed for stability
   (section 3).
 
-### 2.1 Since 0.1.3 (on `main`, to ship as 0.2)
+### 2.1 Shipped in 0.2.0 (2026-11-19)
 
 - **The speed-up is chosen: CCH potentials** (PERF-2 to PERF-6). The
   compiler stores a deterministic nested-dissection node order (`CchRank`).
@@ -375,34 +378,57 @@ The connector machinery is the join point: it is exact and the oracle checks
 it. The plan grows it in stages, each usable on its own:
 
 1. **X1, costed access legs (P1, additive).** An endpoint option
-   `offNetwork: {maxRadiusM}`, off by default. The engine makes `Endpoint`
-   connectors from the point to the k best candidate edges within the
-   radius, priced at the profile's off-road pace, and the exact patch search
-   picks the entry by total time. The access stretch is a step with
-   geometry, distance and duration, counted in the totals and flagged. It
-   works for walkers, who have no relaxation today, and for matrix and
-   isochrone origins.
-2. **X2, barriers (P1, format 3).** Access legs don't cross water, rivers
-   without a ford, motorways, railways, fences or walls. The compiler writes
-   a compact barrier-line index (an optional section); candidates whose
+   `offNetwork: {maxRadiusM}`, off by default. Every search already seeds
+   several snap candidates per endpoint with an approach cost (routes, the
+   patch search, matrix rows, isochrones, alternatives, the oracle); X1
+   turns that tie-breaker into real, reported time and distance, so the
+   search picks the entry by total time. It is built on these seeds, not on
+   engine-made `Endpoint` connectors: matrices and isochrones strip
+   connectors, an origin connector disables candidate seeds in the patch
+   search, connector time always equals cost, and past 256 gates the CCH
+   bounds fall back to the straight-line bound. Access costs go into the
+   potentials as offsets (`GatedPotential` takes them), which keeps the
+   bounds tight. The costing crate's off-road pace is too fast for walkers
+   (Legged off-road is faster than on a walkway), so access legs carry a
+   cost factor on top of time (about 2 for walkers, 1.5 for vehicles). The
+   access stretch is a step with geometry, distance and duration, counted
+   in the totals and flagged. It works for walkers, who have no relaxation
+   today, and for matrix and isochrone origins. Matrix rows lose their
+   potentials beyond 8 target nodes, so the candidate count is chosen after
+   measuring 100x100 with X1 on.
+2. **X2, barriers (P1).** Access legs don't cross water, rivers without a
+   ford, motorways, railways, fences or walls. Motorways and trunk
+   motorroads come first and need no new data (X2-lite: derived from edges
+   already in the package through the request grid). The rest needs new
+   data, because the compiler keeps only highway and ferry ways: a compact
+   barrier-line index as a format-3 optional section; candidates whose
    straight line crosses a barrier are dropped.
 3. **X3, terrain-aware pace (P1 for SAR, format 3).** Access legs are priced
    by slope (Tobler) on a coarse DEM grid in the package (FEAT-T4) and by
-   land cover read from the same PBF (wood, scrub, wetland, scree).
-4. **X4, least-cost access paths (P2).** EXP-2's raster search: a fixed-point
+   land cover read from the same PBF (wood, scrub, wetland, scree). Land
+   cover is its own item (X3a, L): the compiler assembles no polygons today,
+   and forests and lakes are mostly multipolygon relations, rasterized at
+   25–50 m into 4-bit classes.
+4. **X4, least-cost access paths (P2).** A raster search: a fixed-point
    friction raster (DEM and land cover) within 3 km of the point, a Dijkstra
-   from the point, and the cheapest cell on each reachable edge emitted as a
-   connector with the traced path as geometry. Integer costs and ties broken
-   by cell index keep it deterministic.
-5. **X5, open-ground shortcuts (P2, likely after 1.0).** Free virtual nodes
-   in the patch search and the oracle, so a path can leave the network
-   mid-route and rejoin it, and isochrones spread off the network from every
-   reached node (team coverage on foot).
+   from the point, and the cheapest cell on each reachable edge fed to the
+   search as a candidate seed (like X1) with the traced path as geometry.
+   Integer costs and ties broken by a global cell index keep it
+   deterministic. EXP-2 prototyped nothing yet.
+5. **X5, off the network beyond the endpoints.** X5a (P2): isochrones that
+   spread off the network from every reached node (team coverage on foot),
+   a joint network-and-raster Dijkstra. X5b (1.x, research): routes that
+   leave the network mid-route and rejoin it; the CCH bounds can't cover a
+   raster, so this needs a new bound model.
 
 X1 is additive and can land any time. R7 then becomes X1 with SAR reporting
-(FEAT-X6), which changes its totals, so that lands inside the API window
-with a migration note. X2 and X3 need sections and ride format 3. Nothing
-here needs the regions work, and the regions work doesn't need it.
+(FEAT-X6): a `costed` opt-in with X1, then the default flips inside the API
+window with a migration note. X2 proper, X3a and the DEM grid need sections
+and land as format-3 optional sections. Nothing here needs the regions work,
+and the regions work doesn't need it, but two hooks must be in the 1.0
+formats: connectors and endpoint candidates are region-qualified on the
+wire, and the DEM and raster grids use one global lattice (fixed arc-second
+cells anchored at 0°, 0°), so neighbouring regions tile exactly.
 
 ### 6.3 Guidance (P1)
 
@@ -475,10 +501,13 @@ hands devices only the parts they need, the way Valhalla serves tiles.
   and sequential. Anything crossing a boundary needs `(region, local)` ids
   and stable references (API-5).
 - Potentials need the whole graph's elimination tree, and their memory grows
-  with the graph: about 135 MB on Małopolskie (1.07 M nodes), so about 1.3 GB
-  for Poland (estimated, 10×), and compile peak 1.2 GiB → about 12 GiB
-  (estimated, PERF lane report). A single package reaches a country on a
-  desktop or server, not a continent, and not a country on a phone.
+  with the graph. Measured on Poland with the 0.2.0 compiler (cloud runner,
+  4 cores): compile 7 min at 10.8 GiB peak, a 1.97 GB package, and an
+  engine that needs 1.6 GiB of potentials plus 0.9 GiB of search arrays
+  sized to the whole graph on its first route (8 s to prepare). The node
+  order is the compile's scaling problem (40 %, about n^1.5). A single
+  package reaches a country on a desktop or server, not a continent, and
+  not a country on a phone.
 - The engine, the service and the C ABI open one file; results and overlay
   sets bind to one dataset hash.
 - Features that need whole shortest-path trees (via-edge alternatives,
@@ -502,25 +531,35 @@ structure that stays exact.
 **Portals (B)**
 
 - *Cut and ownership.* Each region compiles with a boundary polygon (admin
-  areas, a drawn search area, or a grid). An edge belongs to the region
-  holding its midpoint. Edges crossing the boundary are portal edges, kept
-  in both packages and named by stable reference (OSM way, from and to OSM
-  nodes, direction), so neighbours compiled apart still agree. Portals are
-  edges, not node separators, so turn costs and restrictions at the seam stay
-  inside one region's search; a compile rule moves the cut off via-way
-  restrictions.
+  areas, a drawn search area, or a grid) and a halo of its neighbour's data
+  (complete ways within a few km), because way splitting at shared nodes,
+  crossing repair, plaza synthesis and inference all look at neighbouring
+  geometry. Nodes have owners; a portal is an edge whose ends have
+  different owners, kept in both packages with the foreign end as a stub,
+  and named by stable reference (OSM way, from and to OSM nodes,
+  direction), so neighbours compiled apart still agree. The cut follows a
+  minimum edge cut within a band around the polygon's border (±5 km cuts
+  portals 4–5.5× against a straight or legal border), and never passes
+  through synthetic ids, via-way restrictions, ferries or barrier nodes.
+  Portals are edges, not node separators, so turn costs and restrictions at
+  the seam stay inside one region's search.
 - *Per region and stored metric:* a portal table and a portal-to-portal
   distance matrix (a clique), computed after customization with the existing
   matrix search, stored as optional sections or computed at open.
 - *Bundle index:* regions, extents, hashes, portal pairs, and the overlay
   graph of cliques with its own CCH order, so the overlay search is bounded
   by potentials too.
-- *Query:* full searches in the origin and destination regions to and from
-  their portals, the overlay graph in between. Overlay arcs through other
-  regions are unpacked by a search inside that region, which only then needs
-  to be open. Exact as long as per-request overlays stay out of intermediate
-  regions; when one doesn't, that region is searched in full (exact, slower)
-  or its clique re-customized for the request.
+- *Query, two searches.* (b) **Potential-guided, built first:** every
+  region keeps its own CCH; portal *bounds* (CCH distances between portal
+  nodes, cheap) give each region's portals an offset towards the targets,
+  and the region's potential is `CchPotential::with_offsets(targets ∪
+  portals)`, which exists today. The A* runs edge-based over the regions
+  along the corridor, so it stays exact for everything a request can carry
+  (overlays, profile options, SAR relaxations, conditionals, connectors) and
+  the oracle argument is unchanged. (a) **Overlay-exact, the fast path:**
+  exact cliques per region and stored column, full searches only in the end
+  regions; exact only for plain stored-column requests, and it falls back
+  to (b) for anything else.
 - *Updates:* recompiling one region changes only its package and the index;
   neighbours keep their bytes. This is EXP-6's per-partition rebuild without
   renumbering the rest.
@@ -548,13 +587,16 @@ structure that stays exact.
 
 - *Before 1.0, so 1.x stays additive:* region-ready stable references, and
   `(region, edge)` in results and overlay sets (API-5, API-6, REG-4); format
-  3 with an optional-section table, region identity and reserved portal
-  sections (REG-3); C ABI 2 open taking a source (FFI-4); the single-package
-  country compile measured and fixed (option A, REG-1, REG-2); and one
-  prototype of two packages joined at a seam (EXP-5b) before format 3 is
-  frozen.
-- *After 1.0:* bundles (B), cells and streaming (C), the server, per-region
-  updates (REG-5 to REG-9).
+  3 with a tagged optional-section table, region identity, an identity hash
+  separate from the content hash, and reserved portal and cell sections
+  (REG-3); cell-major numbering in the format-3 compiler (REG-13); C ABI 2
+  open taking a source (FFI-4); the single-package country compile measured
+  and fixed (option A, REG-1, REG-2); search state sized by what a search
+  touches (REG-12, no format change); and the potential-guided search
+  prototyped across a seam (EXP-5b) before format 3 is frozen.
+- *After 1.0:* the paged package for devices (stored potentials, cell
+  directory, lazy validation: REG-10, REG-13), bundles (B), cells and
+  streaming (C), the server, per-region updates (REG-5a to REG-9).
 
 ## 7. Lanes and releases
 
@@ -585,7 +627,7 @@ of **gates** at fixed versions says when breaking changes stop.
 | Tooling on | by 0.5 | Semver, schema and C header diffs run on every PR (informational) |
 | API redesign window | 0.10 – 0.39 | The API lane's breaking items land here, one area per release |
 | Breaking cut-off | 0.80 | After this, only the hardening review may break anything |
-| Format 3 | one release, 0.12 – 0.39 | The only package-format bump left before 1.0 (format 2 ships in 0.2), carrying every item that needs a section (7.12) |
+| Format 3 | one release, 0.12 – 0.39 | The only package-format bump left before 1.0 (format 2 shipped in 0.2). It carries the changes to existing layouts and the optional-section table; content sections (elevation, barriers, land cover, bicycle data, cells) follow as optional sections without another bump (7.12) |
 | Freeze | 0.90 | API, wire format, C ABI, package format and costing model frozen; diffs become blocking; releases are candidates |
 | 1.0 | — | Stability contract (section 4) published and enforced |
 
@@ -627,7 +669,11 @@ Status on `main` (2026-11-19): PERF-2 to PERF-7 and PERF-10 are done (CCH
 potentials; format 2, with format 1 dropped rather than still read;
 via-edge alternatives; 176 MiB on Małopolskie). PERF-8 changed: bucket
 many-to-many was removed, because pairwise cells bounded by the potentials
-were faster. PERF-5's 30 ms target is met (drives p95 9.3 ms).
+were faster. PERF-5's 30 ms target is met (drives p95 9.3 ms). Leg
+building is 57–69 % of drive time on Małopolskie (perf analysis in
+progress, 2026-11-19), so PERF-13 leads 0.3; PERF-13 to PERF-16 will be
+re-scoped from that analysis. REG-12 (7.8) covers the search arrays'
+share of memory.
 
 ### 7.5 Lane: FFI, bindings and portability (`FFI`)
 
@@ -675,67 +721,87 @@ Sub-lanes run independently of each other.
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-T1 | DEM ingest at compile time (SRTM / Copernicus GLO-30), deterministic, per-edge climb and descent | P1 | — |
-| FEAT-T2 | Elevation costing on foot (Tobler) for `OnFoot` and `Legged`; elevation profile in results | P1 | FEAT-T1 |
+| FEAT-T0 | Incline costing scaffold on OSM `incline` (format 2, opt-in), plumbing for T2; `incline_percent` in edge attributes | P2 | — |
+| FEAT-T1 | DEM ingest at compile time (SRTM HGT, GeoTIFF; integer sampling), per-segment climb, descent and Tobler factor (about 6 % of the package). Reader and sampler behind `experimental-elevation` first; storage as a format-3 optional section | P1 | REG-3 for storage |
+| FEAT-T2 | Elevation costing on foot (Tobler) for `OnFoot` and `Legged` (costing model 2 only in packages with elevation); elevation profile in results | P1 | FEAT-T1 |
 | FEAT-T3 | Vehicle grade costing | P2 | FEAT-T1 |
-| FEAT-T4 | Coarse DEM grid in the package for off-network legs | P1 | FEAT-T1, REG-3 |
+| FEAT-T4 | Coarse DEM grid (3″, global lattice) in the package for off-network legs | P1 | FEAT-T1, REG-3, REG-11 |
+| FEAT-T5 | Height lookup query on the DEM grid | P2 | FEAT-T4 |
 
 **`FEAT-X` Off-network legs blended with the network** (6.2.1)
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-X1 | Costed access legs: endpoint `offNetwork` option, engine-made connectors to the k best candidate edges, exact choice of the entry, the stretch counted in totals; walkers too; matrix and isochrone origins | P1 | — |
-| FEAT-X2 | Access legs don't cross barriers (water, rail, motorways, fences), from a compiled barrier index | P1 | REG-3 |
-| FEAT-X3 | Terrain-aware access pace: Tobler on the coarse DEM grid, OSM land cover | P1 | FEAT-T4 |
-| FEAT-X4 | Least-cost access paths over a local friction raster (EXP-2's prototype) | P2 | FEAT-X3 |
-| FEAT-X5 | Free virtual nodes: open-ground shortcuts mid-route; isochrones spreading off the network | P2 | FEAT-X4 |
-| FEAT-X6 | R7 `off_network` rebuilt on X1: costed and reported (breaking, migration note) | P1 | FEAT-X1, API window |
+| FEAT-X1 | Costed access legs (M): endpoint `offNetwork` option on the existing candidate seeds, a cost factor on top of time, access costs as potential offsets, the stretch counted in totals; walkers too; matrix and isochrone origins | P1 | approach offsets (QW-3), two-phase snapping (QW-2) |
+| FEAT-X1b | Automatic choice between a direct and a routed leg | P1 | FEAT-X1 |
+| FEAT-X2a | X2-lite: access legs don't cross motorways and trunk motorroads, derived from package edges (no format change) | P1 | FEAT-X1 |
+| FEAT-X2 | Access legs don't cross water, rail or fences, from a barrier-line optional section (M–L) | P1 | REG-3 |
+| FEAT-X3a | Land cover: polygons and multipolygons assembled in the compiler, rasterized into an optional section (L) | P1 | REG-3, REG-11 |
+| FEAT-X3 | Terrain-aware access pace: Tobler on the coarse DEM grid, land cover (M) | P1 | FEAT-T4, FEAT-X3a |
+| FEAT-X4 | Least-cost access paths over a local friction raster, fed as candidate seeds (L) | P2 | FEAT-X3 |
+| FEAT-X5a | Isochrones spreading off the network (L) | P2 | FEAT-X4 |
+| FEAT-X5b | Open-ground shortcuts mid-route (XL, research, 1.x: needs a bound model beyond CCH gates) | P2 | FEAT-X4 |
+| FEAT-X6 | R7 `off_network` rebuilt on X1: `costed` opt-in with X1, default flipped in the API window with a migration note (S–M) | P1 | FEAT-X1, API window |
 
 **`FEAT-P` Profiles**
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-P1 | Bicycle preset (access already read) | P1 | API-7 |
-| FEAT-P2 | Truck preset: dimensions and weights (`maxheight`, `maxweight` already parsed) | P1 | API-7 |
-| FEAT-P3 | Motorcycle preset | P2 | API-7 |
+| FEAT-P0a | Bug: bicycle-only ways open to walkers | P0 | — |
+| FEAT-P0b | Bug: conditional keys bind the wrong profiles (`bicycle:conditional` closes walkers); `destination`/`private` treated as closures | P0 | — |
+| FEAT-P0c | Bug: mode-specific turn restrictions (`restriction:hgv`, `except=motorcar`, …) ban the turn for every profile | P0 | — |
+| FEAT-P0d | Bug: busways open to cars | P0 | — |
+| FEAT-P1 | Bicycle preset: needs a profile slot (u16 access with a slot table) | P1 | format 3, API-7 (wire shape) |
+| FEAT-P2 | Truck preset: a Wheeled-derived column from the format-2 data (height, width, weight, axle load, `maxspeed:hgv`, HGV access); `restriction:hgv`, `maxlength`, hazmat in format 3 | P1 | API-7 (wire shape only) |
+| FEAT-P3 | Motorcycle preset | P2 | FEAT-P2 |
+| FEAT-P4 | Baked profiles as a compile option | P1 | — |
 
 **`FEAT-W` Time**
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-W1 | Depart-at with restrictions and overlay windows evaluated along the route | P1 | API-7 |
+| FEAT-W0 | One evaluation time in local time: `departure_at_ms` drives conditionals, package `timeZone` (POSIX rule) or a request offset, per-leg departure; parser fixes (`;` in parentheses, `AND`, `24:00`) | P0 | — |
+| FEAT-W1 | Depart-at with restrictions and overlay windows evaluated along the route | P1 | FEAT-W0, API-7a |
 | FEAT-W2 | Arrive-by | P1 | FEAT-W1 |
-| FEAT-W3 | Bulk speed-file input (traffic, historical speeds) as speed overlays | P2 | API-6 |
+| FEAT-W3 | Bulk speed layer (engine-level derived column) for traffic and historical speeds | P2 | API-6 |
+| FEAT-W4 | Conditional turn restrictions (`restriction:conditional`, ignored today) | P2 | format 3, FEAT-W0 |
 
 **`FEAT-A` Analysis (SAR field tools)**
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-A1 | Isochrone polygons as GeoJSON | P1 | FFI-6 |
-| FEAT-A2 | Multi-origin isochrones (team coverage) | P1 | — |
+| FEAT-A1 | Isochrone polygons as GeoJSON (marching squares on a scalar grid); after A2 so multi-origin polygons ship once | P1 | — |
+| FEAT-A2 | Multi-origin isochrones (team coverage): core S, offsets and attribution M | P1 | — |
 | FEAT-A3 | Reverse isochrones (arrive-at) | P1 | — |
 | FEAT-A4 | Nearest-k targets by travel time | P1 | — |
-| FEAT-A5 | Trip optimization, exact for small N | P1 | — |
-| FEAT-A6 | Trip optimization, heuristic for larger N | P2 | FEAT-A5, PERF-8 |
+| FEAT-A5 | Trip optimization, exact for small N (Held-Karp to 13 stops) | P1 | — |
+| FEAT-A6 | Trip optimization, heuristic for larger N | P2 | FEAT-A5, PERF-15 |
 | FEAT-A7 | Map matching attributes per sample | P2 | — |
+| FEAT-A8 | Polygon reachability (time to reach an area, coverage of an area) | P1 | FEAT-A2, FEAT-A4 |
+| FEAT-A9 | Distance contours | P1 | — |
+| FEAT-A10 | Fastest-time (duration-ordered) isochrones as an option | P1 | FEAT-A2 |
+| FEAT-A11 | Overlays on matrix and isochrone requests | P1 | — |
 
 **`FEAT-G` Guidance**
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-G1 | Localization layer: catalogs keyed by `instruction_key`; English moved into a catalog; host catalogs | P1 | — |
+| FEAT-G0 | Structured instruction parameters (`modifier`, `exit_number`, `toward`, `via`) | P1 | — |
+| FEAT-G1 | Localization layer: catalogs keyed by `instruction_key`; English moved into a catalog; host catalogs | P1 | FEAT-G0 |
 | FEAT-G2 | First languages (proposal: Polish, German, French, Spanish, Ukrainian) | P1 | FEAT-G1 |
-| FEAT-G3 | Lanes from `turn:lanes` | P1 | — |
-| FEAT-G4 | Signs and exits from `destination*` tags | P1 | — |
-| FEAT-G5 | Voice timing; units and rounding per locale | P2 | FEAT-G1 |
+| FEAT-G3 | Lanes from `turn:lanes`, read from the approach edge (a bug fix today) | P0 | — |
+| FEAT-G4a | Exit numbers from `motorway_junction` nodes (no format change) | P1 | — |
+| FEAT-G4b | Directional, per-lane and symbol destinations | P1 | format 3 |
+| FEAT-G5a | Voice timing | P2 | — |
+| FEAT-G5b | Units and rounding per locale | P2 | FEAT-G1 |
 
 **`FEAT-D` Data and scale**
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-D1 | Country-scale measurement (Poland), numbers published | P1 | — |
-| FEAT-D2 | Clip polygon compile from a larger extract | P1 | API-9 |
-| FEAT-D3 | Multi-extract compile (cross-border regions in one package) | P1 | — |
+| FEAT-D1 | Country-scale measurement (Poland), numbers published (measured 2026-11-19, see REG-1) | P1 | — |
+| FEAT-D2 | Clip polygon compile from a larger extract (M); canonical polygon hash shared with REG-3 | P1 | API-9 |
+| FEAT-D3 | Multi-extract compile (cross-border regions in one package) (M) | P1 | — |
 
 FEAT-D1 to D3 are option A of 6.7 and feed lane `REG`.
 
@@ -745,15 +811,20 @@ Design in 6.7. Hooks before 1.0; bundles, cells and the server in 1.x.
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| REG-1 | Country scale measured: Poland compiled on a cloud runner (time, peak memory, package size, open and customize time, potentials memory); was PERF-12 | P1 | FEAT-D1 |
-| REG-2 | Build graph slimmed and shared infos streamed, so Poland compiles in 16 GB (FEAT lane's D1b) | P1 | REG-1 |
-| REG-3 | Format 3 hooks: optional-section table, region identity (id, extent, boundary polygon hash), reserved portal sections; in the one format-3 bump (7.12) | P0 | API-5, EXP-5b |
-| REG-4 | Region-ready references: `(region, edge)` in results, overlay sets bound per region, C ABI 2 open taking a source | P0 | API-5, FFI-4 |
-| REG-5 | Region bundles: boundary compile, portal tables and cliques, bundle index, two-level search, exact against the oracle on a merged compile | P2 (1.x) | REG-3, REG-4 |
-| REG-6 | Rebuild one region and refresh the bundle index | P2 (1.x) | REG-5 |
-| REG-7 | Multi-level cells from a continent build, one overlay per level | P2 (1.x) | REG-5 |
-| REG-8 | `wayfarer-server`: JSON API over bundles with a cell cache, and an immutable cell endpoint | P2 (1.x) | REG-5, EXP-4 |
-| REG-9 | Device cell cache: fetch by area or corridor, check by hash, byte budget, route over the cells held | P2 (1.x) | REG-7, REG-8 |
+| REG-1 | Country scale measured: Poland compiled on a cloud runner (time, peak memory, package size, open and customize time, potentials memory); was PERF-12. **Measured on 0.2.0**: 7 min, 10.8 GiB peak, 1.97 GB, 1.6 GiB potentials heap; repeat on the release candidate | P1 | FEAT-D1 |
+| REG-2 | Compile headroom at country scale: faster node order (40 % of Poland's compile, about n^1.5), slimmer build graph and streamed shared infos | P1 | REG-1 |
+| REG-3 | Format 3 hooks: tagged section table (id, REQUIRED and IDENTITY flags, element size), identity hash separate from the content hash, a required `RegionInfo`, reserved ids for `PortalEdge`, `PortalRef`, `NodeOwner`, `PortalClique`, `PortalBound`, `ComponentPortal`, `CellDirectory`, `CchUp`, `CchMetric`; `CchCellTree` written; in the one format-3 bump (7.12) | P0 | API-5, EXP-5b |
+| REG-4 | Region-ready references: `(region, edge)` in results, overlay sets bound per region, connectors and endpoint candidates region-qualified, a defined form for synthetic ways and repaired crossings, `region_missing` error code, C ABI 2 open taking a source | P0 | API-5, FFI-4 |
+| REG-5a | Region bundles: halo compile, banded min-cut borders, portal tables matched by reference, potential-guided search with CCH portal bounds, exact against the oracle on a merged compile | P2 (1.x) | REG-3, REG-4 |
+| REG-5b | Exact cliques and the overlay-exact search as the fast path for plain requests | P2 (1.x) | REG-5a |
+| REG-6 | Rebuild one region and refresh the bundle index | P2 (1.x) | REG-5a |
+| REG-7 | Multi-level cells from a continent build, one overlay per level | P2 (1.x) | REG-5a |
+| REG-8 | `wayfarer-server`: JSON API over bundles with a cell cache, and an immutable cell endpoint | P2 (1.x) | REG-5a, EXP-4 |
+| REG-9 | Device cell cache: fetch by area or corridor, check by hash, byte budget, route over the cells held; the cells are REG-13's byte ranges as hash-named blobs | P2 (1.x) | REG-7, REG-8, REG-13 |
+| REG-10 | Stored potentials: CCH topology and stored-column metrics as optional mapped sections, derived arrays built per cell (open without the 8 s preparation on Poland) | P1 (1.x) | REG-3 |
+| REG-11 | One global lattice for the DEM grid and rasters (FEAT-T4, X3a, X4) | P1 | before format 3 |
+| REG-12 | Search state sized by what a search touches: paged edge labels, node bounds and potential slots; floor-scaled stored metrics instead of own metrics on the mobile profile. No format change; removes 0.9 GiB of Poland's 2.5 GiB first-route heap | P1 | — |
+| REG-13 | Paged package: cell-major numbering in the format-3 compiler (hook), then `CellDirectory` with per-cell hashes, lazy per-cell validation and `memoryBudgetBytes` (1.x). Target: Poland on a phone with tens of MB resident | P1 | REG-3, REG-10 |
 
 ### 7.9 Lane: Quality and safety (`QA`)
 
@@ -767,6 +838,7 @@ Design in 6.7. Hooks before 1.0; bundles, cells and the server in 1.x.
 | QA-6 | `tracing` spans with stable names | P1 | — |
 | QA-7 | Security policy for 1.x; fuzz coverage review | P0 | — |
 | QA-8 | Field trial with a real team before the freeze | P0 | — |
+| QA-9 | Request limits on every query: matrix and isochrone validated like routes, a matrix size cap, contour checks, an upper bound on snap and projection radii | P0 | — |
 
 ### 7.10 Lane: Docs and developer experience (`DOC`)
 
@@ -792,8 +864,8 @@ and a user who needs it.
 | EXP-2 | Cross-country movement: terrain cost surface joined to the graph, for SAR on foot | FEAT-X (X4, X5) |
 | EXP-3 | WASM build for browser offline routing | FFI |
 | EXP-4 | Optional HTTP server binary (own API, maybe a Valhalla/OSRM-compatible subset) | REG-8 |
-| EXP-5 | Multiple packages per engine, routing across adjacent packages | REG-5 |
-| EXP-5b | Two packages joined at a seam (matching OSM nodes, two-phase search through the seam), to test portal identity before format 3 is frozen | REG-3 |
+| EXP-5 | Multiple packages per engine, routing across adjacent packages | REG-5a |
+| EXP-5b | Two steps before format 3 is frozen: (1) the potential-guided search across a virtual seam inside one package (cut at the top separator), checked against the single-package search and the oracle; (2) two halves compiled separately with a halo and a banded cut, portals matched by reference | REG-3, REG-5a |
 | EXP-6 | Incremental updates from OSM change files or per-partition rebuilds | FEAT-D |
 | EXP-7 | Field-collected roads (GeoJSON) as compiler input, or overlays promoted into the graph | FEAT-D |
 | EXP-8 | Learned or data-driven speed inference for roads without a posted limit | FEAT-W |
@@ -809,17 +881,27 @@ The ones that decide ordering:
 - **API-3, API-4 → FFI-4.** C ABI 2 is designed once, on the new errors and
   wire rules.
 - **FFI-4 → FFI-7..9.** Bindings wrap ABI 2, never ABI 1.
-- **API-7 → FEAT-P, FEAT-W.** New profiles and time are built on the new
-  profile and time types.
+- **API-7 → FEAT-P, FEAT-W (wire shape only).** The profile bug fixes,
+  local time (W0) and the truck data need nothing from API-7; only their
+  final request shape does. Build the machinery early, expose it through
+  API-7.
 - **QA-1 before the redesign window.** Every breaking release is measured.
 - **API-5 → REG-3, REG-4.** Stable references can name a region before the
   format and the wire are frozen.
 - **EXP-5b → REG-3.** A seam is prototyped before format 3's region sections
   are fixed.
-- **One format-3 bump.** FEAT-T1 and T4, FEAT-X2, FEAT-P1's profile slot,
-  FEAT-G4's exit nodes and REG-3 share it. Format 2 ships in 0.2, so by the
-  one-bump-per-ten-versions rule format 3 lands no earlier than 0.12.
-- **FEAT-T4 → FEAT-X3.** Terrain-aware access legs need the DEM grid.
+- **One format-3 bump, layout changes only.** Format 2 cannot carry an
+  optional section (exact section count, strict `LegAttrs`), so the bump
+  carries REG-3's section table and `RegionInfo`, the profile slot table
+  and u16 access and restriction masks (FEAT-P1's prerequisite), a versioned
+  `LegAttrs`, and REG-13's cell-major numbering. Content sections (FEAT-T1
+  and T4, FEAT-X2, X3a, FEAT-G4b, FEAT-W4, truck limits, REG-10 and REG-13's
+  directory) follow as optional sections, one release at a time. Format 2
+  shipped in 0.2, so the bump lands no earlier than 0.12.
+- **FEAT-T4, FEAT-X3a → FEAT-X3.** Terrain-aware access legs need the DEM
+  grid and land cover.
+- **QW-3, QW-2 → FEAT-X1.** Access costs as potential offsets, and snapping
+  that doesn't grow with the radius squared.
 
 ### 7.13 What the first releases could look like
 
@@ -827,21 +909,43 @@ A sketch to show how releases pull from lanes, not a commitment:
 
 | Release | Items |
 |---|---|
-| 0.2 | Ready on `main`: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
-| 0.3 | PERF-13 (leg building), PERF-14, PERF-15, FFI-6 (polyline, GeoJSON), rest of DOC-1 |
-| 0.4 | QA-1, QA-2, QA-3, PERF-1, PERF-16, rest of FFI-1 (macOS) |
-| 0.5 | API-0 (with open questions 11 to 13), FEAT-X1 (costed access legs, opt-in), FEAT-G3, REG-1 (Poland measured on a cloud runner) |
-| 0.6 | QA-4, FEAT-A2, FEAT-D2 (clip), EXP-5b (seam prototype) |
-| 0.10 | API-1 (modules and names), FFI-3 (release artifacts) |
-| 0.11 | API-2 (internal crates), FEAT-A4 (nearest-k), REG-2 |
-| 0.12 | API-3 (errors), API-5 (region-ready references), FEAT-T1 (DEM ingest, behind a compile option) |
-| 0.13 | API-4 (wire rules), FEAT-X6 (R7 on X1) |
-| 0.14 – 0.2x | Format 3 (REG-3 with FEAT-T4, FEAT-X2, FEAT-P1's slot, FEAT-G4), then FEAT-X3, REG-4 with FFI-4 |
+| 0.2 | Released 2026-11-19: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
+| 0.3 | Correctness: QA-9 (request limits), FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone origin snapping and duration fixes; PERF-13 (leg building); rest of DOC-1; FFI-6 with a first `include` list if ready |
+| 0.4 | Small additive: FEAT-P0a, P0d, W0, P4, G0, G4a, A4, A9, A7, A11, the route request quick wins (radius per location, through waypoints, destination side, hard exclusions, road facts), two-phase snapping, approach offsets (QW-3), compiler input fixes; REG-12; PERF-14 to PERF-16; QA-1, QA-2, QA-3, PERF-1, rest of FFI-1 (macOS) |
+| 0.5 | FEAT-X1 (costed access legs, opt-in) with FEAT-X6's `costed` flag, FEAT-A2 core, FEAT-D2 (clip), FEAT-P2 compiler data, FEAT-G1 with Polish, EXP-5b step 1 (potential-guided seam search), REG-2 |
+| 0.6 – 0.9 | FEAT-X2a, X1b, A10, A1, A3, A8, A5, D3, G5a; FEAT-T1 reader behind `experimental-elevation`; API-0 (with the open questions); QA-4; the format-3 design written (REG-3, REG-11, REG-13 hooks) |
+| 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
+| 0.12 – 0.2x | API-3, API-4, API-5; format 3 (layout changes only); FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
+| After the bump | Optional sections as each is ready: FEAT-T1/T2/T4/T5, X2, X3a then X3, P1, P2 extras, G4b, W4 |
 | … | further items as they are ready |
 
 After the API window closes, releases carry PERF, FFI, FEAT and QA items until
 the 0.80 cut-off, then hardening (API-11, DOC-3, DOC-4, QA-7, QA-8) and the
 0.90 freeze.
+
+### 7.14 Work packages and parallel threads
+
+The next releases are cut into PR-sized work packages grouped by the files
+they touch, so several threads can work at once without editing the same
+functions. One thread per lane, one PR in flight per lane.
+
+| Thread lane | Owns | First packages | Release |
+|---|---|---|---|
+| Request safety | `limits.rs`, `queries.rs`, `correlator.rs`, request validation in `trip.rs`, `matrix.rs` and `isochrone.rs` | QA-9 request limits; isochrone origin fixes; two-phase snapping | 0.3, 0.4 |
+| Profiles, access, time | road-graph tags, types and restriction resolution, `wayfarer-costing`, restriction masks in the compiler and `graph_access.rs` | FEAT-P0c, then P0b and the parser fixes; P0a/P0d; W0 | 0.3, 0.4 |
+| Legs, guidance, output | `guidance.rs`, `route_leg.rs`, `navigation.rs`, result assembly in `trip.rs`, polyline code | FEAT-G3 and multi-leg maneuvers; PERF-13; FFI-6 with `include`; G0 and G4a | 0.3, 0.4 |
+| Search core and memory | `package/search.rs`, `search/patch.rs`, `package/cch.rs`, `package/mod.rs` open path, `reference.rs` | REG-12; PERF-14 to PERF-16; approach offsets; FEAT-X1 | 0.4, 0.5 |
+| Analysis tools | `isochrone.rs`, `types/analysis.rs`, new trip and polygon modules | FEAT-A4, A9, A11, A7; A2; A10, A1, A3, A8, A5 | 0.4 – 0.8 |
+| Compiler options and data | compiler way collection, `CompileRequest`, CLI compile | input fixes; `#[non_exhaustive]` and baked profiles; D2; D3 | 0.4 – 0.7 |
+| Regions and scale | new `regions` module behind `experimental-regions`, `cch_order.rs`, design docs | EXP-5b step 1; REG-2; the format-3 design; EXP-5b step 2 | 0.5 – 0.11 |
+| CI, gates, docs | workflows, gate scripts, READMEs | macOS and MSRV jobs; API diffs; nightly Małopolskie gate and scheduled fuzzing; DOC-1 | 0.3, 0.4 |
+
+Validation follows the change: every PR runs the test suite and the Monaco
+and Kraków byte-identical checks (re-recorded on purpose, case by case, when
+a fix changes routes); changes meant to affect performance or package output
+also run the Małopolskie gate and timings, on cloud machines or CI. Generated
+schemas are regenerated after a rebase, never merged by hand, and changelog
+entries are collected in the release PR.
 
 ## 8. Non-goals for 1.0
 
@@ -858,9 +962,10 @@ the 0.80 cut-off, then hardening (API-11, DOC-3, DOC-4, QA-7, QA-8) and the
    1.0 a general-purpose offline router? This decides whether elevation and
    cross-country movement outrank bicycle and truck profiles.
 2. **Scale target.** Is a country (Poland) required for 1.0, or are regions
-   enough with country scale after?
-3. **Speed-up technique.** Are we willing to change the package format and
-   grow compile time to close the p95 gap? What p95 is "good enough"?
+   enough with country scale after? (Measured: Poland compiles as one
+   package in 16 GB on 0.2.0; on a phone it needs REG-12, REG-10 and
+   REG-13.)
+3. ~~Speed-up technique.~~ Answered in 0.2: CCH potentials, format 2.
 4. **Which Rust crates are public at 1.0**, and does `wayfarer-service` stay
    separate?
 5. **Two release lines.** Keep `wayfarer-v*` and `wayfarer-compiler-v*`, or
@@ -882,8 +987,29 @@ the 0.80 cut-off, then hardening (API-11, DOC-3, DOC-4, QA-7, QA-8) and the
     (FEAT-X6)?
 12. **Region boundaries.** Admin areas (cross-border and county edits stay
     local), a fixed grid (simplest for downloads), or the nested
-    dissection's own cells (fewest portals)? Bundles (REG-5) can take any;
+    dissection's own cells (fewest portals)? Bundles (REG-5a) can take any;
     streamed cells (REG-7) want the last.
 13. **Server and streaming.** Is a continent-scale server with device cell
     caches a 1.x goal with a named user, or are regions on devices enough?
     It decides whether REG-7 to REG-9 are planned or stay in `EXP`.
+14. **Poland on a phone, offline.** A 1.0 or a 1.x goal? Proposal: REG-12
+    in 0.4 and REG-13's hooks in format 3, the paged package itself in 1.x.
+15. **SAR on foot and `foot=no`.** Once bicycle-only ways close to walkers
+    (FEAT-P0a), should Legged follow `foot=no` strictly? Proposal: strict,
+    with an `open` overlay when a team needs it.
+16. **Time.** One time zone per package with a request offset for
+    multi-zone extracts? Without a departure, reject windowed overlays or
+    treat them as always active? Proposal: keep the fallback but report it
+    until API-7a, then require a time.
+17. **Costed access legs' pricing.** Cost factor (proposal 2.0 walkers, 1.5
+    vehicles), default radius and candidate count for FEAT-X1.
+18. **Format 3 shape.** Optional sections addable after the bump with a
+    per-section REQUIRED flag (proposal), or everything in the one bump? u16
+    profile access with a slot table (proposal) or u8?
+19. **Elevation data.** SRTM/NASADEM (public domain) or Copernicus GLO-30
+    (attribution, a surface model) as the default DEM? Wait for format 3
+    (proposal) or bend format 2's `Reserved12`?
+20. **Isochrone semantics.** Keep cost-ordered time contours or move to
+    fastest-time (FEAT-A10)? Proposal: an option now, the default in API-7.
+21. **Guidance rendering.** Hybrid (keys are the contract, bundled
+    languages rendered on request; proposal) or keys only?
