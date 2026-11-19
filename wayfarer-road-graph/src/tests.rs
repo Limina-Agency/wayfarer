@@ -364,7 +364,7 @@ fn builds_shared_edge_info_once_per_segment() {
     let shared = graph
         .shared_edge_info(forward.shared_edge_info_id)
         .expect("shared edge info");
-    assert_eq!(shared.geometry, vec![(51.0, 19.0), (51.01, 19.01)]);
+    assert_eq!(shared.geometry.to_vec(), vec![(51.0, 19.0), (51.01, 19.01)]);
 }
 
 #[test]
@@ -704,7 +704,7 @@ fn enhancement_assigns_components_degrees_headings_speeds_and_warnings() {
     assert!(first_edge.start_heading_deg.is_some());
     assert!(first_edge.end_heading_deg.is_some());
     assert_eq!(first_edge.inferred_speed_kph, Some(22));
-    assert!(first_edge.estimated_travel_time_s.unwrap() > 0.0);
+    assert!(first_edge.estimated_travel_time_s().unwrap() > 0.0);
     assert_eq!(first_edge.hierarchy_tier, Some(RoadHierarchyTier::Local));
 }
 

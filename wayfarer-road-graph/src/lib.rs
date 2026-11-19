@@ -79,7 +79,9 @@ pub use graph::*;
 use plazas::*;
 pub use quality::*;
 pub use report::*;
-pub use shared_infos::{SharedEdge, SharedEdgeInfos, SharedInfoClasses, SharedInfoRef};
+pub use shared_infos::{
+    InfoGeometry, SharedEdge, SharedEdgeInfos, SharedInfoClasses, SharedInfoRef,
+};
 pub use speed::*;
 pub use tags::*;
 pub use types::*;

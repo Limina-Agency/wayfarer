@@ -355,10 +355,6 @@ pub fn enhance_road_graph_with(
         .map(|(raw_edge_index, edge_ref)| {
             let edge_index = EdgeIndex::new(raw_edge_index);
             let edge = &edge_ref.weight;
-            let component_id = component_ids
-                .get(edge_ref.source().index())
-                .copied()
-                .flatten();
             let info = shared_edge_info(graph, &info_index_by_id, edge.shared_edge_info_id);
             let source_index = edge_ref.source().index();
             let target_index = edge_ref.target().index();
@@ -396,17 +392,11 @@ pub fn enhance_road_graph_with(
                     highest_road_type.get(target_index).copied().flatten(),
                 )
             });
-            let travel_time = inferred_speed.and_then(|speed| {
-                let speed_mps = speed as f32 * 1000.0 / 3600.0;
-                (speed_mps > 0.0).then_some(edge.distance_m / speed_mps)
-            });
             (
                 edge_index,
-                component_id,
                 start_heading,
                 end_heading,
                 inferred_speed,
-                travel_time,
                 hierarchy_tier,
                 minor_approach,
             )
@@ -419,16 +409,8 @@ pub fn enhance_road_graph_with(
         vec![None::<RoadHierarchyTier>; graph.shared_edge_infos.len()];
     // Edges per tier, tallied here and named once below.
     let mut tier_edge_counts = [0usize; 4];
-    for (
-        edge_index,
-        component_id,
-        start_heading,
-        end_heading,
-        inferred_speed,
-        travel_time,
-        hierarchy_tier,
-        minor_approach,
-    ) in edge_updates
+    for (edge_index, start_heading, end_heading, inferred_speed, hierarchy_tier, minor_approach) in
+        edge_updates
     {
         if minor_approach {
             report.minor_approach_edge_count += 1;
@@ -440,11 +422,9 @@ pub fn enhance_road_graph_with(
             report.edges_with_inferred_speed_count += 1;
         }
         if let Some(edge) = graph.graph.edge_weight_mut(edge_index) {
-            edge.component_id = component_id;
             edge.start_heading_deg = start_heading;
             edge.end_heading_deg = end_heading;
             edge.inferred_speed_kph = inferred_speed;
-            edge.estimated_travel_time_s = travel_time;
             edge.hierarchy_tier = hierarchy_tier;
             edge.end_minor_approach = minor_approach;
             if let Some(tier) = hierarchy_tier {
