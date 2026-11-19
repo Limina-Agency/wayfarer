@@ -77,7 +77,7 @@ documents how each is routed and costed.
 Version 0.x: the API may change between minor releases.
 
 - **Package format.** An engine opens the formats
-  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (1 today).
+  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2 today).
   Older packages fail to open as outdated, newer ones as too new.
 - **Costing model.** A package records the costing model its costs were baked
   with (`COSTING_MODEL_VERSION`, 1 today). Packages of an older model open and

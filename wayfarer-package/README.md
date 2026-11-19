@@ -70,9 +70,10 @@ compactly or derived from others, so read them through the accessors:
 Version 0.x: the API may change between minor releases. The file format is
 versioned separately:
 
-- `ROUTING_PACKAGE_FORMAT_VERSION` (1 today) changes whenever the layout or
+- `ROUTING_PACKAGE_FORMAT_VERSION` (2 today) changes whenever the layout or
   the meaning of a section changes. A build opens the formats
-  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (1..=1); a
+  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2; 0.2.0
+  dropped format 1, whose landmark sections are now reserved); a
   layout change keeps reading the previous format for at least one release,
   and raising the minimum drops a format.
 - A package records the costing model its stored costs were baked with. An

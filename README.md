@@ -27,9 +27,11 @@ connectivity, on roads that change by the hour.
 - **A lean runtime.** The routing-only C library is about 4.6 MB with 29
   third-party crates, and the compiler library prints nothing, reads no
   environment and installs no allocator. Typical requests take a few
-  milliseconds: on Małopolskie, drives p95 9.3 ms and walks p95 25 ms
-  (`benchmarks/gates`). Packages are compact: Małopolskie's is 176 MiB,
-  0.79× Valhalla's tiles for the same region.
+  milliseconds: on Małopolskie, drives p95 9.3 ms, walks p95 25 ms and two
+  alternatives p95 74 ms, and a 100×100 vehicle matrix takes 2.2 s
+  (`benchmarks/gates`). Searches are bounded by CCH potentials built from a
+  node order stored in the package. Packages are compact: Małopolskie's is
+  176 MiB, 0.79× Valhalla's tiles for the same region.
 - **Change the roads per request.** Closures, blocked bridges, slow-go
   stretches, newly opened tracks and ad-hoc connectors are overlays on a
   request, not a recompile. Overlay sets bind to a package by its hash, so a
@@ -144,9 +146,10 @@ which strings and handles the caller frees.
 ## Compatibility
 
 - **Package format.** An engine opens formats
-  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (1..=1 today).
-  A layout change bumps the format and keeps reading the previous one for at
-  least a release; every readable format has a frozen package under
+  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2 today:
+  0.2.0 dropped format 1, so recompile older packages). A layout change bumps
+  the format and keeps reading the previous one for at least a release;
+  every readable format has a frozen package under
   `fixtures/routing/format-<N>/` that the tests open and route.
 - **Costing model.** A package records the costing model its costs were baked
   with (`COSTING_MODEL_VERSION`). An engine opens packages of its own model and

@@ -693,8 +693,9 @@ impl RoutingEngine {
 /// Driving, a strict pass's cells also slow down as the matrix grows: every
 /// endpoint's destination-only pocket is unblocked for every cell, and each
 /// unblocked edge is a discount gate weakening the bounds. Measured
-/// 2026-11-17 with landmark bounds, which packages no longer have (square matrices of random road points, 16 threads, visited
-/// edges, rows with unreachable targets skipped): across Malopolskie rows
+/// 2026-11-17, before CCH potentials replaced landmark bounds (square
+/// matrices of random road points, 16 threads, visited edges, rows with
+/// unreachable targets skipped): across Malopolskie rows
 /// and pairwise visit about as much at 50 points (305M and 292M) and rows a
 /// quarter as much at 64 (384M and 1,486M; 23 s and 62 s) and 80 (33 s and
 /// 110 s); on the Krakow centre package rows win from 10 points (0.24 s and
