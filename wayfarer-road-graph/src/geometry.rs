@@ -16,16 +16,67 @@ pub(crate) fn from_fixed(value: i32) -> f64 {
 /// The haversine length of the polyline (geo's mean Earth radius), summed
 /// segment by segment as geo's `Haversine.length` of a `LineString` does, with
 /// deterministic trigonometry.
-pub(crate) fn calculate_path_distance(points: &[(f64, f64)]) -> f64 {
+pub(crate) fn calculate_path_distance(points: impl Points) -> f64 {
     let mut length = 0.0;
-    for pair in points.windows(2) {
-        length += math::haversine_m(pair[0], pair[1], wayfarer_package::format::EARTH_RADIUS_M);
+    for index in 1..points.len() {
+        length += math::haversine_m(
+            points.at(index - 1),
+            points.at(index),
+            wayfarer_package::format::EARTH_RADIUS_M,
+        );
     }
     length
 }
 
+/// A polyline's points by index: a slice, or a shared info's
+/// [`InfoGeometry`].
+pub(crate) trait Points: Copy {
+    fn len(&self) -> usize;
+    fn at(&self, index: usize) -> (f64, f64);
+}
+
+impl Points for &[(f64, f64)] {
+    fn len(&self) -> usize {
+        <[(f64, f64)]>::len(self)
+    }
+
+    fn at(&self, index: usize) -> (f64, f64) {
+        self[index]
+    }
+}
+
+impl<const N: usize> Points for &[(f64, f64); N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn at(&self, index: usize) -> (f64, f64) {
+        self[index]
+    }
+}
+
+impl Points for &Vec<(f64, f64)> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn at(&self, index: usize) -> (f64, f64) {
+        self[index]
+    }
+}
+
+impl Points for InfoGeometry<'_> {
+    fn len(&self) -> usize {
+        InfoGeometry::len(self)
+    }
+
+    fn at(&self, index: usize) -> (f64, f64) {
+        self.get(index)
+    }
+}
+
 pub(crate) fn edge_headings_deg(
-    geometry: &[(f64, f64)],
+    geometry: impl Points,
     direction: TraversalDirection,
 ) -> Option<(Option<u16>, Option<u16>)> {
     if geometry.len() < 2 {
@@ -54,12 +105,12 @@ pub(crate) fn edge_headings_deg(
     Some((start, end))
 }
 
-fn heading_from_iter<I>(pairs: I, geometry: &[(f64, f64)]) -> Option<u16>
+fn heading_from_iter<I>(pairs: I, geometry: impl Points) -> Option<u16>
 where
     I: IntoIterator<Item = (usize, usize)>,
 {
     for (from, to) in pairs {
-        let Some(heading) = heading_between(geometry[from], geometry[to]) else {
+        let Some(heading) = heading_between(geometry.at(from), geometry.at(to)) else {
             continue;
         };
         return Some(heading);

@@ -364,7 +364,7 @@ fn builds_shared_edge_info_once_per_segment() {
     let shared = graph
         .shared_edge_info(forward.shared_edge_info_id)
         .expect("shared edge info");
-    assert_eq!(shared.geometry, vec![(51.0, 19.0), (51.01, 19.01)]);
+    assert_eq!(shared.geometry.to_vec(), vec![(51.0, 19.0), (51.01, 19.01)]);
 }
 
 #[test]
