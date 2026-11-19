@@ -669,3 +669,71 @@ fn points_snap_and_geometry_projects_onto_the_road() {
     assert_eq!(status, WAYFARER_INVALID_ARGUMENT, "{error}");
     unsafe { wayfarer_close(package) };
 }
+
+#[test]
+fn requests_beyond_the_limits_fail_as_a_whole() {
+    let package = open();
+    let point = r#"{"lat": 52.0001, "lng": 21.001}"#;
+    let side = |count: usize| format!("[{}]", vec![point; count].join(","));
+    let cases = [
+        (
+            wayfarer_matrix as Call,
+            format!(
+                r#"{{"sources": {}, "targets": {}, "profile": "wheeled"}}"#,
+                side(501),
+                side(500)
+            ),
+            "request_too_large",
+        ),
+        (
+            wayfarer_matrix,
+            format!(
+                r#"{{"sources": [{point}], "targets": [{point}], "profile": "wheeled", "options": {{"maxCorrelationDistanceM": 10001}}}}"#
+            ),
+            "request_too_large",
+        ),
+        (
+            wayfarer_isochrone,
+            format!(
+                r#"{{"origin": {point}, "profile": "wheeled", "contours": [{{"contour": -1.0, "metric": "time_seconds"}}]}}"#
+            ),
+            "invalid_request",
+        ),
+        (
+            wayfarer_snap,
+            format!(r#"{{"point": {point}, "profile": "wheeled", "maxDistanceM": 10001}}"#),
+            "request_too_large",
+        ),
+        (
+            wayfarer_snap,
+            format!(r#"{{"point": {point}, "profile": "wheeled", "candidateLimit": 65}}"#),
+            "request_too_large",
+        ),
+        (
+            wayfarer_project,
+            format!(
+                r#"{{"geometryKind": "point", "points": [{point}], "projectionDistanceM": 100001}}"#
+            ),
+            "request_too_large",
+        ),
+    ];
+    for (function, request, code) in cases {
+        let (status, error) = call(function, package, &request);
+        assert_eq!(status, WAYFARER_INVALID_ARGUMENT, "{error}");
+        assert_eq!(error["code"], code, "{error}");
+    }
+
+    let samples = format!(r#"[{{"position": {point}}}]"#);
+    let request = CString::new(format!(
+        r#"{{"samples": {samples}, "profile": "wheeled", "options": {{"maxCorrelationDistanceM": 10001}}}}"#
+    ))
+    .unwrap();
+    let mut out = ptr::null_mut();
+    let status = unsafe { wayfarer_map_match(package, request.as_ptr(), ptr::null(), &mut out) };
+    let error = take(out);
+    assert_eq!(status, WAYFARER_INVALID_ARGUMENT, "{error}");
+    assert_eq!(error["code"], "request_too_large", "{error}");
+    unsafe { wayfarer_close(package) };
+}
+
+type Call = unsafe extern "C" fn(*const WayfarerPackage, *const c_char, *mut *mut c_char) -> i32;

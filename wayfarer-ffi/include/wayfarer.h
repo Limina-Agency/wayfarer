@@ -176,7 +176,9 @@ int32_t wayfarer_route(const WayfarerPackage *package,
                                const char *request_json,
                                char **out_json);
 
-/* Answers a RouteMatrixRequest (unreachable cells are reported per cell). */
+/* Answers a RouteMatrixRequest (unreachable cells are reported per cell). A
+ * request of more than 250,000 cells, or with invalid coordinates or
+ * options, fails with "request_too_large" or "invalid_request". */
 int32_t wayfarer_matrix(const WayfarerPackage *package,
                                 const char *request_json,
                                 char **out_json);
@@ -232,7 +234,8 @@ int32_t wayfarer_map_match(const WayfarerPackage *package,
  * "maxDistanceM" (optional), "candidateLimit" (optional), "options":
  * RouteEndpointOptions (optional)} gives a SnapResult, {"candidates",
  * "rejectedCandidateCount", "mode"}, best candidate first. No candidate is
- * not an error. */
+ * not an error; "maxDistanceM" above 10,000 or "candidateLimit" above 64 is
+ * ("request_too_large"). */
 int32_t wayfarer_snap(const WayfarerPackage *package,
                               const char *request_json,
                               char **out_json);
@@ -240,7 +243,8 @@ int32_t wayfarer_snap(const WayfarerPackage *package,
 /* Projects geometry onto the package's edges, as a route overlay with that
  * geometry would be: {"geometryKind": "point" | "line" | "polygon",
  * "points", "projectionDistanceM"} gives a RouteOverlayGeometryProjection
- * ({"edgeIds", "edgeRanges", ...}), for closures a host stores by edge. */
+ * ({"edgeIds", "edgeRanges", ...}), for closures a host stores by edge.
+ * "projectionDistanceM" is at most 100,000, as for route overlays. */
 int32_t wayfarer_project(const WayfarerPackage *package,
                                  const char *request_json,
                                  char **out_json);

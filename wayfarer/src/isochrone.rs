@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
+use crate::limits::MAX_ISOCHRONE_CONTOURS;
 use crate::package::destination::relax_split_costs;
 use crate::package::profile_bit;
 use crate::package::search::analysis::{
@@ -10,6 +11,7 @@ use crate::package::search::analysis::{
 };
 use crate::package::search::patch::{PatchCosts, PatchGraph, PatchQuery, analysis_overlay};
 use crate::search::RoutingEngine;
+use crate::trip::{invalid_point, validate_query_options};
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, RouteError, RouteIsochroneBoundaryFragment,
     RouteIsochroneBucket, RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneRequest,
@@ -21,6 +23,7 @@ impl RoutingEngine {
         &self,
         request: RouteIsochroneRequest,
     ) -> Result<RouteIsochroneResult, RouteError> {
+        validate_request(&request)?;
         if !self.route_graph_view().is_ready() {
             return Err(RouteError::GraphNotReady);
         }
@@ -75,6 +78,37 @@ impl RoutingEngine {
         let relaxed = self.isochrone_search(&request, candidates, &origin, true)?;
         Ok(pick_relaxed(strict, relaxed))
     }
+}
+
+/// The request against [`crate::limits`]: a valid origin, one to
+/// [`MAX_ISOCHRONE_CONTOURS`] contours, each positive, finite and not repeated
+/// on its metric, and the options a route accepts.
+fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
+    if invalid_point(request.origin) {
+        return Err(RouteError::InvalidRequest {
+            reason: "origin coordinates",
+        });
+    }
+    if request.contours.len() > MAX_ISOCHRONE_CONTOURS {
+        return Err(RouteError::RequestTooLarge {
+            what: "isochrone contours",
+        });
+    }
+    let invalid_contour = |(index, contour): (usize, &RouteIsochroneContour)| {
+        !contour.contour.is_finite()
+            || contour.contour <= 0.0
+            // Buckets and boundary fragments are matched to contours this way.
+            || request.contours[..index].iter().any(|earlier| {
+                earlier.metric == contour.metric
+                    && (earlier.contour - contour.contour).abs() < f64::EPSILON
+            })
+    };
+    if request.contours.is_empty() || request.contours.iter().enumerate().any(invalid_contour) {
+        return Err(RouteError::InvalidRequest {
+            reason: "isochrone contours",
+        });
+    }
+    validate_query_options(&request.options)
 }
 
 /// A strict isochrone reaching fewer edges than this may be trapped behind a

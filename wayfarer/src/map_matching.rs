@@ -771,7 +771,7 @@ fn effective_max_distance_m(sample: &NavigationPositionSample, base: u32) -> u32
     f64::from(base)
         .max(accuracy * 2.0)
         .round()
-        .clamp(1.0, f64::from(u32::MAX)) as u32
+        .clamp(1.0, f64::from(crate::limits::MAX_CORRELATION_DISTANCE_M)) as u32
 }
 
 fn sample_sigma_m(sample: &NavigationPositionSample, options: MapMatchOptions) -> f64 {
