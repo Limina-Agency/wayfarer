@@ -41,6 +41,14 @@ the baseline too.
 | `krakow-centre` | `fixtures/krakow-centre.osm.pbf` (783 kB) | 22 corpus, 60 random | ~3 s | `scripts/check.sh` |
 | `malopolskie` | `$MALOPOLSKIE_PBF` | 124 corpus, 200 random | ~1 min | on demand or nightly |
 
+The `malopolskie` baseline is recorded on Geofabrik's
+`malopolskie-261118.osm.pbf` (sha256 `777306c5c0bd2898…`, dataset hash
+`e1d3a3f9…` with the 0.2 compiler). Map edits move costs and visited edges, so
+on another extract the gate reports drift as well as engine changes: compare
+two commits on the same extract (`ROUTE_DUMP` and `COMPILER` from
+`gates.sh build`), and before re-recording on a new extract, check that the
+previous release gives the same costs on it.
+
 `PACKAGE=<routing.mrt>` skips the compile, `ROUTE_DUMP=<route_response_dump>`
 (and `COMPILER`) gate binaries built elsewhere, for example by
 `gates.sh build <bin_dir>` at another commit, and `UPDATE_BASELINE=1` records
