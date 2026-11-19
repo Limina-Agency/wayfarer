@@ -648,7 +648,7 @@ impl<'a> ReferenceEngine<'a> {
         }
         let policy = CorrelationPolicy::from(&request.options);
         let candidates = Correlator::new(&self.view)
-            .search(
+            .search_expanding(
                 request.origin,
                 request.profile,
                 &policy,
@@ -2627,7 +2627,8 @@ fn isochrone(
         entry.0 = entry.0.min(cost);
         entry.1 = entry.1.min(duration_s);
     };
-    // A farther candidate starts at its approach cost, on both metrics.
+    // A farther candidate starts at its approach cost. The approach is a
+    // penalty, not travel, so time starts at zero (as in matrix rows).
     for (candidate, approach) in candidates.iter().zip(endpoint_approach(candidates)) {
         let Some(edge) = records.edge_by_id(candidate.edge_id) else {
             continue;
@@ -2636,17 +2637,14 @@ fn isochrone(
             continue;
         };
         let remaining = (1.0 - candidate.fraction_along_edge).clamp(0.0, 1.0);
-        let (cost, duration_s) = (
-            approach + edge_cost * remaining,
-            approach + edge_duration * remaining,
-        );
+        let (cost, duration_s) = (approach + edge_cost * remaining, edge_duration * remaining);
         let raw = edge.record.raw_edge_index;
         cross(
             &mut crossings,
             raw,
             candidate.fraction_along_edge,
             (approach, cost),
-            (approach, duration_s),
+            (0.0, duration_s),
         );
         push(
             &mut labels,

@@ -1336,16 +1336,17 @@ pub(crate) fn isochrone(
         if !edge_cost.is_finite() {
             continue;
         }
-        // A farther candidate starts at its approach cost, on both metrics.
+        // A farther candidate starts at its approach cost. The approach is a
+        // penalty, not travel, so time starts at zero (as in matrix rows).
         let remaining = (1.0 - origin.fraction).clamp(0.0, 1.0);
         let cost = origin.approach + edge_cost * remaining;
-        let duration_s = origin.approach + search.duration(origin.edge) * remaining;
+        let duration_s = search.duration(origin.edge) * remaining;
         cross(
             &mut outcome.crossings,
             origin.edge,
             origin.fraction,
             (origin.approach, cost),
-            (origin.approach, duration_s),
+            (0.0, duration_s),
         );
         // A seed is labelled even beyond every contour (its successors are
         // then out of range too), but only reported when within one.

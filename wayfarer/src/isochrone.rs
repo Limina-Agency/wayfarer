@@ -40,22 +40,15 @@ impl RoutingEngine {
         request.options.cancellation.check()?;
         let policy = CorrelationPolicy::from(&request.options);
         let correlator = Correlator::new(self.route_graph_view());
-        // The SAR `off_network` relaxation widens the search as routes do.
-        let origin_search = if policy.off_network_max_distance_m.is_some() {
-            correlator.search_expanding(
-                request.origin,
-                request.profile,
-                &policy,
-                &Default::default(),
-            )
-        } else {
-            correlator.search(
-                request.origin,
-                request.profile,
-                &policy,
-                &Default::default(),
-            )
-        };
+        // An origin with no connected road within the radius widens the
+        // search as route and matrix locations do (and as far as the SAR
+        // `off_network` relaxation reaches).
+        let origin_search = correlator.search_expanding(
+            request.origin,
+            request.profile,
+            &policy,
+            &Default::default(),
+        );
         let origin = origin_search
             .candidates
             .first()
@@ -401,4 +394,174 @@ pub(crate) struct IsochroneBoundaryCandidate {
     pub(crate) contour: f64,
     pub(crate) metric: RouteIsochroneMetric,
     pub(crate) fragment: RouteIsochroneBoundaryFragment,
+}
+
+#[cfg(test)]
+mod tests {
+    use wayfarer_package::{DirectionalAccess, RoadType};
+    use wayfarer_road_graph::{RoadGraph, RoadGraphBuilder, RoutableWay, enhance_road_graph};
+
+    use crate::{
+        GeoPoint, MobilityProfile, RouteError, RouteIsochroneBucket, RouteIsochroneContour,
+        RouteIsochroneMetric, RouteIsochroneRequest, RouteRequest, SnapRequest,
+    };
+
+    fn street(id: i64, from: (f64, f64), to: (f64, f64), nodes: (i64, i64)) -> RoutableWay {
+        RoutableWay {
+            osm_way_id: id,
+            points: vec![from, to],
+            source_node_ids: vec![Some(nodes.0), Some(nodes.1)],
+            road_type: RoadType::Residential,
+            directional_access: DirectionalAccess::Both,
+            highway: Some("residential".into()),
+            ..Default::default()
+        }
+    }
+
+    fn graph(ways: Vec<RoutableWay>) -> RoadGraph {
+        let mut builder = RoadGraphBuilder::new("isochrone");
+        for way in ways {
+            builder.push_way(way);
+        }
+        let mut graph = builder.finish();
+        enhance_road_graph(&mut graph);
+        graph
+    }
+
+    /// An 8 × 8 grid of streets about 110 m apart, south of latitude 52.0.
+    fn grid() -> RoadGraph {
+        let node = |row: i64, col: i64| 1_000 + row * 10 + col;
+        let at = |row: i64, col: i64| (52.0 - row as f64 * 0.001, 21.0 + col as f64 * 0.0016);
+        let mut ways = Vec::new();
+        for row in 0..8 {
+            for col in 0..8 {
+                if col + 1 < 8 {
+                    let id = ways.len() as i64 + 1;
+                    let nodes = (node(row, col), node(row, col + 1));
+                    ways.push(street(id, at(row, col), at(row, col + 1), nodes));
+                }
+                if row + 1 < 8 {
+                    let id = ways.len() as i64 + 1;
+                    let nodes = (node(row, col), node(row + 1, col));
+                    ways.push(street(id, at(row, col), at(row + 1, col), nodes));
+                }
+            }
+        }
+        graph(ways)
+    }
+
+    fn minutes(origin: GeoPoint, minutes: f64) -> RouteIsochroneRequest {
+        RouteIsochroneRequest::new(
+            origin,
+            MobilityProfile::OnFoot,
+            vec![RouteIsochroneContour {
+                contour: minutes * 60.0,
+                metric: RouteIsochroneMetric::TimeSeconds,
+            }],
+        )
+    }
+
+    #[test]
+    fn an_origin_off_the_road_widens_the_snap_search_like_a_route() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        // About 110 m north of the grid's top street: beyond the default
+        // 75 m radius, within the first widening.
+        let origin = GeoPoint::new(52.001, 21.0056);
+        engine
+            .route(RouteRequest::new(
+                origin,
+                GeoPoint::new(51.995, 21.0056),
+                MobilityProfile::OnFoot,
+            ))
+            .expect("a route widens its snap search");
+        let isochrone = engine
+            .isochrone(minutes(origin, 5.0))
+            .expect("so does an isochrone");
+        assert!(isochrone.origin.distance_m > 75.0);
+        assert!(!isochrone.buckets[0].edge_ids.is_empty());
+
+        let reference = crate::reference::ReferenceEngine::new(
+            &graph,
+            std::sync::Arc::new(
+                crate::test_support::package(&graph, &crate::test_support::test_options())
+                    .unwrap()
+                    .0,
+            ),
+        );
+        let expected = reference.isochrone(minutes(origin, 5.0)).unwrap();
+        assert_eq!(expected.origin.edge_id, isochrone.origin.edge_id);
+        assert_eq!(expected.buckets[0].edge_ids, isochrone.buckets[0].edge_ids);
+
+        // Nothing within the widest radius is still no candidate.
+        assert_eq!(
+            engine
+                .isochrone(minutes(GeoPoint::new(52.1, 21.0), 5.0))
+                .unwrap_err(),
+            RouteError::NoCandidate { endpoint: "origin" }
+        );
+    }
+
+    #[test]
+    fn time_contours_do_not_count_the_approach_penalty_as_seconds() {
+        // Two separate streets, 10 m and 40 m south and north of the origin.
+        let graph = graph(vec![
+            street(1, (51.99991, 21.0), (51.99991, 21.004), (1, 2)),
+            street(2, (52.00036, 21.0), (52.00036, 21.004), (3, 4)),
+        ]);
+        let engine = crate::test_support::engine(&graph);
+        let mut request = minutes(GeoPoint::new(52.0, 21.002), 1.0);
+        request.contours.push(RouteIsochroneContour {
+            contour: 1.0e6,
+            metric: RouteIsochroneMetric::Cost,
+        });
+        let mut on_far_street = SnapRequest::new(GeoPoint::new(52.00036, 21.002), request.profile);
+        on_far_street.max_distance_m = Some(5);
+        let far = engine
+            .snap(on_far_street)
+            .candidates
+            .iter()
+            .map(|candidate| candidate.edge_id)
+            .collect::<Vec<_>>();
+        assert!(!far.is_empty());
+        let result = engine.isochrone(request.clone()).unwrap();
+        assert!(!far.contains(&result.origin.edge_id));
+        let starts = |metric: RouteIsochroneMetric| {
+            result
+                .buckets
+                .iter()
+                .filter(|bucket| bucket.metric == metric)
+                .flat_map(|bucket| &bucket.boundary_fragments)
+                .filter(|fragment| far.contains(&fragment.edge_id))
+                .map(|fragment| fragment.start_metric)
+                .collect::<Vec<_>>()
+        };
+        // The farther street's seed costs its approach, but its time starts
+        // at zero, as a matrix row's does.
+        let time = starts(RouteIsochroneMetric::TimeSeconds);
+        assert!(!time.is_empty());
+        assert!(time.iter().all(|start| *start == 0.0), "{time:?}");
+
+        let reference = crate::reference::ReferenceEngine::new(
+            &graph,
+            std::sync::Arc::new(
+                crate::test_support::package(&graph, &crate::test_support::test_options())
+                    .unwrap()
+                    .0,
+            ),
+        );
+        // The oracle starts time at zero too.
+        let expected = reference.isochrone(request).unwrap();
+        for (expected, actual) in expected.buckets.iter().zip(&result.buckets) {
+            assert_eq!(expected.edge_ids, actual.edge_ids);
+            let starts = |bucket: &RouteIsochroneBucket| {
+                bucket
+                    .boundary_fragments
+                    .iter()
+                    .map(|fragment| (fragment.edge_id, fragment.start_metric))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(starts(expected), starts(actual));
+        }
+    }
 }
