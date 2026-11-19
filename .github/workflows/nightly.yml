@@ -1,7 +1,9 @@
-name: Nightly
+name: Gate and fuzz
 
 # The slow runs that stay off developer machines, on in-repo fixtures only
-# (no large downloads):
+# (no large downloads). Manual only (Actions > Gate and fuzz > Run workflow):
+# no schedule, so it uses no CI minutes unless started, and it runs on
+# GitHub-hosted runners, free for public repositories.
 # - gate: the Kraków centre regional gate, latency by request class, and
 #   gates.sh timing against the last release on the same package, recorded
 #   in the job summary and a 90-day artifact (benchmarks/gates/nightly.sh).
@@ -13,8 +15,6 @@ name: Nightly
 # REGION=malopolskie MALOPOLSKIE_PBF=<extract> benchmarks/gates/nightly.sh.
 
 on:
-  schedule:
-    - cron: "23 2 * * *" # 02:23 UTC daily
   workflow_dispatch:
     inputs:
       fuzz_minutes:
@@ -39,8 +39,8 @@ env:
 
 jobs:
   gate:
-    if: github.event_name == 'schedule' || inputs.jobs != 'fuzz'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: inputs.jobs != 'fuzz'
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # Outside the checkout, as gates.sh asks; rust-cache paths below match.
@@ -111,8 +111,8 @@ jobs:
             ${{ runner.temp }}/nightly/gate/routes.jsonl
 
   fuzz:
-    if: github.event_name == 'schedule' || inputs.jobs != 'gate'
-    runs-on: blacksmith-4vcpu-ubuntu-2404 # one core per target
+    if: inputs.jobs != 'gate'
+    runs-on: ubuntu-24.04 # 4 cores on public repositories: one per target
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -135,7 +135,7 @@ jobs:
           restore-keys: fuzz-corpus-
       - name: Fuzz
         env:
-          FUZZ_MINUTES: ${{ inputs.fuzz_minutes || '30' }}
+          FUZZ_MINUTES: ${{ inputs.fuzz_minutes }}
         run: scripts/fuzz-nightly.sh "$((FUZZ_MINUTES * 60))"
       - name: Keep the corpora
         if: ${{ !cancelled() }}

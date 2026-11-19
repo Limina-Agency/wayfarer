@@ -61,18 +61,19 @@ overlap, length and time ratios, road-type shares, snapping).
 `valhalla/bench.sh <region>` runs all of it into one report; see
 `valhalla/README.md`.
 
-## Nightly
+## Gate and fuzz workflow
 
-`.github/workflows/nightly.yml` runs `gates/nightly.sh` every night on the
-in-repo fixtures only (no large downloads in CI): the `krakow-centre` gate,
-then latency by request class (route_response_dump's phase bench: p50/p95 of
-the per-case medians, per profile and distance bucket) and `gates.sh timing`
+`.github/workflows/nightly.yml` ("Gate and fuzz") runs `gates/nightly.sh` when
+started by hand (Actions > Gate and fuzz > Run workflow; no schedule, to keep
+CI minutes down), on the in-repo fixtures only: the `krakow-centre` gate, then
+latency by request class (route_response_dump's phase bench: p50/p95 of the
+per-case medians, per profile and distance bucket) and `gates.sh timing`
 against the last release's binaries on the same package. The job summary
 shows the numbers; the artifact `nightly-gate-<run>` (kept 90 days) has them as
 `nightly.json`, with the gate report and route dump. Timings are recorded, not
 judged: shared runners are too noisy for a threshold, so compare trends. The
-same workflow fuzzes every target for 30 minutes with overflow checks
-(`scripts/fuzz-nightly.sh`) on corpora kept in the Actions cache.
+same workflow fuzzes every target (30 minutes each by default) with overflow
+checks (`scripts/fuzz-nightly.sh`) on corpora kept in the Actions cache.
 
 The Małopolskie gate stays a run on a cloud machine with the extract:
 
