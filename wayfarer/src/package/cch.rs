@@ -1074,6 +1074,31 @@ fn exact_offsets(
 }
 
 // -------------------------------------------------------------------------
+// Read-only accessors for the regions prototype (`crate::regions`)
+// -------------------------------------------------------------------------
+
+#[cfg(feature = "experimental-regions")]
+impl CchTopology {
+    /// Nodes in the order.
+    pub(crate) fn node_count(&self) -> usize {
+        self.rank.len()
+    }
+
+    /// The package node at rank `rank`.
+    pub(crate) fn node_at(&self, rank: u32) -> u32 {
+        self.node[rank as usize]
+    }
+
+    /// The elimination-tree parent of rank `rank` (`None` at a root). Nodes
+    /// in different subtrees of one node share no edge: every edge joins a
+    /// node to one of its ancestors.
+    pub(crate) fn parent_of(&self, rank: u32) -> Option<u32> {
+        let parent = self.parent[rank as usize];
+        (parent != NO_NODE).then_some(parent)
+    }
+}
+
+// -------------------------------------------------------------------------
 // One-to-all distances and via candidates (alternatives)
 // -------------------------------------------------------------------------
 

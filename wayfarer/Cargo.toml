@@ -53,6 +53,10 @@ reference = [
 # Debug switches read from the environment (WAYFARER_DEBUG, _VERIFY,
 # _UNIDIRECTIONAL) for the parity harnesses and profiling.
 debug-env = []
+# Prototype, not a supported API: a bounds-guided (potential-guided) search
+# across a virtual seam cut inside one package (`wayfarer::regions`, lane
+# `REG`, EXP-5b step 1). Changes no default code path.
+experimental-regions = []
 
 [dev-dependencies]
 # Re-signs tampered packages in the hostile-package tests.
