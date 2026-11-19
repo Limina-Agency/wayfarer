@@ -17,10 +17,69 @@ struct PendingWay {
     osm_way_id: i64,
     /// The way's sorted, distinct lineage; empty for the common `[osm_way_id]`.
     source_lineage_ids: Box<[i64]>,
-    points: Vec<(f64, f64)>,
+    points: PendingPoints,
     /// `(point index, node id)` for the points that have a source node id, in
     /// point order: usually only the two endpoints.
-    source_node_ids: Vec<(u32, i64)>,
+    source_node_ids: Box<[(u32, i64)]>,
+}
+
+/// A pending way's points: E7 pairs (half the size) when every point is the
+/// `f64` of its E7 value, as the compiler's are; the points as given
+/// otherwise.
+#[derive(Debug)]
+enum PendingPoints {
+    Fixed(Box<[(i32, i32)]>),
+    Exact(Box<[(f64, f64)]>),
+}
+
+impl PendingPoints {
+    fn new(points: Vec<(f64, f64)>) -> Self {
+        let fixed = points
+            .iter()
+            .map(|&(lat, lng)| (to_fixed(lat), to_fixed(lng)))
+            .collect::<Vec<_>>();
+        let exact = points
+            .iter()
+            .zip(&fixed)
+            .all(|(&(lat, lng), &(lat7, lng7))| {
+                from_fixed(lat7).to_bits() == lat.to_bits()
+                    && from_fixed(lng7).to_bits() == lng.to_bits()
+            });
+        if exact {
+            Self::Fixed(fixed.into_boxed_slice())
+        } else {
+            Self::Exact(points.into_boxed_slice())
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Fixed(points) => points.len(),
+            Self::Exact(points) => points.len(),
+        }
+    }
+
+    /// The point at `index` in fixed point (`to_fixed` of each coordinate).
+    fn fixed(&self, index: usize) -> (i32, i32) {
+        match self {
+            Self::Fixed(points) => points[index],
+            Self::Exact(points) => (to_fixed(points[index].0), to_fixed(points[index].1)),
+        }
+    }
+
+    /// The points as given, into `buffer`.
+    fn read_into<'a>(&self, buffer: &'a mut Vec<(f64, f64)>) -> &'a [(f64, f64)] {
+        buffer.clear();
+        match self {
+            Self::Fixed(points) => buffer.extend(
+                points
+                    .iter()
+                    .map(|&(lat, lng)| (from_fixed(lat), from_fixed(lng))),
+            ),
+            Self::Exact(points) => buffer.extend_from_slice(points),
+        }
+        buffer
+    }
 }
 
 impl PendingWay {
@@ -206,12 +265,12 @@ impl RoadGraphBuilder {
             Vec::new()
         };
         way.source_node_ids = Vec::new();
-        let points = std::mem::take(&mut way.points);
+        let points = PendingPoints::new(std::mem::take(&mut way.points));
 
         let motor = mode_mask & MOTOR_MODES != 0;
         let last = points.len() - 1;
-        for (index, &(lat, lng)) in points.iter().enumerate() {
-            let key = (to_fixed(lat), to_fixed(lng));
+        for index in 0..points.len() {
+            let key = points.fixed(index);
             let counts = self.coord_counts.entry(key).or_default();
             counts.points += 1;
             if motor {
@@ -241,7 +300,7 @@ impl RoadGraphBuilder {
             osm_way_id,
             source_lineage_ids,
             points,
-            source_node_ids,
+            source_node_ids: source_node_ids.into_boxed_slice(),
         };
 
         match self.ways.last_mut() {
@@ -319,9 +378,9 @@ impl RoadGraphBuilder {
                 // The first segment's points; each further one adds its own.
                 point_estimate += way.points.len() - 1;
             }
-            for (index, &(lat, lng)) in way.points.iter().enumerate() {
+            for index in 0..way.points.len() {
                 let counts = coord_counts
-                    .get(&(to_fixed(lat), to_fixed(lng)))
+                    .get(&way.points.fixed(index))
                     .copied()
                     .unwrap_or_default();
                 let shared = counts.points > 1;
@@ -366,6 +425,7 @@ impl RoadGraphBuilder {
 
         let mut point_cursor = 0usize;
         let mut source_node_ids = Vec::<Option<i64>>::new();
+        let mut point_buffer = Vec::<(f64, f64)>::new();
         // The class of the last way's template. Consecutive pushes of one way
         // share their attributes (`PendingWay::attrs`), so its template is
         // interned once; the `Arc` is held so its address is not reused.
@@ -373,7 +433,7 @@ impl RoadGraphBuilder {
         for pending in self.ways.into_iter().flatten() {
             let way_point_start = point_cursor;
             point_cursor += pending.points.len();
-            let points = &pending.points;
+            let points = pending.points.read_into(&mut point_buffer);
             if points.len() < 2 {
                 continue;
             }
@@ -390,7 +450,7 @@ impl RoadGraphBuilder {
                             allow_bicycle: plaza_allows_bicycle(way),
                             segments: Vec::new(),
                         });
-                accumulator.segments.push(points.clone());
+                accumulator.segments.push(points.to_vec());
             }
 
             let road_factor = road_surface_factor(way);

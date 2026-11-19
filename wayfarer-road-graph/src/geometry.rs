@@ -8,6 +8,11 @@ pub(crate) fn to_fixed(value: f64) -> i32 {
     (value * COORD_SCALE).round() as i32
 }
 
+/// The coordinate of a fixed-point value, as the line network computes it.
+pub(crate) fn from_fixed(value: i32) -> f64 {
+    f64::from(value) / COORD_SCALE
+}
+
 /// The haversine length of the polyline (geo's mean Earth radius), summed
 /// segment by segment as geo's `Haversine.length` of a `LineString` does, with
 /// deterministic trigonometry.
