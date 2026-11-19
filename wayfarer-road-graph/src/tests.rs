@@ -704,7 +704,7 @@ fn enhancement_assigns_components_degrees_headings_speeds_and_warnings() {
     assert!(first_edge.start_heading_deg.is_some());
     assert!(first_edge.end_heading_deg.is_some());
     assert_eq!(first_edge.inferred_speed_kph, Some(22));
-    assert!(first_edge.estimated_travel_time_s.unwrap() > 0.0);
+    assert!(first_edge.estimated_travel_time_s().unwrap() > 0.0);
     assert_eq!(first_edge.hierarchy_tier, Some(RoadHierarchyTier::Local));
 }
 
