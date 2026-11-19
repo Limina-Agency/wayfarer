@@ -819,22 +819,21 @@ fn build_road_graph(
     report_finalize_checkpoint(job, "after_builder_finish", rows_written)?;
 
     let phase = Phase::start("graph_source_enrichment");
+    // The graph's ways are those before the facts apply; they filter the
+    // memberships and restrictions first, so their list is gone before the
+    // facts' classes are built.
     let graph_way_ids = graph_way_ids(&road_graph);
+    let route_memberships = filtered_route_memberships(route_memberships, &graph_way_ids);
+    let turn_restrictions = filtered_turn_restrictions(turn_restrictions, &graph_way_ids);
+    drop(graph_way_ids);
     way_facts.restore().map_err(CompileError::Failed)?;
     road_graph.refresh_shared_edge_way_facts_par_with(|way_id| way_facts.get(way_id))?;
     // Not read again.
     drop(way_facts);
     report_finalize_checkpoint(job, "after_apply_way_facts", rows_written)?;
-    road_graph.set_route_memberships(filtered_route_memberships(
-        route_memberships,
-        &graph_way_ids,
-    ));
+    road_graph.set_route_memberships(route_memberships);
     report_finalize_checkpoint(job, "after_load_route_memberships", rows_written)?;
-    road_graph.set_turn_restrictions(filtered_turn_restrictions(
-        turn_restrictions,
-        &graph_way_ids,
-    ));
-    drop(graph_way_ids);
+    road_graph.set_turn_restrictions(turn_restrictions);
     report_finalize_checkpoint(job, "after_load_turn_restrictions", rows_written)?;
     road_graph.refresh_route_membership_metadata();
     let raw_turn_restriction_count = road_graph.turn_restrictions.len();
