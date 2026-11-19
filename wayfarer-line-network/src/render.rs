@@ -208,7 +208,7 @@ fn render_seed_from_topology_edge(
         sort_order: edge.sort_order,
         start_node: edge.start_node,
         end_node: edge.end_node,
-        source_lineage_ids: edge.source_lineage_ids.clone(),
+        source_lineage_ids: edge.source_lineage_ids.to_vec(),
         topology_edge_ids: vec![edge.edge_id],
         directional_access: edge
             .routing

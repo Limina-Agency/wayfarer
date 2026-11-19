@@ -94,10 +94,6 @@ pub struct RoadNode {
     #[serde(default)]
     pub highest_incident_road_type: Option<RoadType>,
     #[serde(default)]
-    pub incoming_road_type_counts: Vec<RoadGraphNamedCount>,
-    #[serde(default)]
-    pub outgoing_road_type_counts: Vec<RoadGraphNamedCount>,
-    #[serde(default)]
     pub roundabout_entry_count: u16,
     #[serde(default)]
     pub roundabout_exit_count: u16,
@@ -127,10 +123,6 @@ pub struct RoadEdge {
     pub traversal_direction: TraversalDirection,
     #[serde(default)]
     pub segment_index: u32,
-    #[serde(default)]
-    pub source_lineage_ids: Vec<i64>,
-    #[serde(default)]
-    pub coverage_id: Option<String>,
     #[serde(default)]
     pub component_id: Option<u32>,
     #[serde(default)]

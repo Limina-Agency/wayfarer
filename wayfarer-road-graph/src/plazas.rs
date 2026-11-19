@@ -299,7 +299,6 @@ pub(crate) fn synthesize_pedestrian_plazas(
                         osm_reverse_mode_mask: forward_mask,
                         hierarchy_tier: Some(RoadHierarchyTier::Local),
                         traversal_direction,
-                        source_lineage_ids: vec![synthetic_way_id],
                         ..Default::default()
                     },
                 );
