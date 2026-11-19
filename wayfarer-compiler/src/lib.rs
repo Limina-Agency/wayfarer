@@ -2217,6 +2217,76 @@ mod tests {
         );
     }
 
+    /// Turns resolved for a no-left-turn from way 1 onto way 3 at node 10,
+    /// with extra relation tags, and the compile's restriction report.
+    fn resolve_left_turn_ban(
+        extra_tags: FixtureTags<'_>,
+    ) -> (
+        Vec<ResolvedEdgeRestriction>,
+        wayfarer_road_graph::RoadGraphRestrictionReport,
+    ) {
+        let mut tags = vec![("type", "restriction")];
+        tags.extend_from_slice(extra_tags);
+        let compiled = compile_fixture_graph(
+            JUNCTION_NODES,
+            JUNCTION_WAYS,
+            &[FixtureRelation {
+                id: 300,
+                tags: &tags,
+                members: &[("from", WAY, 1), ("via", NODE, 10), ("to", WAY, 3)],
+            }],
+        );
+        (
+            compiled.road_graph.resolved_restrictions.clone(),
+            compiled.road_graph_quality.restriction_report,
+        )
+    }
+
+    #[test]
+    fn restrictions_for_modes_no_profile_routes_ban_no_turn() {
+        for tags in [
+            &[("restriction:hgv", "no_left_turn")][..],
+            &[("restriction:bus", "no_left_turn")],
+            &[("restriction:psv", "no_left_turn")],
+            &[("restriction:goods", "no_left_turn")],
+            &[("restriction:emergency", "no_left_turn")],
+            &[("restriction:bicycle", "no_left_turn")],
+            &[("restriction", "no_left_turn"), ("except", "motorcar")],
+            &[("restriction", "no_left_turn"), ("except", "motor_vehicle")],
+        ] {
+            let (resolved, report) = resolve_left_turn_ban(tags);
+            assert!(resolved.is_empty(), "{tags:?} resolved to {resolved:?}");
+            assert_eq!(report.mode_not_routed_restriction_count, 1, "{tags:?}");
+            assert_eq!(report.unresolved_restriction_count, 0, "{tags:?}");
+            assert_eq!(report.raw_restriction_count, 1, "{tags:?}");
+        }
+    }
+
+    #[test]
+    fn car_restrictions_still_bind_cars_whatever_they_except() {
+        let wheeled =
+            wayfarer_road_graph::MobilityMode::WHEELED | wayfarer_road_graph::MobilityMode::TRACKED;
+        for tags in [
+            &[("restriction", "no_left_turn")][..],
+            &[("restriction:motorcar", "no_left_turn")],
+            &[("restriction:motor_vehicle", "no_left_turn")],
+            &[("restriction", "no_left_turn"), ("except", "bus;bicycle")],
+            &[("restriction", "no_left_turn"), ("except", "hgv")],
+        ] {
+            let (resolved, report) = resolve_left_turn_ban(tags);
+            let [
+                ResolvedEdgeRestriction::Simple {
+                    mobility_mode_mask, ..
+                },
+            ] = resolved.as_slice()
+            else {
+                panic!("{tags:?} resolved to {resolved:?}");
+            };
+            assert_eq!(*mobility_mode_mask, wheeled, "{tags:?}");
+            assert_eq!(report.mode_not_routed_restriction_count, 0, "{tags:?}");
+        }
+    }
+
     #[test]
     fn manifest_counts_raw_restrictions_and_route_memberships() {
         let dir = tempfile::tempdir().unwrap();

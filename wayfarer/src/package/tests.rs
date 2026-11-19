@@ -639,6 +639,44 @@ fn package_search_honours_turn_restriction_keyed_by_osm_via_node() {
     assert!(walk.edge_ids.windows(2).any(|pair| pair == [from, to]));
 }
 
+/// A restriction row that binds no routed mode (mobility mask 0, as a road
+/// graph resolved before `restriction:hgv` and the like were left out still
+/// carries) bans the turn for no profile, in the package and the oracle.
+#[test]
+fn restriction_binding_no_routed_mode_bans_no_turn() {
+    let dir = tempdir().unwrap();
+    let mut graph = junction_graph();
+    let from = edge_between(&graph, 1, 10, 11);
+    let to = edge_between(&graph, 3, 11, 13);
+    graph.set_resolved_restrictions(vec![ResolvedEdgeRestriction::Simple {
+        relation_id: 78,
+        restriction: "no_left_turn".into(),
+        from_edge_id: from,
+        to_edge_id: to,
+        via_node_id: 11,
+        osm_mode_mask: OsmMode::HGV,
+        mobility_mode_mask: 0,
+    }]);
+    let reader = persist(&graph, &dir.path().join("junction.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let origin = GeoPoint::new(0.0, 0.0004);
+    let destination = GeoPoint::new(0.0016, 0.002);
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        let routes = [
+            route(&oracle, origin, destination, profile, |_| {}),
+            route(&compact, origin, destination, profile, |_| {}),
+        ];
+        for routed in routes {
+            let routed = routed.expect("route");
+            assert!(
+                routed.edge_ids.windows(2).any(|pair| pair == [from, to]),
+                "{profile:?} avoided a turn no profile is banned from: {:?}",
+                routed.edge_ids
+            );
+        }
+    }
+}
+
 /// Plain routes, matrices and isochrones carry compact edges from correlation
 /// to the result, so they never build the edge id lookup; a request
 /// that names an edge id does.

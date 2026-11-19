@@ -137,6 +137,12 @@ pub struct RoadGraphRestrictionReport {
     pub unresolved_missing_to_edge_count: usize,
     pub unresolved_missing_via_node_or_path_count: usize,
     pub unsupported_via_relation_count: usize,
+    /// Restrictions left out because they bind only modes no profile routes
+    /// (`restriction:hgv`, `:bus`, `:bicycle`, or a plain restriction whose
+    /// `except` leaves only those). Neither resolved nor unresolved; left out
+    /// of the report when zero, so packages without any keep their bytes.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_not_routed_restriction_count: usize,
     pub restriction_kind_counts: Vec<RoadGraphNamedCount>,
     pub unresolved_examples: Vec<RoadGraphUnresolvedRestrictionExample>,
 }
@@ -237,4 +243,8 @@ pub struct RoadGraphShortcutCandidateExample {
     pub ref_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<u32>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }

@@ -745,7 +745,7 @@ struct ResolvedSimpleRestriction {
 
 impl ResolvedSimpleRestriction {
     fn applies_to_mode(self, profile_mask: ModeMask) -> bool {
-        self.mobility_mode_mask == 0 || self.mobility_mode_mask & profile_mask != 0
+        self.mobility_mode_mask & profile_mask != 0
     }
 }
 
@@ -759,7 +759,7 @@ struct ResolvedComplexRestriction {
 
 impl ResolvedComplexRestriction {
     fn applies_to_mode(&self, profile_mask: ModeMask) -> bool {
-        self.mobility_mode_mask == 0 || self.mobility_mode_mask & profile_mask != 0
+        self.mobility_mode_mask & profile_mask != 0
     }
 }
 
