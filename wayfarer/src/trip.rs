@@ -1006,6 +1006,21 @@ fn assemble_result(
         );
         for maneuver in segment.maneuvers() {
             if segment_index > 0 && maneuver.kind == RouteManeuverKind::Start {
+                // The Waypoint maneuver ending the previous leg runs on to
+                // this leg's next maneuver in place of its Start. (A direct
+                // previous leg ends without one.)
+                if let Some(waypoint) =
+                    maneuvers
+                        .last_mut()
+                        .filter(|waypoint: &&mut RouteManeuver| {
+                            waypoint.kind == RouteManeuverKind::Waypoint
+                                && waypoint.leg_index == Some(segment_index - 1)
+                        })
+                {
+                    waypoint.distance_m = maneuver.distance_m;
+                    waypoint.duration_s = maneuver.duration_s;
+                    waypoint.end_shape_index = maneuver.end_shape_index + shape_offset;
+                }
                 continue;
             }
             let mut maneuver = maneuver.clone();

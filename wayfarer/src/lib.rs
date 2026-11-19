@@ -166,10 +166,10 @@ pub use types::{
     RouteEdgeCostMultiplierRange, RouteEdgeRange, RouteEdgeSpeedOverrideRange,
     RouteEndpointOptions, RouteError, RouteFailure, RouteGuidanceQualityFlag,
     RouteIsochroneBoundaryFragment, RouteIsochroneBucket, RouteIsochroneContour,
-    RouteIsochroneMetric, RouteIsochroneRequest, RouteIsochroneResult, RouteLeg, RouteManeuver,
-    RouteManeuverKind, RouteMatrixCell, RouteMatrixCellStatus, RouteMatrixRequest,
-    RouteMatrixResult, RouteOptions, RoutePolicySummary, RouteRecostSummary,
-    RouteShapeDynamicOverlay, RouteShapeDynamicOverlayKind, RouteShapeQualityFlag,
-    RouteShapeSegment, RouteSpeedPreference, RouteSpeedSource, RouteStatus,
+    RouteIsochroneMetric, RouteIsochroneRequest, RouteIsochroneResult, RouteLane,
+    RouteLaneIndication, RouteLeg, RouteManeuver, RouteManeuverKind, RouteMatrixCell,
+    RouteMatrixCellStatus, RouteMatrixRequest, RouteMatrixResult, RouteOptions, RoutePolicySummary,
+    RouteRecostSummary, RouteShapeDynamicOverlay, RouteShapeDynamicOverlayKind,
+    RouteShapeQualityFlag, RouteShapeSegment, RouteSpeedPreference, RouteSpeedSource, RouteStatus,
 };
 pub use wayfarer_costing::COSTING_MODEL_VERSION;

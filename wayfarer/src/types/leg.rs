@@ -588,9 +588,45 @@ pub struct RouteManeuver {
     pub end_shape_index: usize,
     pub road_name: Option<String>,
     pub turn_angle_deg: Option<i16>,
+    /// The lanes of the road approaching the maneuver's junction, left to
+    /// right, from that road's `turn:lanes` tags; empty when it has none or
+    /// the maneuver is not at a junction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<RouteLane>,
     /// The leg of a multi-leg route this maneuver belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_index: Option<usize>,
+}
+
+/// One lane of the road approaching a maneuver's junction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RouteLane {
+    /// The lane's marked directions, in tag order; `none` for an unmarked
+    /// lane. Marks the engine does not know are left out.
+    pub indications: Vec<RouteLaneIndication>,
+    /// Whether the lane serves the maneuver.
+    pub valid: bool,
+}
+
+/// A direction marked on a lane (an OSM `turn:lanes` value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RouteLaneIndication {
+    /// No marking (`none` or an empty value): usually straight on.
+    None,
+    Through,
+    SlightLeft,
+    Left,
+    SharpLeft,
+    SlightRight,
+    Right,
+    SharpRight,
+    Reverse,
+    MergeToLeft,
+    MergeToRight,
 }
 
 impl Default for RouteManeuver {
@@ -618,6 +654,7 @@ impl Default for RouteManeuver {
             end_shape_index: 0,
             road_name: None,
             turn_angle_deg: None,
+            lanes: Vec::new(),
             leg_index: None,
         }
     }
