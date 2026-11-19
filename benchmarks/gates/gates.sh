@@ -8,16 +8,27 @@
 #   gates.sh timing   <bin_a> <bin_b> <pkg_dir> [runs=3]   G4: alternating warm/cold timings
 #   gates.sh tests    <log_file>                    G1: workspace tests
 #
-# Needs CARGO_TARGET_DIR outside the repo and MALOPOLSKIE_PBF (the Geofabrik
-# extract poland/malopolskie-latest.osm.pbf). Builds without sccache.
+# Needs CARGO_TARGET_DIR outside the repo; packages and dumps need
+# MALOPOLSKIE_PBF (the Geofabrik extract poland/malopolskie-latest.osm.pbf).
+# timing routes <pkg_dir>/$REGION/routing.mrt with $REGION-corpus.json
+# (REGION=malopolskie by default; krakow-centre for a package compiled from
+# fixtures/krakow-centre.osm.pbf). Builds without sccache.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/benchmarks/gates"
 RUST="$ROOT"
-: "${MALOPOLSKIE_PBF:?set MALOPOLSKIE_PBF to the Malopolskie OSM extract}"
 MONACO_PBF="$RUST/fixtures/monaco.osm.pbf"
-COLD_CASE="${COLD_CASE:-krakow-tarnow-long-regional}"
+REGION="${REGION:-malopolskie}"
+case "$REGION" in
+  malopolskie) default_cold_case=krakow-tarnow-long-regional ;;
+  krakow-centre) default_cold_case=krakow-centre-west-east ;;
+  *) echo "unknown REGION $REGION" >&2; exit 2 ;;
+esac
+COLD_CASE="${COLD_CASE:-$default_cold_case}"
+need_malopolskie() {
+  : "${MALOPOLSKIE_PBF:?set MALOPOLSKIE_PBF to the Malopolskie OSM extract}"
+}
 export RUSTC_WRAPPER=
 export CARGO_PROFILE_RELEASE_STRIP=none
 : "${CARGO_TARGET_DIR:?set CARGO_TARGET_DIR to a directory outside the repo}"
@@ -68,6 +79,7 @@ EOF
 
 cmd_packages() {
   local bin="$1" out="$2"
+  need_malopolskie
   mkdir -p "$out"
   { compile_package "$bin" "$out" malopolskie "$MALOPOLSKIE_PBF" PL
     compile_package "$bin" "$out" monaco "$MONACO_PBF" MC; } | tee "$out/packages.txt"
@@ -111,13 +123,13 @@ cmd_compare() {
 }
 
 warm_run() {
-  "$1/route_response_dump" "$2/malopolskie/routing.mrt" "$HERE/malopolskie-corpus.json" 200 |
+  "$1/route_response_dump" "$2/$REGION/routing.mrt" "$HERE/$REGION-corpus.json" 200 |
     sed -nE 's/^routes: .*median request ([0-9.]+) ms, p95 ([0-9.]+) ms/\1 \2/p; s/^correlation: .*median ([0-9.]+) ms/\1/p' |
     paste -sd' ' -
 }
 
 cold_run() {
-  DUMP_COLD_CASE="$COLD_CASE" "$1/route_response_dump" "$2/malopolskie/routing.mrt" "$HERE/malopolskie-corpus.json" |
+  DUMP_COLD_CASE="$COLD_CASE" "$1/route_response_dump" "$2/$REGION/routing.mrt" "$HERE/$REGION-corpus.json" |
     sed -nE 's/.*first +([0-9.]+) +warm +([0-9.]+).*/\1 \2/p'
 }
 

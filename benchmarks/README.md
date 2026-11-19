@@ -39,7 +39,7 @@ the baseline too.
 | Region | Extract | Cases | Time | Run by |
 |---|---|---|---|---|
 | `krakow-centre` | `fixtures/krakow-centre.osm.pbf` (783 kB) | 22 corpus, 60 random | ~3 s | `scripts/check.sh` |
-| `malopolskie` | `$MALOPOLSKIE_PBF` | 124 corpus, 200 random | ~1 min | on demand or nightly |
+| `malopolskie` | `$MALOPOLSKIE_PBF` | 124 corpus, 200 random | ~1 min | on demand, on a cloud machine |
 
 The `malopolskie` baseline is recorded on Geofabrik's
 `malopolskie-261118.osm.pbf` (sha256 `777306c5c0bd2898…`, dataset hash
@@ -60,3 +60,24 @@ compilation (time, peak memory, size) and routes on the same pairs (path
 overlap, length and time ratios, road-type shares, snapping).
 `valhalla/bench.sh <region>` runs all of it into one report; see
 `valhalla/README.md`.
+
+## Nightly
+
+`.github/workflows/nightly.yml` runs `gates/nightly.sh` every night on the
+in-repo fixtures only (no large downloads in CI): the `krakow-centre` gate,
+then latency by request class (route_response_dump's phase bench: p50/p95 of
+the per-case medians, per profile and distance bucket) and `gates.sh timing`
+against the last release's binaries on the same package. The job summary
+shows the numbers; the artifact `nightly-gate-<run>` (kept 90 days) has them as
+`nightly.json`, with the gate report and route dump. Timings are recorded, not
+judged: shared runners are too noisy for a threshold, so compare trends. The
+same workflow fuzzes every target for 30 minutes with overflow checks
+(`scripts/fuzz-nightly.sh`) on corpora kept in the Actions cache.
+
+The Małopolskie gate stays a run on a cloud machine with the extract:
+
+```sh
+CARGO_TARGET_DIR=/tmp/wayfarer-target benchmarks/gates/gates.sh build /tmp/bin
+REGION=malopolskie MALOPOLSKIE_PBF=malopolskie-261118.osm.pbf \
+  CARGO_TARGET_DIR=/tmp/wayfarer-target benchmarks/gates/nightly.sh /tmp/bin /tmp/nightly [/tmp/bin-release]
+```

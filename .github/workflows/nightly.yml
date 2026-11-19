@@ -1,0 +1,154 @@
+name: Nightly
+
+# The slow runs that stay off developer machines, on in-repo fixtures only
+# (no large downloads):
+# - gate: the Kraków centre regional gate, latency by request class, and
+#   gates.sh timing against the last release on the same package, recorded
+#   in the job summary and a 90-day artifact (benchmarks/gates/nightly.sh).
+# - fuzz: every fuzz target in parallel with overflow checks, time-boxed, on
+#   corpora kept in the Actions cache; the targets use the Monaco fixture
+#   (scripts/fuzz-nightly.sh).
+#
+# The Małopolskie gate (V3/V4 in the work plan) stays a cloud-machine run:
+# REGION=malopolskie MALOPOLSKIE_PBF=<extract> benchmarks/gates/nightly.sh.
+
+on:
+  schedule:
+    - cron: "23 2 * * *" # 02:23 UTC daily
+  workflow_dispatch:
+    inputs:
+      fuzz_minutes:
+        description: Minutes per fuzz target (all run at once)
+        default: "30"
+      jobs:
+        description: Which jobs to run
+        type: choice
+        options: [all, gate, fuzz]
+        default: all
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  FUZZ_TOOLCHAIN: nightly-2026-11-01
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  gate:
+    if: github.event_name == 'schedule' || inputs.jobs != 'fuzz'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 90
+    env:
+      # Outside the checkout, as gates.sh asks; rust-cache paths below match.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../target-nightly
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the release tags
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-gate
+          workspaces: ". -> ../target-nightly"
+
+      - name: Build this commit's gate binaries
+        run: benchmarks/gates/gates.sh build "$RUNNER_TEMP/bin"
+
+      - name: Find the last release
+        run: |
+          tag="$(git tag --list 'wayfarer-v*' --sort=-v:refname | head -n1)"
+          echo "RELEASE_TAG=$tag" >>"$GITHUB_ENV"
+          echo "RELEASE_SHA=$(git rev-parse "$tag^{commit}")" >>"$GITHUB_ENV"
+      - name: Restore the release's gate binaries
+        id: release-bin
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/bin-release
+          key: gate-bin-${{ runner.os }}-${{ env.RELEASE_SHA }}
+      - name: Build the release's gate binaries
+        if: steps.release-bin.outputs.cache-hit != 'true'
+        env:
+          # Releases up to 0.2 check for the variable even for `build`.
+          MALOPOLSKIE_PBF: /dev/null
+          CARGO_TARGET_DIR: ${{ runner.temp }}/target-release
+        run: |
+          git worktree add "$RUNNER_TEMP/release" "$RELEASE_TAG"
+          cd "$RUNNER_TEMP/release"
+          rustup toolchain install # the release's own rust-toolchain.toml
+          benchmarks/gates/gates.sh build "$RUNNER_TEMP/bin-release"
+      - name: Cache the release's gate binaries
+        if: steps.release-bin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/bin-release
+          key: gate-bin-${{ runner.os }}-${{ env.RELEASE_SHA }}
+
+      - name: Kraków centre gate, latency by class, timing against the release
+        env:
+          REGION: krakow-centre
+        run: |
+          benchmarks/gates/nightly.sh "$RUNNER_TEMP/bin" "$RUNNER_TEMP/nightly" \
+            "$RUNNER_TEMP/bin-release"
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        run: cat "$RUNNER_TEMP/nightly/summary.md" >>"$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nightly-gate-${{ github.run_number }}
+          retention-days: 90
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/nightly/summary.md
+            ${{ runner.temp }}/nightly/nightly.json
+            ${{ runner.temp }}/nightly/*.txt
+            ${{ runner.temp }}/nightly/*.log
+            ${{ runner.temp }}/nightly/gate/build.log
+            ${{ runner.temp }}/nightly/gate/routes.jsonl
+
+  fuzz:
+    if: github.event_name == 'schedule' || inputs.jobs != 'gate'
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one core per target
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchains and cargo-fuzz
+        run: |
+          rustup toolchain install # stable, for the Monaco seed
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+          cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-fuzz
+          workspaces: |
+            . -> target
+            fuzz -> target
+      - name: Restore the corpora
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz
+        env:
+          FUZZ_MINUTES: ${{ inputs.fuzz_minutes || '30' }}
+        run: scripts/fuzz-nightly.sh "$((FUZZ_MINUTES * 60))"
+      - name: Keep the corpora
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+      - name: Upload crashes and logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_number }}
+          retention-days: 90
+          path: |
+            fuzz/artifacts
+            fuzz/logs
