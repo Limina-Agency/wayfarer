@@ -675,7 +675,7 @@ fn collect_way(
         min_zoom: road_min_zoom(road_class),
         max_zoom: 14,
         sort_order: road_sort_order(road_class),
-        routing: Some(road_routing_attrs(&way.tags, road_class)),
+        routing: Some(Arc::new(road_routing_attrs(&way.tags, road_class))),
     });
     Ok(collected)
 }

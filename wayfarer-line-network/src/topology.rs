@@ -125,13 +125,10 @@ pub(crate) fn append_layer_network(
     render_products: bool,
 ) {
     let layer = inputs.first().map(|input| input.layer);
-    // Each distinct routing value once, shared by its lines and their edges.
-    let mut routing_values = FxHashMap::<RoadRoutingAttrs, Arc<RoadRoutingAttrs>>::default();
     let mut raw_lines = inputs
         .into_iter()
-        .filter_map(|input| raw_line_from_input(input, &mut routing_values))
+        .filter_map(raw_line_from_input)
         .collect::<Vec<_>>();
-    drop(routing_values);
     if raw_lines.is_empty() {
         return;
     }
@@ -231,10 +228,7 @@ pub(crate) fn append_layer_network(
     observer(&format!("{layer_name}_render_products"));
 }
 
-fn raw_line_from_input(
-    input: SharedLineInput,
-    routing_values: &mut FxHashMap<RoadRoutingAttrs, Arc<RoadRoutingAttrs>>,
-) -> Option<RawLine> {
+fn raw_line_from_input(input: SharedLineInput) -> Option<RawLine> {
     // Already normalized and interned by `push_input`, and normalization is
     // idempotent — re-running it here would only copy the shared list back out.
     let snap_compat = snap_compat_key(input.layer, &input.attrs);
@@ -260,17 +254,6 @@ fn raw_line_from_input(
         return None;
     }
     points.shrink_to_fit();
-    let routing = input
-        .routing
-        .map(|routing| match routing_values.get(&routing) {
-            Some(shared) => Arc::clone(shared),
-            None => {
-                let shared = Arc::new(routing.clone());
-                routing_values.insert(routing, Arc::clone(&shared));
-                shared
-            }
-        });
-
     Some(RawLine {
         feature_id: input.feature_id,
         layer: input.layer,
@@ -280,7 +263,8 @@ fn raw_line_from_input(
         min_zoom: input.min_zoom,
         max_zoom: input.max_zoom,
         sort_order: input.sort_order,
-        routing,
+        // Shared by `push_input`.
+        routing: input.routing,
         source_lineage_ids: input.source_lineage_ids.into(),
         snap_compat,
     })

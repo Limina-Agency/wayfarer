@@ -76,7 +76,7 @@ pub struct SharedLineInput {
     pub max_zoom: u8,
     pub sort_order: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoadRoutingAttrs>,
+    pub routing: Option<Arc<RoadRoutingAttrs>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
