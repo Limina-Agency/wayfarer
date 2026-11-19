@@ -1,7 +1,8 @@
 use crate::{
     OsmMode, RelationMemberRefType, ResolvedEdgeRestriction, RoadGraph, RoadGraphNamedCount,
     RoadGraphRestrictionReport, RoadGraphUnresolvedRestrictionExample,
-    RoadGraphUnresolvedRestrictionReason, TraversalDirection, mobility_mode_mask_from_osm,
+    RoadGraphUnresolvedRestrictionReason, SharedInfoIndex, TraversalDirection,
+    mobility_mode_mask_from_osm,
 };
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
@@ -25,11 +26,8 @@ pub fn resolve_turn_restrictions_with_report(
 ) -> (Vec<ResolvedEdgeRestriction>, RoadGraphRestrictionReport) {
     const MAX_UNRESOLVED_RESTRICTION_EXAMPLES: usize = 16;
 
-    let info_by_id = graph
-        .shared_edge_infos
-        .iter()
-        .map(|info| (info.shared_edge_info_id, info))
-        .collect::<HashMap<_, _>>();
+    // Infos by position: a hash map of a view per info was this step's peak.
+    let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
     // Restrictions are only ever resolved against edges of the ways they name,
     // so only those edges are indexed. Indexing every directed edge (with a
     // way-id set each) cost ~0.65 GiB at this phase's peak on a region, for a
@@ -52,7 +50,10 @@ pub fn resolve_turn_restrictions_with_report(
             continue;
         }
         // The edge's ways: its shared info's way and source lineage.
-        let Some(info) = info_by_id.get(&edge.shared_edge_info_id) else {
+        let Some(info) = info_index
+            .get(edge.shared_edge_info_id)
+            .map(|index| graph.shared_edge_infos.at(index))
+        else {
             continue;
         };
         if !info
