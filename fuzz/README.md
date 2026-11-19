@@ -29,6 +29,14 @@ overflow checks, which the release-mode build `cargo fuzz` makes by default
 leaves off, so arithmetic on hostile header counts panics instead of wrapping
 silently. Embedders that build with overflow checks would hit the same panic.
 
+The nightly workflow (`.github/workflows/nightly.yml`) runs
+`scripts/fuzz-nightly.sh`: every target at once, with `--debug-assertions`,
+the seeds, dictionaries and a compiled Monaco package seed, for 30 minutes
+each, on corpora it keeps in the Actions cache and minimizes after each run.
+A crash fails the run and uploads `fuzz/artifacts` and the logs as the
+artifact `fuzz-artifacts-<run>`. Locally, `FUZZ_TOOLCHAIN=nightly
+scripts/fuzz-nightly.sh 60` runs the same for a minute per target.
+
 Add `--target aarch64-apple-darwin` on Apple silicon if `cargo fuzz` picks
 the x86_64 target. Useful libFuzzer options after `--`: `-max_total_time=<s>`,
 `-timeout=10` (report inputs slower than 10 s), `-rss_limit_mb=4096`, and
