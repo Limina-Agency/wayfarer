@@ -23,7 +23,7 @@ geo = { version = "0.33.1", default-features = false }
 # `wayfarer_package::math`.
 libm = "0.2.16"
 # OSM PBF passes, published from its own repository (Limina-Agency/osm-pbf-ingest).
-osm-pbf-ingest = "0.2.0"
+osm-pbf-ingest = "0.3.0"
 petgraph = "0.8"
 rayon = "1.10"
 roaring = "0.11"

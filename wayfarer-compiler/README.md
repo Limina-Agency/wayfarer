@@ -93,9 +93,9 @@ worker process can be started):
   Wayfarer, still makes the compile fail, leaving the old package intact.
 - **Threads.** `threads: Some(n)` runs the compile on its own rayon pool of
   `n` threads (never the global pool) with `n` ingest decode workers plus a
-  reader thread. `None` runs on the current pool: call `compile` inside your
-  own `ThreadPool::install` to choose thread names, stack sizes or
-  priorities. The callback is called from the compile's threads, hence
+  reader thread. `None` runs on the current pool, with one decode worker per
+  pool thread: call `compile` inside your own `ThreadPool::install` to choose
+  the count, thread names, stack sizes or priorities. The callback is called from the compile's threads, hence
   `Send`.
 - **Nothing global.** The library prints nothing (`WAYFARER_DEBUG` is
   read only with the `debug-env` feature), never exits the process, reads no
