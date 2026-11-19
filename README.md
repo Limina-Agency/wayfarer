@@ -184,7 +184,10 @@ runs what CI runs: formatting, clippy (warnings are errors), tests, the Monaco
 package built, verified and described with the release CLI (checked against
 `fixtures/monaco-info.json`), a route, matrix and isochrone through the CLI, a
 route and cancelled routes through the C ABI (`wayfarer-ffi/examples/route.c`
-and `cancel.c`), and the Kraków centre regression gate.
+and `cancel.c`), and the Kraków centre regression gate. CI runs it on Linux
+and macOS (Apple silicon), runs the tests and the Monaco package check on
+Windows and a 32-bit Linux target, and builds the crates with the oldest Rust
+they claim (`rust-version`).
 `benchmarks/gates/` holds the change gates (byte-identical packages, identical
 route, matrix and isochrone dumps, timings) on a Małopolskie extract; see
 `benchmarks/README.md`.

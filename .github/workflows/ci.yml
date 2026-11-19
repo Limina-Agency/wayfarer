@@ -7,8 +7,7 @@ on:
 
 jobs:
   test:
-    # Linux only; scripts/check.sh runs the same checks locally on Linux or
-    # macOS.
+    # scripts/check.sh: the same checks run locally on Linux or macOS.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +25,37 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  check-macos:
+    # scripts/check.sh on Apple silicon (its Darwin branch links the C
+    # examples with CoreFoundation): tests, the Monaco package byte for byte,
+    # the C ABI examples and the Kraków centre gate.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+      - run: scripts/check.sh
+
+  msrv:
+    # The oldest Rust the crates claim (`rust-version` in Cargo.toml) must
+    # still build them; CI and releases build with the newer toolchain
+    # rust-toolchain.toml pins.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the rust-version toolchain
+        run: |
+          msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
+          echo "MSRV=$msrv" >>"$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo "+$MSRV" check --workspace --all-targets --locked
+      - run: cargo "+$MSRV" check --workspace --all-targets --all-features --locked
 
   check-windows:
     # The workspace tests, the C library's compile calls and the Monaco
