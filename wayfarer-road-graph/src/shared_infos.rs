@@ -30,6 +30,11 @@ pub struct SharedInfoRef<'a> {
     pub shared_edge_info_id: u64,
     pub osm_way_id: i64,
     pub geometry: &'a [(f64, f64)],
+    /// The source ways the info's edges come from: `[osm_way_id]` unless set
+    /// otherwise with [`SharedEdgeInfos::set_source_lineage_ids`].
+    pub source_lineage_ids: &'a [i64],
+    /// The way's `coverage_id` tag, if any.
+    pub coverage_id: Option<&'a Arc<str>>,
     pub attrs: &'a SharedEdgeInfo,
     pub class: u32,
 }
@@ -108,6 +113,11 @@ impl SharedInfoClasses {
 pub struct SharedEdgeInfos {
     edges: Vec<SharedEdge>,
     classes: SharedInfoClasses,
+    /// `(index, lineage)` of the infos whose lineage is not `[osm_way_id]`,
+    /// by index: the rare exceptions, instead of a lineage per edge.
+    lineage: Vec<(u32, Box<[i64]>)>,
+    /// `(index, coverage id)` of the infos that have one, by index.
+    coverage: Vec<(u32, Arc<str>)>,
 }
 
 impl SharedEdgeInfos {
@@ -141,30 +151,50 @@ impl SharedEdgeInfos {
     }
 
     pub fn get(&self, index: usize) -> Option<SharedInfoRef<'_>> {
-        self.edges.get(index).map(|edge| self.view(edge))
+        (index < self.edges.len()).then(|| self.view(index))
     }
 
     /// The info at `index`; panics past the end, as slice indexing does.
     pub fn at(&self, index: usize) -> SharedInfoRef<'_> {
-        self.view(&self.edges[index])
+        self.view(index)
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = SharedInfoRef<'_>> + Clone + '_ {
-        self.edges.iter().map(|edge| self.view(edge))
+        (0..self.edges.len()).map(|index| self.view(index))
     }
 
     pub fn par_iter(&self) -> impl IndexedParallelIterator<Item = SharedInfoRef<'_>> + '_ {
-        self.edges.par_iter().map(|edge| self.view(edge))
+        (0..self.edges.len())
+            .into_par_iter()
+            .map(|index| self.view(index))
     }
 
-    fn view<'a>(&'a self, edge: &'a SharedEdge) -> SharedInfoRef<'a> {
+    fn view(&self, index: usize) -> SharedInfoRef<'_> {
+        let edge = &self.edges[index];
         SharedInfoRef {
             shared_edge_info_id: edge.shared_edge_info_id,
             osm_way_id: edge.osm_way_id,
             geometry: &edge.geometry,
+            source_lineage_ids: sparse_get(&self.lineage, index)
+                .map_or(std::slice::from_ref(&edge.osm_way_id), |lineage| lineage),
+            coverage_id: sparse_get(&self.coverage, index),
             attrs: self.classes.get(edge.class),
             class: edge.class,
         }
+    }
+
+    /// Sets the source lineage of the info at `index` (`[osm_way_id]` when not
+    /// set).
+    pub fn set_source_lineage_ids(&mut self, index: usize, lineage: Vec<i64>) {
+        assert!(index < self.edges.len(), "no shared info {index}");
+        let lineage = (lineage != [self.edges[index].osm_way_id]).then(|| lineage.into());
+        sparse_set(&mut self.lineage, index, lineage);
+    }
+
+    /// Sets the `coverage_id` of the info at `index`.
+    pub fn set_coverage_id(&mut self, index: usize, coverage_id: Option<Arc<str>>) {
+        assert!(index < self.edges.len(), "no shared info {index}");
+        sparse_set(&mut self.coverage, index, coverage_id);
     }
 
     /// Appends `info`, sharing its attributes with an equal earlier info's.
@@ -290,6 +320,34 @@ impl FromIterator<SharedEdgeInfo> for SharedEdgeInfos {
 impl From<Vec<SharedEdgeInfo>> for SharedEdgeInfos {
     fn from(infos: Vec<SharedEdgeInfo>) -> Self {
         infos.into_iter().collect()
+    }
+}
+
+/// The value at `index` of a sparse `(index, value)` list sorted by index.
+fn sparse_get<T>(entries: &[(u32, T)], index: usize) -> Option<&T> {
+    if entries.is_empty() {
+        return None;
+    }
+    entries
+        .binary_search_by_key(&index, |(at, _)| *at as usize)
+        .ok()
+        .map(|at| &entries[at].1)
+}
+
+/// Sets (`Some`) or clears (`None`) the value at `index` of a sparse list;
+/// appending past the last index is the common case.
+fn sparse_set<T>(entries: &mut Vec<(u32, T)>, index: usize, value: Option<T>) {
+    let key = u32::try_from(index).expect("fewer than 2^32 shared infos");
+    match (
+        entries.binary_search_by_key(&key, |(at, _)| *at),
+        value,
+    ) {
+        (Ok(at), Some(value)) => entries[at].1 = value,
+        (Ok(at), None) => {
+            entries.remove(at);
+        }
+        (Err(at), Some(value)) => entries.insert(at, (key, value)),
+        (Err(_), None) => {}
     }
 }
 

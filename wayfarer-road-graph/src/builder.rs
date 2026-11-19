@@ -24,14 +24,6 @@ struct PendingWay {
 }
 
 impl PendingWay {
-    fn source_lineage_ids(&self) -> Vec<i64> {
-        if self.source_lineage_ids.is_empty() {
-            vec![self.osm_way_id]
-        } else {
-            self.source_lineage_ids.to_vec()
-        }
-    }
-
     /// `source_node_ids` expanded to one entry per point, into `buffer`.
     fn expand_source_node_ids(&self, buffer: &mut Vec<Option<i64>>) {
         buffer.clear();
@@ -578,6 +570,17 @@ impl RoadGraphBuilder {
                     current_segment_points.clone(),
                     template_class,
                 );
+                let info_index = graph.shared_edge_infos.len() - 1;
+                if !pending.source_lineage_ids.is_empty() {
+                    graph
+                        .shared_edge_infos
+                        .set_source_lineage_ids(info_index, pending.source_lineage_ids.to_vec());
+                }
+                if way.coverage_id.is_some() {
+                    graph
+                        .shared_edge_infos
+                        .set_coverage_id(info_index, way.coverage_id.clone());
+                }
                 self.report.created_shared_segment_count += 1;
 
                 if osm_forward_mode_mask != 0 || physical_forward {
@@ -598,8 +601,6 @@ impl RoadGraphBuilder {
                             hierarchy_tier,
                             traversal_direction: TraversalDirection::Forward,
                             segment_index,
-                            source_lineage_ids: pending.source_lineage_ids(),
-                            coverage_id: way.coverage_id.as_deref().map(str::to_string),
                             end_control: forward_control,
                             ..Default::default()
                         },
@@ -633,8 +634,6 @@ impl RoadGraphBuilder {
                             hierarchy_tier,
                             traversal_direction: TraversalDirection::Backward,
                             segment_index,
-                            source_lineage_ids: pending.source_lineage_ids(),
-                            coverage_id: way.coverage_id.as_deref().map(str::to_string),
                             end_control: backward_control,
                             ..Default::default()
                         },

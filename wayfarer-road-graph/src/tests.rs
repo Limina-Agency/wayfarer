@@ -690,8 +690,14 @@ fn enhancement_assigns_components_degrees_headings_speeds_and_warnings() {
     assert_eq!(center.junction_kind, RoadJunctionKind::Intersection);
     assert_eq!(center.highest_incident_road_type, Some(RoadType::Track));
     assert_eq!(center.component_id, Some(0));
-    assert!(!center.incoming_road_type_counts.is_empty());
-    assert!(!center.outgoing_road_type_counts.is_empty());
+    let center_index = graph
+        .graph
+        .node_indices()
+        .find(|index| graph.graph[*index].source_node_id == Some(100))
+        .unwrap();
+    let center_counts = &graph.node_road_type_counts[center_index.index()];
+    assert!(!center_counts.incoming.is_empty());
+    assert!(!center_counts.outgoing.is_empty());
     assert!(!center.is_complex_junction);
 
     let first_edge = graph.graph.edge_weights().next().unwrap();
@@ -1009,8 +1015,6 @@ fn enhancement_classifies_roundabout_and_complex_junctions() {
                 osm_reverse_mode_mask: 0,
                 traversal_direction: TraversalDirection::Forward,
                 segment_index: 0,
-                source_lineage_ids: vec![1],
-                coverage_id: None,
                 ..Default::default()
             },
         );
@@ -1028,8 +1032,6 @@ fn enhancement_classifies_roundabout_and_complex_junctions() {
             osm_reverse_mode_mask: 0,
             traversal_direction: TraversalDirection::Forward,
             segment_index: 0,
-            source_lineage_ids: vec![2],
-            coverage_id: None,
             ..Default::default()
         },
     );
@@ -1473,7 +1475,13 @@ fn graph_snapshot_round_trip_preserves_routing_facts() {
     assert_eq!(edge.edge_id, 1);
     assert_eq!(edge.traversal_direction, TraversalDirection::Forward);
     assert_eq!(edge.segment_index, 0);
-    assert_eq!(edge.source_lineage_ids, vec![10]);
+    assert_eq!(
+        restored
+            .shared_edge_info(edge.shared_edge_info_id)
+            .expect("shared edge")
+            .source_lineage_ids,
+        [10]
+    );
     let shared = restored
         .shared_edge_info(edge.shared_edge_info_id)
         .expect("shared edge")

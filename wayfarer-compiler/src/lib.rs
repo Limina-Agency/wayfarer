@@ -53,6 +53,7 @@ use wayfarer_line_network::{
 use wayfarer_package::{codec, math};
 use wayfarer_road_graph::{
     DirectionalAccess, EnhanceOptions, NodeBarrierTags, ROAD_GRAPH_SNAPSHOT_VERSION,
+    SharedInfoIndex,
     RelationMemberRefType, RoadGraph, RoadGraphBuilder, RoadGraphPackageManifest,
     RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadRouteMembership,
     RoadTurnRestriction, RoadType, RoadWayFacts, RoutableWay, TagInterner, TrafficControl,
@@ -879,6 +880,16 @@ fn graph_quality_warning_reasons(quality: &RoadGraphQualityManifest) -> Vec<Stri
 /// ways kept for SAR only (closed to every mode) name no restriction or
 /// route the legal network resolves, as before they were kept.
 fn graph_way_ids(graph: &RoadGraph) -> Vec<i64> {
+    // The lineage of every shared info a legal edge uses.
+    let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
+    let mut legal_info = vec![false; graph.shared_edge_infos.len()];
+    for edge in graph.graph.edge_weights() {
+        if !edge.is_sar_only()
+            && let Some(index) = info_index.get(edge.shared_edge_info_id)
+        {
+            legal_info[index] = true;
+        }
+    }
     let mut way_ids = graph
         .shared_edge_infos
         .iter()
@@ -886,10 +897,11 @@ fn graph_way_ids(graph: &RoadGraph) -> Vec<i64> {
         .map(|info| info.osm_way_id)
         .chain(
             graph
-                .graph
-                .edge_weights()
-                .filter(|edge| !edge.is_sar_only())
-                .flat_map(|edge| edge.source_lineage_ids.iter().copied()),
+                .shared_edge_infos
+                .iter()
+                .zip(legal_info)
+                .filter(|(_, legal)| *legal)
+                .flat_map(|(info, _)| info.source_lineage_ids.iter().copied()),
         )
         .collect::<Vec<_>>();
     way_ids.par_sort_unstable();

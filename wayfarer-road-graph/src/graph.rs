@@ -12,10 +12,21 @@ pub struct RoadGraph {
     pub route_memberships: Vec<RoadRouteMembership>,
     pub turn_restrictions: Vec<RoadTurnRestriction>,
     pub resolved_restrictions: Vec<ResolvedEdgeRestriction>,
+    /// Each node's edge counts by road type, by node index, when enhancement
+    /// derived them ([`EnhanceOptions::node_road_type_counts`]); empty
+    /// otherwise.
+    pub node_road_type_counts: Vec<NodeRoadTypeCounts>,
     /// ISO 3166-1 alpha-2 country of the build region, used at build time to
     /// resolve implicit `maxspeed` values. Not persisted in snapshots: it only
     /// influences the baked edge speeds, never the serialized format.
     pub country_code: Option<String>,
+}
+
+/// A node's incoming and outgoing edge counts by road type label.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeRoadTypeCounts {
+    pub incoming: Vec<RoadGraphNamedCount>,
+    pub outgoing: Vec<RoadGraphNamedCount>,
 }
 
 impl RoadGraph {
@@ -28,6 +39,7 @@ impl RoadGraph {
             route_memberships: Vec::new(),
             turn_restrictions: Vec::new(),
             resolved_restrictions: Vec::new(),
+            node_road_type_counts: Vec::new(),
             country_code: None,
         }
     }
@@ -306,14 +318,25 @@ struct SharedInfoLineage {
 
 impl SharedInfoLineage {
     fn new(graph: &RoadGraph, include: impl Fn(u64) -> bool) -> Self {
+        // The lineage is the info's; an info counts once some edge uses it.
+        let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
+        let mut used = vec![false; graph.shared_edge_infos.len()];
+        for edge in graph.graph.edge_weights() {
+            if let Some(index) = info_index.get(edge.shared_edge_info_id)
+                && include(edge.shared_edge_info_id)
+            {
+                used[index] = true;
+            }
+        }
         let mut pairs = graph
-            .graph
-            .edge_weights()
-            .filter(|edge| include(edge.shared_edge_info_id))
-            .flat_map(|edge| {
-                edge.source_lineage_ids
+            .shared_edge_infos
+            .iter()
+            .zip(used)
+            .filter(|(_, used)| *used)
+            .flat_map(|(info, _)| {
+                info.source_lineage_ids
                     .iter()
-                    .map(move |way_id| (edge.shared_edge_info_id, *way_id))
+                    .map(move |way_id| (info.shared_edge_info_id, *way_id))
             })
             .collect::<Vec<_>>();
         pairs.par_sort_unstable();
@@ -348,13 +371,13 @@ pub(crate) fn shared_edge_info<'a>(
 /// arithmetic; any other numbering falls back to a map with the same answers
 /// (for a repeated id, its last position). Enhancement looks an info up several
 /// times per directed edge, and hashing was a measurable share of it.
-pub(crate) struct SharedInfoIndex {
+pub struct SharedInfoIndex {
     dense_len: Option<usize>,
     by_id: HashMap<u64, usize>,
 }
 
 impl SharedInfoIndex {
-    pub(crate) fn new(infos: &SharedEdgeInfos) -> Self {
+    pub fn new(infos: &SharedEdgeInfos) -> Self {
         let dense = infos
             .iter()
             .enumerate()
@@ -376,7 +399,7 @@ impl SharedInfoIndex {
         }
     }
 
-    pub(crate) fn get(&self, shared_edge_info_id: u64) -> Option<usize> {
+    pub fn get(&self, shared_edge_info_id: u64) -> Option<usize> {
         match self.dense_len {
             Some(len) => (shared_edge_info_id >= 1 && shared_edge_info_id <= len as u64)
                 .then(|| (shared_edge_info_id - 1) as usize),
@@ -384,7 +407,7 @@ impl SharedInfoIndex {
         }
     }
 
-    pub(crate) fn contains_key(&self, shared_edge_info_id: &u64) -> bool {
+    pub fn contains_key(&self, shared_edge_info_id: &u64) -> bool {
         self.get(*shared_edge_info_id).is_some()
     }
 }
