@@ -756,6 +756,13 @@ impl RoutingEngine {
 /// the last bits (the two halves of a bidirectional search add up in
 /// another order).
 const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT: usize = 12;
+/// The on-foot cut-off when CCH potentials bound the cells: a cell then
+/// searches a corridor, while a row settles everything up to its farthest
+/// target. Measured 2026-11-19 on Malopolskie (4 threads, potentials
+/// prepared, process CPU, 12 rows of Krakow points): pairwise against rows
+/// 2.3 s and 2.9 s at 50 targets, 2.8 s and 3.3 s at 64, 3.4 s and 3.4 s at
+/// 80, 4.3 s and 3.8 s at 100; the whole Krakow 50x50 walk 8.1 s and 12.0 s.
+const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT_POTENTIALS: usize = 64;
 const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 50;
 /// The vehicle cut-off when CCH potentials bound the cells
 /// (`RoutingPackage::prepare_potentials`): a cell then searches a corridor,
@@ -772,7 +779,13 @@ const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE_POTENTIALS: usize = 400;
 /// for every profile.
 fn matrix_pairwise_max_targets(profile: MobilityProfile, potentials: bool) -> usize {
     crate::debug::matrix_pairwise_max_targets().unwrap_or(match profile {
-        MobilityProfile::OnFoot | MobilityProfile::Legged => MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT,
+        MobilityProfile::OnFoot | MobilityProfile::Legged => {
+            if potentials {
+                MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT_POTENTIALS
+            } else {
+                MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT
+            }
+        }
         MobilityProfile::Default
         | MobilityProfile::Wheeled
         | MobilityProfile::Tracked
