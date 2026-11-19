@@ -1,7 +1,7 @@
 # Wayfarer roadmap to 1.0
 
 Status: proposal, written against 0.1.3 (2026-11-17). It is meant to be argued
-with: every release lists what it delivers, why, and what has to be decided
+with: every lane lists what it delivers, why, and what has to be decided
 first. Open questions are collected at the end.
 
 ## 1. What 1.0 means
@@ -118,7 +118,7 @@ These are where Wayfarer can lead rather than catch up:
 |---|---|---|---|
 | Rust API | 9 crates, all 0.x, wide re-exports | A named set of public crates (proposal below); the rest internal | semver; `cargo-semver-checks` in CI |
 | JSON wire format | Follows the engine crate; no version field | `apiVersion` in requests/results; schemas published per version | Additive only: new optional fields, new enum values (clients must tolerate unknowns) |
-| C ABI | ABI 1 | ABI 2, designed once in 0.18 | Additive only: new functions, never changed signatures |
+| C ABI | ABI 1 | ABI 2, designed once (FFI-4) | Additive only: new functions, never changed signatures |
 | Package format | Format 1, reads N-1 for one release | Format frozen at 1.0 | Every 1.x engine reads every package a 1.x compiler wrote |
 | Costing model | Model 1; older models re-costed | Versioned separately | A model change never needs a new engine to open old packages |
 | Determinism | Same bytes on every platform | Same | Same |
@@ -280,7 +280,7 @@ Priorities: **P0** required for 1.0, **P1** strongly wanted for 1.0,
     nodes, run ALT on the core. Less work, smaller win.
   - *Multi-level partitions (MLD-style)*: also fits dynamic metrics and
     makes country scale possible.
-  Run a spike on Małopolskie with each before choosing (release 0.8). The
+  Run a spike on Małopolskie with each before choosing (PERF-2). The
   exactness guarantee and the `reference` oracle stay.
 - **Package size.** Landmarks are 34%. A hierarchy may replace most landmark
   rows; otherwise make landmark count a compile option.
@@ -359,223 +359,240 @@ Priorities: **P0** required for 1.0, **P1** strongly wanted for 1.0,
 - `#![deny(missing_docs)]` on public crates.
 - A security support policy for 1.x (fixes for the latest 1.x minor).
 
-## 7. Release plan
+## 7. Lanes and releases
 
-### 7.1 How releases are numbered
+The work runs in parallel **lanes**. Each lane has its own ordered backlog and
+can move at its own pace; a **release** (0.2 up to 0.99) ships whatever items
+across lanes are ready. The version number doesn't name a phase; a small set
+of **gates** at fixed versions says when breaking changes stop.
 
-We have room for many releases before 1.0 (0.2 up to 0.99), so each release is
-small and has one theme. The numbers are grouped into series of ten; a series
-is a phase, and each release inside it is one shippable step.
+### 7.1 Rules
 
-- **One theme per release.** A release does one thing well and says so in the
-  changelog. Small releases are easier to gate (`benchmarks/gates/`), review
-  and roll back.
-- **In cargo, every 0.x minor is a breaking release** (`0.12` → `0.13`), and
-  patches (`0.12.1`) are fixes only. So a release that only adds things is
-  still a minor bump; that's fine, it just signals nothing broke.
-- **Breaking changes get a release of their own** with a migration note in
-  the changelog. Where we can, deprecate in one release and remove in the
-  next, so hosts always have one release to move.
-- **Package format and costing model bumps are rare and announced**: at most
-  one format bump per series, and the engine keeps reading the previous
-  format (section 4).
-- **Gaps in numbering are fine.** If a series needs fewer releases, the next
-  series still starts at its round number, so the version tells you the phase
-  at a glance. If a series needs more than ten, it spills into the next
-  number range and the later series shift.
+- **Items have ids** (`PERF-3`, `FFI-2`, `FEAT-T1`, …) so issues, PRs and the
+  changelog can point at them. Each item says its priority (P0/P1/P2,
+  section 6), what it depends on, and whether it breaks anything.
+- **A release is small and can pull from several lanes.** Every 0.x minor is
+  a breaking release in cargo's eyes, so additive-only releases are still
+  minor bumps; patches (`0.x.y`) are fixes only.
+- **Breaking items carry a migration note** and, where possible, deprecate in
+  one release and remove in the next.
+- **At most one package-format bump per ten versions**, and the engine keeps
+  reading the previous format (section 4).
+- **Lanes don't block each other** except where a dependency is written down
+  (7.10).
 
-The series:
+### 7.2 Gates
 
-| Series | Phase | Breaks the API? |
+| Gate | From | What it means |
 |---|---|---|
-| 0.2 – 0.9 | Foundations: CI, docs, tooling, spikes, cheap wins | Rarely |
-| 0.10 – 0.19 | API redesign | Yes, one area per release |
-| 0.20 – 0.29 | Speed | Package format 2 |
-| 0.30 – 0.39 | Terrain and time | Additive mostly |
-| 0.40 – 0.49 | Field analysis features | Additive |
-| 0.50 – 0.59 | Guidance | Additive |
-| 0.60 – 0.69 | Scale and data | Package format 3 if needed |
-| 0.70 – 0.79 | Platforms and bindings | No |
-| 0.80 – 0.89 | Hardening and docs | Last breaking changes |
-| 0.90 – 0.99 | Release candidates, API frozen | No |
-| 1.0 | Stable | — |
+| Tooling on | by 0.5 | Semver, schema and C header diffs run on every PR (informational) |
+| API redesign window | 0.10 – 0.39 | The API lane's breaking items land here, one area per release |
+| Breaking cut-off | 0.80 | After this, only the hardening review may break anything |
+| Freeze | 0.90 | API, wire format, C ABI, package format and costing model frozen; diffs become blocking; releases are candidates |
+| 1.0 | — | Stability contract (section 4) published and enforced |
 
-Durations are left out on purpose: they depend on who works on it (open
-question 10). Order matters more than dates.
+### 7.3 Lane overview
 
-### 7.2 0.2 – 0.9: Foundations
+| Lane | Id | Goal | Breaks things? |
+|---|---|---|---|
+| Performance | `PERF` | Close the p95 gap, smaller packages, fast matrices | Package format |
+| FFI, bindings and portability | `FFI` | C ABI 2, every platform, first-party bindings | C ABI once |
+| API and stability | `API` | The redesign in section 5, then the contract | Yes, inside the window |
+| Features | `FEAT-*` | New capabilities, in sub-lanes | Mostly additive |
+| Quality and safety | `QA` | Gates, fuzzing, regions, security | No |
+| Docs and developer experience | `DOC` | Docs that match the code, guides, examples | No |
+| Experimental | `EXP` | Ideas that may never ship, behind flags | Never (no promise) |
 
-Low-risk work that makes the breaking releases safe, plus the spike the API
-redesign depends on.
+### 7.4 Lane: Performance (`PERF`)
 
-- **0.2 — Docs truth.** Fix the documentation drift (5.8). Seed the issue
-  tracker with this roadmap, one issue per item, labelled by release and
-  priority.
-- **0.3 — CI matrix.** macOS and Windows jobs, an MSRV job, iOS and Android
-  cross-build checks.
-- **0.4 — Compatibility tooling.** `cargo-semver-checks`, a schema diff and a
-  C header diff on every PR (informational until 0.90, enforced after).
-- **0.5 — Scheduled gates.** Nightly Małopolskie gate and time-boxed fuzzing
-  with a kept corpus; latency p50/p95 recorded per run.
-- **0.6 — Geometry encodings.** Encoded polyline (precision 6) and GeoJSON
-  output options. Additive and cheap, and makes FFI results much smaller.
-- **0.7 — Quality regions.** A dense city and a mountainous rural region join
-  Małopolskie in the Valhalla comparison and the regression gates.
-- **0.8 — Speed-up spike.** CCH, core-ALT and partitions prototyped on
-  Małopolskie behind a feature flag; a written decision with numbers (latency,
-  package size, compile time, how overlays are searched). Nothing ships to
-  users from it yet.
-- **0.9 — Decisions recorded.** Public crate set, release lines, package
-  compatibility window, audience (open questions 1, 4, 5, 6) written into this
-  document and the READMEs. Deprecation warnings added for everything the
-  0.10 series will remove.
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| PERF-1 | Latency p50/p95 recorded per nightly run on Małopolskie | P0 | QA-2 |
+| PERF-2 | Speed-up spike: CCH vs core-ALT vs partitions, written decision with numbers (latency, size, compile time, how overlays are searched) | P0 | PERF-1 |
+| PERF-3 | Package format 2 for the chosen technique; format 1 still read | P0 | PERF-2 |
+| PERF-4 | Deterministic hierarchy build in the compiler; compile time and memory gated | P0 | PERF-3 |
+| PERF-5 | Point-to-point on the hierarchy, exact against the `reference` oracle; p95 under 30 ms on Małopolskie (proposal) | P0 | PERF-4 |
+| PERF-6 | Overlays and SAR relaxations on the hierarchy, still exact | P0 | PERF-5, API-6 |
+| PERF-7 | Alternatives on the new search | P1 | PERF-5 |
+| PERF-8 | Bucket many-to-many; 1000×1000 measured | P1 | PERF-5 |
+| PERF-9 | Isochrones and map matching on the new structure where it helps | P2 | PERF-5 |
+| PERF-10 | Package size: landmark rows trimmed or optional; not larger than 0.1 | P1 | PERF-5 |
+| PERF-11 | p50/p95 budgets enforced in CI | P0 | PERF-5 |
+| PERF-12 | Country-scale compile memory and time (external sorting where needed), open time on mobile | P1 | FEAT-D1 |
 
-### 7.3 0.10 – 0.19: API redesign
+### 7.5 Lane: FFI, bindings and portability (`FFI`)
 
-One area per release, each with a migration note. The order puts the
-foundations (modules, errors) first and the parts that depend on the speed-up
-decision (overlays) after 0.8's spike.
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FFI-1 | CI on macOS and Windows, MSRV job | P0 | — |
+| FFI-2 | iOS and Android cross-builds checked in CI | P0 | FFI-1 |
+| FFI-3 | Release archives for macOS; XCFramework; AAR | P0 | FFI-2 |
+| FFI-4 | C ABI 2: one call per request with an optional cancel token, open options (memory profile, limits, log callback), `apiVersion` separate from ABI (5.6) | P0 | API-3, API-4 |
+| FFI-5 | Header diff in CI next to `abi-keys.json` | P0 | QA-1 |
+| FFI-6 | Encoded polyline (precision 6) and GeoJSON geometry options | P0 | — |
+| FFI-7 | Swift binding over the C ABI and schemas | P1 | FFI-4 |
+| FFI-8 | Kotlin binding | P1 | FFI-4 |
+| FFI-9 | Python binding | P1 | FFI-4 |
+| FFI-10 | TypeScript types from the schemas | P2 | API-4 |
+| FFI-11 | Examples per binding, tested in CI | P1 | FFI-7..9 |
+| FFI-12 | One compile request format; host protocol's own format deprecated (5.7) | P1 | — |
 
-- **0.10 — Modules and names.** Module layout, `Route*` prefixes dropped,
-  small prelude, `#[non_exhaustive]` on results and enums, legacy names
-  removed (5.1). Old paths kept as deprecated re-exports for one release.
-- **0.11 — Internal crates.** `internals` moved behind a feature;
-  `wayfarer-road-graph`, `wayfarer-line-network` and `wayfarer-costing`
-  hidden or merged; `wayfarer-service` folded or trimmed (per 0.9's decision).
-- **0.12 — Errors.** One error vocabulary with stable codes across Rust, JSON
-  and C; consistent `Result` for request-level failures (5.5, 5.3).
-- **0.13 — Wire format rules.** `apiVersion` 1 on requests and results; serde
-  aliases removed; one unknown-field rule for every request (5.2).
-- **0.14 — Stable edge references.** OSM-based edge refs and the resolver,
-  compact ids as the fast path (5.4). Overlay sets gain exact rebinding.
-- **0.15 — Unified overlays.** One overlay model (target + effect + filter +
-  window) replacing the edge-level knobs, `RouteDynamicOverlay` and
-  per-leg overlays (5.2).
-- **0.16 — Profiles.** Profile base plus typed parameters; existing profiles
-  become presets; `RouteCostingOptions` folded in; one time object (5.2).
-- **0.17 — Lean results.** Core result plus `include` for detail; diagnostics
-  under one unstable key (5.3).
-- **0.18 — C ABI 2.** Merged `*_with_cancel` calls, open options, header
-  frozen for review (5.6).
-- **0.19 — Compiler surface.** One compile request format, compiler options
-  (baked profiles, landmark count, clip polygon), and the full migration guide
-  from 0.1 to 0.19 (5.7).
+### 7.6 Lane: API and stability (`API`)
 
-### 7.4 0.20 – 0.29: Speed
+The redesign of section 5, one area per release, inside the 0.10 – 0.39
+window. Order puts the foundations first and overlays after the speed-up
+decision.
 
-- **0.20 — Package format 2.** Layout for the chosen speed-up; the engine
-  still reads format 1.
-- **0.21 — Hierarchy build.** Compiler builds the hierarchy (or partitions)
-  deterministically; compile time and memory gated.
-- **0.22 — Point-to-point on the hierarchy.** Exactness checked against the
-  `reference` oracle; p95 target met on Małopolskie (proposal: under 30 ms
-  single thread).
-- **0.23 — Overlays on the hierarchy.** Per-request overlays and SAR
-  relaxations keep their semantics and stay exact.
-- **0.24 — Alternatives** on the new search.
-- **0.25 — Many-to-many** with buckets on the hierarchy; 1000×1000 measured.
-- **0.26 — Isochrones and map matching** moved to the new structure where it
-  helps.
-- **0.27 — Package size.** Landmark rows trimmed or made optional; package not
-  larger than 0.1's.
-- **0.28 — Latency budget enforced** in CI (p50 and p95 gates).
-- **0.29 — Format 1 reading kept or dropped** per the compatibility decision.
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| API-0 | Decisions recorded: public crate set, release lines, compatibility window, audience (open questions 1, 4, 5, 6); deprecation warnings added | P0 | — |
+| API-1 | Modules, `Route*` prefixes dropped, prelude, `#[non_exhaustive]`, legacy names removed (5.1) | P0 | API-0 |
+| API-2 | Internal crates hidden or merged; `internals` behind a feature; `wayfarer-service` folded or trimmed | P0 | API-0 |
+| API-3 | One error vocabulary, consistent `Result` (5.5, 5.3) | P0 | API-1 |
+| API-4 | Wire rules: `apiVersion`, aliases removed, one unknown-field rule (5.2) | P0 | — |
+| API-5 | Stable edge references and resolver (5.4) | P0 | — |
+| API-6 | Unified overlay model (5.2) | P0 | API-5, PERF-2 |
+| API-7 | Profile base + parameters; costing options folded in; one time object (5.2) | P0 | API-1 |
+| API-8 | Lean results with `include`; diagnostics under one unstable key (5.3) | P1 | API-1 |
+| API-9 | Compiler options: baked profiles, landmark count, clip polygon (5.7) | P1 | — |
+| API-10 | Migration guide 0.1 → current, kept up to date per breaking release | P0 | — |
+| API-11 | Final API review: every public item read once more (at 0.80) | P0 | all above |
 
-### 7.5 0.30 – 0.39: Terrain and time
+### 7.7 Lane: Features (`FEAT`)
 
-- **0.30 — DEM ingest.** SRTM / Copernicus GLO-30 at compile time,
-  deterministic, per-edge climb and descent stored.
-- **0.31 — Elevation costing on foot.** Tobler-style speeds for `OnFoot` and
-  `Legged`; elevation profile in results.
-- **0.32 — Vehicle grade costing.**
-- **0.33 — Bicycle preset** (access is already read by the compiler).
-- **0.34 — Truck preset.** Dimensions and weights costed (`maxheight`,
-  `maxweight` are already parsed).
-- **0.35 — Depart-at done properly.** Conditional restrictions and overlay
-  windows evaluated along the route, not once per request.
-- **0.36 — Arrive-by.**
-- **0.37 – 0.39 — Reserve** for follow-ups found in the field.
+Sub-lanes run independently of each other.
 
-### 7.6 0.40 – 0.49: Field analysis features
+**`FEAT-T` Terrain and elevation**
 
-- **0.40 — Isochrone polygons** as GeoJSON.
-- **0.41 — Multi-origin isochrones** (team coverage).
-- **0.42 — Reverse isochrones** (arrive-at).
-- **0.43 — Nearest-k** targets by travel time.
-- **0.44 — Trip optimization (small N, exact).**
-- **0.45 — Trip optimization (heuristic, larger N).**
-- **0.46 — Map matching attributes** per sample.
-- **0.47 — Traffic and speed-file input** as bulk speed overlays.
-- **0.48 – 0.49 — Reserve.**
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FEAT-T1 | DEM ingest at compile time (SRTM / Copernicus GLO-30), deterministic, per-edge climb and descent | P1 | — |
+| FEAT-T2 | Elevation costing on foot (Tobler) for `OnFoot` and `Legged`; elevation profile in results | P1 | FEAT-T1 |
+| FEAT-T3 | Vehicle grade costing | P2 | FEAT-T1 |
 
-### 7.7 0.50 – 0.59: Guidance
+**`FEAT-P` Profiles**
 
-- **0.50 — Localization layer.** Catalogs keyed by `instruction_key` and
-  parameters; English moved into a catalog; host-supplied catalogs.
-- **0.51 — First languages** (proposal: Polish, German, French, Spanish,
-  Ukrainian).
-- **0.52 — Lanes** from `turn:lanes`.
-- **0.53 — Signs and exits** from `destination*` tags.
-- **0.54 — Voice timing** (pre-transition and alert distances).
-- **0.55 — Units and rounding per locale.**
-- **0.56 – 0.59 — Reserve.**
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FEAT-P1 | Bicycle preset (access already read) | P1 | API-7 |
+| FEAT-P2 | Truck preset: dimensions and weights (`maxheight`, `maxweight` already parsed) | P1 | API-7 |
+| FEAT-P3 | Motorcycle preset | P2 | API-7 |
 
-### 7.8 0.60 – 0.69: Scale and data
+**`FEAT-W` Time**
 
-- **0.60 — Country-scale measurement.** Poland compiled and routed; numbers
-  published like the Małopolskie ones.
-- **0.61 – 0.62 — Compiler memory and time fixes** found by 0.60 (external
-  sorting where needed).
-- **0.63 — Clip polygon compile** from a larger extract.
-- **0.64 — Multi-extract compile** (cross-border regions in one package).
-- **0.65 — Open time and memory at country scale**, mobile memory profile
-  checked.
-- **0.66 – 0.69 — Reserve** (package format 3 only if scale demands it).
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FEAT-W1 | Depart-at with restrictions and overlay windows evaluated along the route | P1 | API-7 |
+| FEAT-W2 | Arrive-by | P1 | FEAT-W1 |
+| FEAT-W3 | Bulk speed-file input (traffic, historical speeds) as speed overlays | P2 | API-6 |
 
-### 7.9 0.70 – 0.79: Platforms and bindings
+**`FEAT-A` Analysis (SAR field tools)**
 
-- **0.70 — Release artifacts** for macOS, an XCFramework and an AAR.
-- **0.71 — Swift binding.**
-- **0.72 — Kotlin binding.**
-- **0.73 — Python binding.**
-- **0.74 — TypeScript types** from the schemas; WASM build as an experiment.
-- **0.75 — Examples per binding**, tested in CI.
-- **0.76 – 0.79 — Reserve.**
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FEAT-A1 | Isochrone polygons as GeoJSON | P1 | FFI-6 |
+| FEAT-A2 | Multi-origin isochrones (team coverage) | P1 | — |
+| FEAT-A3 | Reverse isochrones (arrive-at) | P1 | — |
+| FEAT-A4 | Nearest-k targets by travel time | P1 | — |
+| FEAT-A5 | Trip optimization, exact for small N | P1 | — |
+| FEAT-A6 | Trip optimization, heuristic for larger N | P2 | FEAT-A5, PERF-8 |
+| FEAT-A7 | Map matching attributes per sample | P2 | — |
 
-### 7.10 0.80 – 0.89: Hardening and docs
+**`FEAT-G` Guidance**
 
-The last window for breaking changes.
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FEAT-G1 | Localization layer: catalogs keyed by `instruction_key`; English moved into a catalog; host catalogs | P1 | — |
+| FEAT-G2 | First languages (proposal: Polish, German, French, Spanish, Ukrainian) | P1 | FEAT-G1 |
+| FEAT-G3 | Lanes from `turn:lanes` | P1 | — |
+| FEAT-G4 | Signs and exits from `destination*` tags | P1 | — |
+| FEAT-G5 | Voice timing; units and rounding per locale | P2 | FEAT-G1 |
 
-- **0.80 — API review.** Every public item read once more; last renames and
-  removals, all deprecations gone by 0.89.
-- **0.81 — `#![deny(missing_docs)]`** on public crates; API reference
-  complete.
-- **0.82 — Guide.** Concepts, compile, route, overlays, SAR, embedding.
-- **0.83 — Tracing spans** with stable names.
-- **0.84 — Security policy for 1.x**, fuzzing coverage review.
-- **0.85 — Field trial** with a real team; fixes ship as 0.85.x.
-- **0.86 – 0.89 — Reserve** for what the trial finds.
+**`FEAT-D` Data and scale**
 
-### 7.11 0.90 – 0.99: Release candidates
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| FEAT-D1 | Country-scale measurement (Poland), numbers published | P1 | — |
+| FEAT-D2 | Clip polygon compile from a larger extract | P1 | API-9 |
+| FEAT-D3 | Multi-extract compile (cross-border regions in one package) | P1 | — |
 
-API, wire format, C ABI, package format and costing model frozen. Only fixes
-and additive changes. Semver, schema and header checks become blocking.
+### 7.8 Lane: Quality and safety (`QA`)
 
-- **0.90** first candidate; further candidates as needed, each with a soak
-  period of gates, fuzzing and field use.
-- Any candidate that needs a breaking change goes back to the 0.8x rules for
-  that one change, and the soak restarts.
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| QA-1 | `cargo-semver-checks`, schema diff, header diff on every PR | P0 | — |
+| QA-2 | Nightly Małopolskie gate | P0 | — |
+| QA-3 | Scheduled, time-boxed fuzzing with a kept corpus | P0 | — |
+| QA-4 | Two more regions (dense city, mountainous rural) in the Valhalla comparison and gates | P0 | — |
+| QA-5 | Fuzz targets for every new input (edge refs, profiles, catalogs, DEM tiles) as they land | P0 | per item |
+| QA-6 | `tracing` spans with stable names | P1 | — |
+| QA-7 | Security policy for 1.x; fuzz coverage review | P0 | — |
+| QA-8 | Field trial with a real team before the freeze | P0 | — |
 
-### 7.12 1.0
+### 7.9 Lane: Docs and developer experience (`DOC`)
 
-The stability contract (section 4) published in the README and enforced in
-CI.
+| Id | Item | Pri | Depends on |
+|---|---|---|---|
+| DOC-1 | Fix documentation drift (5.8) | P0 | — |
+| DOC-2 | Issue tracker seeded with every item in this document, labelled by lane and priority | P0 | — |
+| DOC-3 | `#![deny(missing_docs)]` on public crates | P0 | API-2 |
+| DOC-4 | Guide: concepts, compile, route, overlays, SAR, embedding | P0 | — |
+| DOC-5 | Changelog entries name item ids and lanes | P1 | DOC-2 |
 
-### 7.13 After 1.0 (candidates)
+### 7.10 Lane: Experimental (`EXP`)
 
-Cross-country movement, multiple packages per engine, incremental updates,
-field data input, WASM as a supported target, an optional HTTP server. These
-are additive and can land as 1.x minors.
+Ideas worth trying that may never ship. They live behind
+`experimental-*` cargo features (or separate binaries), carry no stability
+promise, and are excluded from the 1.0 contract. An item **graduates** into
+another lane when it has a written design, tests, a gate where it matters,
+and a user who needs it.
+
+| Id | Item | Graduates to |
+|---|---|---|
+| EXP-1 | Speed-up prototypes from PERF-2 that lose the comparison, kept for reference or removed | — |
+| EXP-2 | Cross-country movement: terrain cost surface joined to the graph, for SAR on foot | FEAT-T |
+| EXP-3 | WASM build for browser offline routing | FFI |
+| EXP-4 | Optional HTTP server binary (own API, maybe a Valhalla/OSRM-compatible subset) | FFI |
+| EXP-5 | Multiple packages per engine, routing across adjacent packages | FEAT-D |
+| EXP-6 | Incremental updates from OSM change files or per-partition rebuilds | FEAT-D |
+| EXP-7 | Field-collected roads (GeoJSON) as compiler input, or overlays promoted into the graph | FEAT-D |
+| EXP-8 | Learned or data-driven speed inference for roads without a posted limit | FEAT-W |
+
+### 7.11 Cross-lane dependencies
+
+The ones that decide ordering:
+
+- **PERF-2 → API-6.** Don't freeze the overlay model before knowing how
+  overlays are searched on the chosen speed-up.
+- **API-6 → PERF-6.** Overlays on the hierarchy implement the new model, not
+  the old one.
+- **API-3, API-4 → FFI-4.** C ABI 2 is designed once, on the new errors and
+  wire rules.
+- **FFI-4 → FFI-7..9.** Bindings wrap ABI 2, never ABI 1.
+- **API-7 → FEAT-P, FEAT-W.** New profiles and time are built on the new
+  profile and time types.
+- **QA-1 before the redesign window.** Every breaking release is measured.
+
+### 7.12 What the first releases could look like
+
+A sketch to show how releases pull from lanes, not a commitment:
+
+| Release | Items |
+|---|---|
+| 0.2 | DOC-1, DOC-2, FFI-1 |
+| 0.3 | FFI-6 (polyline, GeoJSON), QA-2, FFI-2 |
+| 0.4 | QA-1, QA-3, PERF-1 |
+| 0.5 | QA-4, API-0, FEAT-G3 (lanes) |
+| 0.6 | PERF-2 decision, FEAT-A2 (multi-origin isochrones) |
+| 0.10 | API-1 (modules and names), FFI-3 (release artifacts) |
+| 0.11 | API-2 (internal crates), FEAT-A4 (nearest-k) |
+| 0.12 | API-3 (errors), FEAT-T1 (DEM ingest, behind a compile option) |
+| 0.13 | API-4 (wire rules), PERF-3 (format 2) |
+| … | further items as they are ready |
+
+After the API window closes, releases carry PERF, FFI, FEAT and QA items until
+the 0.80 cut-off, then hardening (API-11, DOC-3, DOC-4, QA-7, QA-8) and the
+0.90 freeze.
 
 ## 8. Non-goals for 1.0
 
@@ -608,5 +625,5 @@ are additive and can land as 1.x minors.
 9. **`wayfarer-line-network` render fields** (`min_zoom`, `max_zoom`,
    `sort_order`) serve a vector basemap compiler. Does that compiler stay a
    user of this crate, or does the crate become routing-only?
-10. **Team and timeline.** The release order holds either way; dates depend
+10. **Team and timeline.** The lane order holds either way; dates depend
     on who works on it.
