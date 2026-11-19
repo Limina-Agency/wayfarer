@@ -1258,7 +1258,7 @@ fn reach(
     cost: f64,
     duration_s: f64,
 ) {
-    let slot = &mut state.edge_aux[edge as usize];
+    let slot = state.edge_aux.get_mut(edge);
     if *slot == NO_LABEL {
         *slot = reached.len() as u32;
         reached.push(ReachedEdge {
@@ -1295,9 +1295,7 @@ pub(crate) fn isochrone(
     let within = |cost: f64, duration_s: f64| {
         (max_cost > 0.0 && cost <= max_cost) || (max_duration > 0.0 && duration_s <= max_duration)
     };
-    if state.edge_aux.len() != state.edge_label.len() {
-        state.edge_aux = vec![NO_LABEL; state.edge_label.len()];
-    }
+    state.edge_aux.ensure_len(state.edge_label.capacity());
     let mut search = Expansion {
         g: graph,
         q: query,

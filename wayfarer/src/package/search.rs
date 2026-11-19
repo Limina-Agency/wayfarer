@@ -22,6 +22,7 @@ use super::cch::{
     CchMetric, CchPotentials, GatedPotential, OwnMetric, PotentialGate, PotentialScratch,
 };
 use super::columns::{CostColumn, PotentialBase, metric_costs};
+use super::paged::PagedSlots;
 use super::restrictions::{ComplexAutomata, ROOT};
 use super::{
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
@@ -40,7 +41,7 @@ pub(crate) mod patch;
 
 /// Per-node (forward, backward) potential bounds, NaN until computed, and the
 /// nodes whose bounds were set, borrowed by the bidirectional search.
-type NodeBoundsCache = std::cell::RefCell<(Vec<(f64, f64)>, Vec<u32>)>;
+type NodeBoundsCache = std::cell::RefCell<(PagedSlots<(f64, f64)>, Vec<u32>)>;
 
 /// The CCH potentials' scratch, borrowed by the bidirectional search:
 /// forward, backward, and each side's gated potential.
@@ -445,37 +446,39 @@ impl StateSlots {
     }
 }
 
-/// Reusable per-query buffers. `edge_label` is sized to the graph once and
-/// reset sparsely through `touched`, so a query never clears O(E) memory.
-/// Both directions keep root-state labels there and labels in other
-/// complex-restriction states in a [`StateSlots`].
+/// Reusable per-query buffers. The per-edge and per-node slots are
+/// [`PagedSlots`]: pages are allocated as a search first writes into them
+/// and reset sparsely through the touched lists, so a query never clears
+/// O(E) memory and a state holds memory for the searches it ran, not for the
+/// whole graph. Both directions keep root-state labels there and labels in
+/// other complex-restriction states in a [`StateSlots`].
 pub(crate) struct SearchState {
-    edge_label: Vec<u32>,
+    edge_label: PagedSlots<u32>,
     /// Edges labelled in any state (possibly repeated).
     touched: Vec<u32>,
     edge_extra: StateSlots,
     labels: Vec<Label>,
     heap: BinaryHeap<HeapEntry>,
-    /// Backward search buffers; `b_edge_label` is allocated on first use.
-    b_edge_label: Vec<u32>,
+    /// Backward search buffers.
+    b_edge_label: PagedSlots<u32>,
     b_touched: Vec<u32>,
     b_edge_extra: StateSlots,
     b_labels: Vec<BackwardLabel>,
     b_heap: BinaryHeap<HeapEntry>,
     /// Per-node (bound to targets, bound from sources), NaN when not computed;
     /// a node is reached through several edges but bounded once.
-    node_bounds: Vec<(f64, f64)>,
+    node_bounds: PagedSlots<(f64, f64)>,
     node_bounds_touched: Vec<u32>,
     /// Matrix/isochrone labels; those queries index `edge_label` into these.
     analysis_labels: Vec<analysis::AnalysisLabel>,
     /// Restriction states of the matrix/isochrone labels not in the root
     /// state, by label (those labels stay as small as before).
     analysis_label_states: FxHashMap<u32, u32>,
-    /// Per-edge isochrone reach slot, allocated on first use and reset
-    /// through `touched` (every reached edge is labelled).
-    edge_aux: Vec<u32>,
-    /// CCH potential scratch (forward, backward), allocated by the first
-    /// search that bounds with the potentials.
+    /// Per-edge isochrone reach slot, reset through `touched` (every reached
+    /// edge is labelled).
+    edge_aux: PagedSlots<u32>,
+    /// CCH potential scratch (forward, backward, and each side's gated
+    /// potential).
     pub(crate) cch_scratch: [PotentialScratch; 4],
 }
 
@@ -503,34 +506,37 @@ struct BackwardLabel {
 }
 
 impl SearchState {
-    pub(crate) fn new(edge_count: usize) -> Self {
+    /// A state for a graph of these counts; `paged_ranks` pages the CCH
+    /// potential scratch's slots too (see [`PotentialScratch::paged`]).
+    pub(crate) fn new(edge_count: usize, node_count: usize, paged_ranks: bool) -> Self {
         Self {
-            edge_label: vec![NO_LABEL; edge_count],
+            edge_label: PagedSlots::new(edge_count, NO_LABEL),
             touched: Vec::new(),
             edge_extra: StateSlots::default(),
             labels: Vec::new(),
             heap: BinaryHeap::new(),
-            b_edge_label: Vec::new(),
+            b_edge_label: PagedSlots::new(edge_count, NO_LABEL),
             b_touched: Vec::new(),
             b_edge_extra: StateSlots::default(),
             b_labels: Vec::new(),
             b_heap: BinaryHeap::new(),
-            node_bounds: Vec::new(),
+            node_bounds: PagedSlots::new(node_count, (f64::NAN, f64::NAN)),
             node_bounds_touched: Vec::new(),
             analysis_labels: Vec::new(),
             analysis_label_states: FxHashMap::default(),
-            edge_aux: Vec::new(),
-            cch_scratch: Default::default(),
+            edge_aux: PagedSlots::new(edge_count, NO_LABEL),
+            cch_scratch: if paged_ranks {
+                std::array::from_fn(|_| PotentialScratch::paged())
+            } else {
+                Default::default()
+            },
         }
     }
 
     pub(crate) fn reset(&mut self) {
-        let has_aux = !self.edge_aux.is_empty();
         for edge in self.touched.drain(..) {
-            self.edge_label[edge as usize] = NO_LABEL;
-            if has_aux {
-                self.edge_aux[edge as usize] = NO_LABEL;
-            }
+            self.edge_label.clear(edge);
+            self.edge_aux.clear(edge);
         }
         self.edge_extra.clear();
         self.labels.clear();
@@ -538,24 +544,21 @@ impl SearchState {
         self.analysis_label_states.clear();
         self.heap.clear();
         for edge in self.b_touched.drain(..) {
-            self.b_edge_label[edge as usize] = NO_LABEL;
+            self.b_edge_label.clear(edge);
         }
         self.b_edge_extra.clear();
         self.b_labels.clear();
         self.b_heap.clear();
         for node in self.node_bounds_touched.drain(..) {
-            self.node_bounds[node as usize] = (f64::NAN, f64::NAN);
+            self.node_bounds.clear(node);
         }
     }
 
-    /// Allocates the buffers a bidirectional route search sizes on first use
-    /// (backward labels, node bounds), so a pooled state serves the first
-    /// request without that cost (see `RoutingPackage::prefetch`).
     /// The forward label of `edge` in `state`, or `NO_LABEL`.
     #[inline]
     pub(crate) fn slot(&self, edge: u32, state: u32) -> u32 {
         if state == ROOT {
-            self.edge_label[edge as usize]
+            self.edge_label.get(edge)
         } else {
             self.edge_extra.get(edge, state)
         }
@@ -565,10 +568,11 @@ impl SearchState {
     #[inline]
     pub(crate) fn set_slot(&mut self, edge: u32, state: u32, label: u32) {
         if state == ROOT {
-            if self.edge_label[edge as usize] == NO_LABEL {
+            let slot = self.edge_label.get_mut(edge);
+            if *slot == NO_LABEL {
                 self.touched.push(edge);
             }
-            self.edge_label[edge as usize] = label;
+            *slot = label;
         } else if self.edge_extra.set(edge, state, label) {
             self.touched.push(edge);
         }
@@ -578,7 +582,7 @@ impl SearchState {
     #[inline]
     pub(crate) fn b_slot(&self, edge: u32, state: u32) -> u32 {
         if state == ROOT {
-            self.b_edge_label[edge as usize]
+            self.b_edge_label.get(edge)
         } else {
             self.b_edge_extra.get(edge, state)
         }
@@ -588,22 +592,40 @@ impl SearchState {
     #[inline]
     pub(crate) fn set_b_slot(&mut self, edge: u32, state: u32, label: u32) {
         if state == ROOT {
-            if self.b_edge_label[edge as usize] == NO_LABEL {
+            let slot = self.b_edge_label.get_mut(edge);
+            if *slot == NO_LABEL {
                 self.b_touched.push(edge);
             }
-            self.b_edge_label[edge as usize] = label;
+            *slot = label;
         } else {
             self.b_edge_extra.set(edge, state, label);
         }
     }
 
+    /// Makes room for a bidirectional search on a graph of these counts.
+    pub(crate) fn ensure_route_len(&mut self, edge_count: usize, node_count: usize) {
+        self.b_edge_label.ensure_len(edge_count);
+        self.node_bounds.ensure_len(node_count);
+    }
+
+    /// Bytes held by the paged per-edge, per-node and per-rank slots.
+    pub(crate) fn page_bytes(&self) -> usize {
+        self.edge_label.page_bytes()
+            + self.b_edge_label.page_bytes()
+            + self.node_bounds.page_bytes()
+            + self.edge_aux.page_bytes()
+            + self
+                .cch_scratch
+                .iter()
+                .map(PotentialScratch::page_bytes)
+                .sum::<usize>()
+    }
+
     /// Releases what a large search grew beyond a route's needs (label
-    /// vectors, heaps, the isochrone's per-edge slots), keeping the dense
-    /// per-edge label slots. For pooled states under a bounded memory
-    /// profile; call after `reset`.
+    /// vectors, heaps). For pooled states under a bounded memory profile;
+    /// call after `reset`.
     pub(crate) fn trim(&mut self) {
         const KEEP: usize = 1 << 14;
-        self.edge_aux = Vec::new();
         self.touched.shrink_to(KEEP);
         self.labels.shrink_to(KEEP);
         self.heap.shrink_to(KEEP);
@@ -617,12 +639,17 @@ impl SearchState {
         self.b_edge_extra = StateSlots::default();
     }
 
-    pub(crate) fn preallocate_route_buffers(&mut self, edge_count: usize, node_count: usize) {
-        if self.b_edge_label.len() != edge_count {
-            self.b_edge_label = vec![NO_LABEL; edge_count];
-        }
-        if self.node_bounds.len() != node_count {
-            self.node_bounds = vec![(f64::NAN, f64::NAN); node_count];
+    /// Frees every page of the paged slots if they hold more than
+    /// `keep_bytes`. Call after `reset`.
+    pub(crate) fn release_pages_over(&mut self, keep_bytes: usize) {
+        if self.page_bytes() > keep_bytes {
+            self.edge_label.release();
+            self.b_edge_label.release();
+            self.node_bounds.release();
+            self.edge_aux.release();
+            self.cch_scratch
+                .iter_mut()
+                .for_each(PotentialScratch::release);
         }
     }
 }
@@ -1342,15 +1369,10 @@ impl<'q> Run<'_, '_, 'q> {
     /// because every path's first (or last) transition is checked against the
     /// seeds.
     fn execute_bidirectional(&mut self) -> SearchOutcome {
-        let g = self.g;
-        if self.state.b_edge_label.len() != g.edge_count {
-            self.state.b_edge_label = vec![NO_LABEL; g.edge_count];
-        }
-        if self.state.node_bounds.len() != g.node_count {
-            self.state.node_bounds = vec![(f64::NAN, f64::NAN); g.node_count];
-        }
+        self.state
+            .ensure_route_len(self.g.edge_count, self.g.node_count);
         let cache = std::cell::RefCell::new((
-            std::mem::take(&mut self.state.node_bounds),
+            self.state.node_bounds.take(),
             std::mem::take(&mut self.state.node_bounds_touched),
         ));
         let scratch = std::mem::take(&mut self.state.cch_scratch).map(std::cell::RefCell::new);
@@ -1452,12 +1474,12 @@ impl<'q> Run<'_, '_, 'q> {
         let exact = crate::debug::exact_stop();
         let bounds = |node: u32| {
             let mut cache = cache.borrow_mut();
-            let cached = cache.0[node as usize];
+            let cached = cache.0.get(node);
             if !cached.0.is_nan() {
                 return cached;
             }
             let value = (forward_h(node), backward_h(node));
-            cache.0[node as usize] = value;
+            cache.0.set(node, value);
             cache.1.push(node);
             value
         };
@@ -1591,7 +1613,7 @@ impl<'q> Run<'_, '_, 'q> {
                         self.counters.restricted_transition_count += 1;
                         continue;
                     };
-                    let backward = self.state.b_edge_label[next as usize];
+                    let backward = self.state.b_edge_label.get(next);
                     if backward != NO_LABEL {
                         self.try_meet(entry.label, backward, &destinations, &mut best);
                     }
@@ -1668,7 +1690,7 @@ impl<'q> Run<'_, '_, 'q> {
                     }
                     // Joins carry their own restriction checks (the forward
                     // path is known there).
-                    let forward = self.state.edge_label[previous as usize];
+                    let forward = self.state.edge_label.get(previous);
                     if forward != NO_LABEL {
                         self.try_meet(forward, entry.label, &destinations, &mut best);
                     }

@@ -1587,7 +1587,7 @@ impl PatchRun<'_, '_, '_, '_, '_> {
         if state != ROOT {
             self.state.edge_extra.get(arc, state)
         } else if arc < self.edge_count() {
-            self.state.edge_label[arc as usize]
+            self.state.edge_label.get(arc)
         } else {
             self.patch_slots[(arc - self.edge_count()) as usize]
         }
@@ -1598,7 +1598,7 @@ impl PatchRun<'_, '_, '_, '_, '_> {
         if state != ROOT {
             self.state.b_edge_extra.get(arc, state)
         } else if arc < self.edge_count() {
-            self.state.b_edge_label[arc as usize]
+            self.state.b_edge_label.get(arc)
         } else {
             self.b_patch_slots[(arc - self.edge_count()) as usize]
         }
@@ -2029,12 +2029,7 @@ impl PatchRun<'_, '_, '_, '_, '_> {
         mut best: Option<Best>,
     ) -> Result<Option<Best>, PatchOutcome> {
         let g = self.g;
-        if self.state.b_edge_label.len() != g.edge_count {
-            self.state.b_edge_label = vec![NO_LABEL; g.edge_count];
-        }
-        if self.state.node_bounds.len() != g.node_count {
-            self.state.node_bounds = vec![(f64::NAN, f64::NAN); g.node_count];
-        }
+        self.state.ensure_route_len(g.edge_count, g.node_count);
         self.b_patch_slots = vec![NO_LABEL; self.arcs.len()];
         let node_count = self.arcs.patch.node_count;
         let virtual_bounds = (0..self.arcs.patch.positions.len() as u32)
@@ -2043,18 +2038,18 @@ impl PatchRun<'_, '_, '_, '_, '_> {
                 (forward.at(node), backward.at(node))
             })
             .collect::<Vec<_>>();
-        let mut values = std::mem::take(&mut self.state.node_bounds);
+        let mut values = self.state.node_bounds.take();
         let mut touched = std::mem::take(&mut self.state.node_bounds_touched);
         let mut bounds = |node: u32| -> (f64, f64) {
             if node >= node_count {
                 return virtual_bounds[(node - node_count) as usize];
             }
-            let cached = values[node as usize];
+            let cached = values.get(node);
             if !cached.0.is_nan() {
                 return cached;
             }
             let value = (forward.at(node), backward.at(node));
-            values[node as usize] = value;
+            values.set(node, value);
             touched.push(node);
             value
         };
