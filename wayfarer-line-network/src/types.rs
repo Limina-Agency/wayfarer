@@ -11,7 +11,7 @@ pub enum SharedLineLayer {
     Railways,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectionalAccessModel {
     #[default]
@@ -21,7 +21,7 @@ pub enum DirectionalAccessModel {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoadRoutingAttrs {
     pub road_class: String,
@@ -114,10 +114,13 @@ pub struct SharedTopologyEdge {
     pub sort_order: u8,
     pub start_node: u32,
     pub end_node: u32,
+    /// Shared by the edges of one input line.
     #[serde(default)]
-    pub source_lineage_ids: Vec<i64>,
+    pub source_lineage_ids: Arc<[i64]>,
+    /// Shared by every edge with the same routing attributes: a region's
+    /// million road edges carry a few thousand distinct ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoadRoutingAttrs>,
+    pub routing: Option<Arc<RoadRoutingAttrs>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

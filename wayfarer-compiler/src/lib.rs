@@ -1383,7 +1383,7 @@ fn routable_way_from_segment(
                 .find(|(key, _)| key == "coverage_id")
                 .map(|(_, value)| value.as_str()),
         ),
-        source_lineage_ids: segment.source_lineage_ids,
+        source_lineage_ids: segment.source_lineage_ids.to_vec(),
         points: segment.geometry,
     }
 }

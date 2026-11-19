@@ -1154,3 +1154,16 @@ fn short_roads_do_not_merge_across_published_attribute_boundaries() {
         );
     }
 }
+
+#[test]
+fn permute_in_place_applies_the_order() {
+    let mut items = vec!['a', 'b', 'c', 'd', 'e', 'f'];
+    // Cycles (0 3 5), (1 4) and the fixed point 2.
+    let order = [3u32, 4, 2, 5, 1, 0];
+    let expected = order
+        .iter()
+        .map(|&from| items[from as usize])
+        .collect::<Vec<_>>();
+    permute_in_place(&mut items, &order);
+    assert_eq!(items, expected);
+}
