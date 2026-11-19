@@ -98,7 +98,13 @@ pub(crate) struct CchTopology {
 pub(crate) struct CchMetric {
     up: Vec<f32>,
     down: Vec<f32>,
+    /// Unique in the process, so that a potential's memo can name the
+    /// metric it was computed on (see [`PotentialScratch`]).
+    id: u64,
 }
+
+/// The next [`CchMetric::id`].
+static NEXT_METRIC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The topology and the metric of every stored column.
 pub(crate) struct CchPotentials {
@@ -428,7 +434,11 @@ impl CchTopology {
                 ranks.iter().for_each(work);
             }
         }
-        CchMetric { up, down }
+        CchMetric {
+            up,
+            down,
+            id: NEXT_METRIC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     /// Relaxes every lower triangle of node `y`'s arcs (pull).
@@ -514,6 +524,19 @@ pub(crate) struct PotentialScratch {
     entries: Vec<ScratchEntry>,
     ancestors: Vec<u32>,
     path: Vec<u32>,
+    /// What `entries` were computed for, if anything: their values depend
+    /// only on it, so a potential for the same key keeps them (matrix cells
+    /// that share an endpoint).
+    key: Option<MemoKey>,
+}
+
+/// A potential's metric (by id), direction and targets, with their initial
+/// distances' bits.
+#[derive(PartialEq)]
+struct MemoKey {
+    metric: u64,
+    reversed: bool,
+    targets: Vec<(u32, u64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -528,6 +551,7 @@ const SCRATCH_KEEP: usize = 1 << 16;
 
 impl PotentialScratch {
     fn begin(&mut self, n: usize) {
+        self.key = None;
         if self.slot.len() != n {
             self.slot = vec![u32::MAX; n];
         }
@@ -591,7 +615,20 @@ impl<'a> CchPotential<'a> {
             factor: factor * POTENTIAL_MARGIN,
             scratch,
         };
-        potential.init(targets);
+        let key = MemoKey {
+            metric: metric.id,
+            reversed,
+            targets: targets
+                .iter()
+                .map(|(node, initial)| (*node, initial.to_bits()))
+                .collect(),
+        };
+        // The same potential as the scratch's last one (the factor only
+        // scales what `get` returns): its memo still holds.
+        if scratch.borrow().key.as_ref() != Some(&key) {
+            potential.init(targets);
+            scratch.borrow_mut().key = Some(key);
+        }
         potential
     }
 

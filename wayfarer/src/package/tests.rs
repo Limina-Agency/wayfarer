@@ -7897,6 +7897,47 @@ fn cch_potentials_are_exact_node_distances() {
     }
 }
 
+/// A potential scratch keeps its memo for the next potential with the same
+/// metric, direction and targets, and only for it: each potential reads the
+/// same values, bit for bit, as one on a fresh scratch.
+#[test]
+fn cch_potentials_reuse_a_memo_only_for_the_same_query() {
+    use std::cell::RefCell;
+    let dir = tempdir().unwrap();
+    let fixture = persist(&costing_grid_graph(), &dir.path().join("costing.mrt"));
+    let package = &fixture.package;
+    let view = package.file.view();
+    let potentials = package.cch.prepare(&view).expect("potentials").clone();
+    let topology = &potentials.topology;
+    let metrics = &potentials.metrics;
+    assert!(metrics.len() >= 2);
+    let (a, b) = (0u32, view.node_count as u32 - 1);
+    let queries = [
+        (0, false, vec![(a, 0.0)]),
+        (0, false, vec![(a, 0.0)]),
+        (0, true, vec![(a, 0.0)]),
+        (1, true, vec![(a, 0.0)]),
+        (1, true, vec![(a, 0.0), (b, 2.5)]),
+        (1, true, vec![(a, 0.0), (b, 3.5)]),
+        (0, false, vec![(b, 0.0)]),
+        (0, false, vec![(a, 0.0)]),
+    ];
+    let shared = RefCell::new(cch::PotentialScratch::default());
+    for (metric, reversed, targets) in &queries {
+        let metric = &metrics[*metric];
+        let fresh = RefCell::new(cch::PotentialScratch::default());
+        let expected = cch::CchPotential::new(topology, metric, targets, *reversed, 0.5, &fresh);
+        let actual = cch::CchPotential::new(topology, metric, targets, *reversed, 0.5, &shared);
+        for node in 0..view.node_count as u32 {
+            assert_eq!(
+                actual.get(node).to_bits(),
+                expected.get(node).to_bits(),
+                "{reversed} {targets:?}: node {node}"
+            );
+        }
+    }
+}
+
 #[test]
 fn via_candidates_match_the_reference_listing() {
     let dir = tempdir().unwrap();
