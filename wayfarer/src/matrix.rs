@@ -8,6 +8,7 @@ use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
 use crate::limits::MAX_MATRIX_CELLS;
 use crate::package::destination::relax_split_costs;
+use crate::package::search::SearchState;
 use crate::package::search::analysis::{
     AnalysisPath, AnalysisPoint, AnalysisQuery, MatrixTargetCandidate, matrix_cell, matrix_row,
     overlay_split_costs, override_bounds, request_cost_overrides, request_duration_overrides,
@@ -496,60 +497,86 @@ impl RoutingEngine {
         } else {
             cell_connectivity(access, source_candidates, target_candidates)
         };
-        // Point-to-point cell searches, in parallel.
-        let search_cells = |pairs: &[(usize, usize)]| {
-            pairs
-                .par_iter()
-                .map(|(source, target)| {
-                    let mut state = graph.take_state();
-                    let cell = match &patch {
-                        Some(patch) => {
-                            let query = patch_template.between(
-                                source_candidates[*source],
-                                &source_edges[*source],
-                                target_candidates[*target],
-                                &target_edges[*target],
-                            );
-                            let mut counters = PatchCounters::default();
-                            let outcome = run_patch(view, &mut state, patch, &query, &mut counters);
-                            let (path, budget_exceeded) = match outcome {
-                                PatchOutcome::Found(path) => (Some(patch_path(patch, path)), false),
-                                PatchOutcome::NoPath => (None, false),
-                                // Out of budget, a cell keeps its best path
-                                // so far, as a row does.
-                                PatchOutcome::BudgetExceeded { best, .. } => {
-                                    (best.map(|(path, _)| patch_path(patch, path)), true)
-                                }
-                            };
-                            (
-                                path,
-                                counters.visited_edge_count,
-                                counters.settled_edge_count,
-                                budget_exceeded,
-                            )
-                        }
-                        None => {
-                            let cell = matrix_cell(
-                                view,
-                                &mut state,
-                                &query,
-                                heuristic_cost_per_m,
-                                source_candidates[*source],
-                                &sources[*source],
-                                target_candidates[*target],
-                                &targets[*target],
-                            );
-                            (
-                                cell.path.map(compact_path),
-                                cell.counters.visited_edge_count,
-                                cell.counters.settled_edge_count,
-                                cell.budget_exceeded,
-                            )
+        // One point-to-point cell search, on `state`.
+        let search_cell = |state: &mut SearchState, source: usize, target: usize| {
+            match &patch {
+                Some(patch) => {
+                    let query = patch_template.between(
+                        source_candidates[source],
+                        &source_edges[source],
+                        target_candidates[target],
+                        &target_edges[target],
+                    );
+                    let mut counters = PatchCounters::default();
+                    let outcome = run_patch(view, state, patch, &query, &mut counters);
+                    let (path, budget_exceeded) = match outcome {
+                        PatchOutcome::Found(path) => (Some(patch_path(patch, path)), false),
+                        PatchOutcome::NoPath => (None, false),
+                        // Out of budget, a cell keeps its best path
+                        // so far, as a row does.
+                        PatchOutcome::BudgetExceeded { best, .. } => {
+                            (best.map(|(path, _)| patch_path(patch, path)), true)
                         }
                     };
+                    (
+                        path,
+                        counters.visited_edge_count,
+                        counters.settled_edge_count,
+                        budget_exceeded,
+                    )
+                }
+                None => {
+                    let cell = matrix_cell(
+                        view,
+                        state,
+                        &query,
+                        heuristic_cost_per_m,
+                        source_candidates[source],
+                        &sources[source],
+                        target_candidates[target],
+                        &targets[target],
+                    );
+                    (
+                        cell.path.map(compact_path),
+                        cell.counters.visited_edge_count,
+                        cell.counters.settled_edge_count,
+                        cell.budget_exceeded,
+                    )
+                }
+            }
+        };
+        // Cells search in parallel, in runs of cells of one source on one
+        // state, so that each run computes the potential from its source
+        // once and the following cells reuse its memo (see
+        // `package::cch::PotentialScratch`). `pairs` come by source.
+        let search_cells = |pairs: &[(usize, usize)]| {
+            let run = pairs
+                .len()
+                .div_ceil(MATRIX_RUNS_PER_THREAD * rayon::current_num_threads())
+                .clamp(1, MATRIX_MAX_RUN);
+            let mut runs = Vec::new();
+            let mut start = 0;
+            for end in 1..=pairs.len() {
+                if end == pairs.len() || end - start == run || pairs[end].0 != pairs[start].0 {
+                    runs.push(start..end);
+                    start = end;
+                }
+            }
+            runs.into_par_iter()
+                .map(|run| {
+                    let mut state = graph.take_state();
+                    let cells = pairs[run]
+                        .iter()
+                        .map(|(source, target)| {
+                            let cell = search_cell(&mut state, *source, *target);
+                            state.reset();
+                            cell
+                        })
+                        .collect::<Vec<_>>();
                     graph.return_state(state);
-                    cell
+                    cells
                 })
+                .flatten_iter()
                 .collect::<Vec<_>>()
         };
         let mode = matrix_mode(
@@ -864,6 +891,12 @@ impl RoutingEngine {
         Ok(counts)
     }
 }
+
+/// Pairwise cells per thread: about this many runs each (see `search_cells`
+/// in `RoutingEngine::matrix_cells`), so that the threads stay balanced.
+const MATRIX_RUNS_PER_THREAD: usize = 4;
+/// The longest run of cells of one source on one search state.
+const MATRIX_MAX_RUN: usize = 64;
 
 /// Up to this many searchable targets, cells are searched pairwise; above it,
 /// each source row shares one expansion.
