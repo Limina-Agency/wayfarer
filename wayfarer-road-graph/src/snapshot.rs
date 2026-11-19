@@ -47,7 +47,9 @@ struct SnapshotEdge {
 }
 
 impl SnapshotEdge {
-    fn new(edge: &RoadEdge, info: Option<SharedInfoRef<'_>>) -> Self {
+    /// `component_id` is the edge's source node's, which the snapshot
+    /// stores per edge as the graph once did.
+    fn new(edge: &RoadEdge, info: Option<SharedInfoRef<'_>>, component_id: Option<u32>) -> Self {
         Self {
             edge_id: edge.edge_id,
             shared_edge_info_id: edge.shared_edge_info_id,
@@ -60,11 +62,11 @@ impl SnapshotEdge {
             segment_index: edge.segment_index,
             source_lineage_ids: info.map_or_else(Vec::new, |info| info.source_lineage_ids.to_vec()),
             coverage_id: info.and_then(|info| info.coverage_id.map(|id| id.to_string())),
-            component_id: edge.component_id,
+            component_id,
             start_heading_deg: edge.start_heading_deg,
             end_heading_deg: edge.end_heading_deg,
             inferred_speed_kph: edge.inferred_speed_kph,
-            estimated_travel_time_s: edge.estimated_travel_time_s,
+            estimated_travel_time_s: edge.estimated_travel_time_s(),
             opposing_edge_id: edge.opposing_edge_id,
             hierarchy_tier: edge.hierarchy_tier,
             end_control: edge.end_control,
@@ -83,11 +85,9 @@ impl SnapshotEdge {
             osm_reverse_mode_mask: self.osm_reverse_mode_mask,
             traversal_direction: self.traversal_direction,
             segment_index: self.segment_index,
-            component_id: self.component_id,
             start_heading_deg: self.start_heading_deg,
             end_heading_deg: self.end_heading_deg,
             inferred_speed_kph: self.inferred_speed_kph,
-            estimated_travel_time_s: self.estimated_travel_time_s,
             opposing_edge_id: self.opposing_edge_id,
             hierarchy_tier: self.hierarchy_tier,
             end_control: self.end_control,
@@ -209,6 +209,7 @@ fn road_graph_snapshot(graph: &RoadGraph) -> RoadGraphSnapshot {
                 edge: SnapshotEdge::new(
                     edge_ref.weight(),
                     shared_edge_info(graph, &info_index, edge_ref.weight().shared_edge_info_id),
+                    graph.graph[edge_ref.source()].component_id,
                 ),
             })
         })

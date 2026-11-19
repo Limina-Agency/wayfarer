@@ -957,18 +957,18 @@ fn build_package_from(
         let exact = info
             .geometry
             .iter()
-            .all(|(lat, lng)| is_exact_e7(*lat) && is_exact_e7(*lng));
+            .all(|(lat, lng)| is_exact_e7(lat) && is_exact_e7(lng));
         let points = info
             .geometry
             .iter()
-            .map(|(lat, lng)| (to_e7(*lat), to_e7(*lng)))
+            .map(|(lat, lng)| (to_e7(lat), to_e7(lng)))
             .collect::<Vec<_>>();
         report.shape_point_count += points.len();
         if !exact {
             report.shape_inexact_count += 1;
             exact_shape_shared.push(shared as u32);
-            for (lat, lng) in info.geometry {
-                exact_shape_points.extend([*lat, *lng]);
+            for (lat, lng) in info.geometry.iter() {
+                exact_shape_points.extend([lat, lng]);
             }
             exact_shape_start.push((exact_shape_points.len() / 2) as u32);
         }
