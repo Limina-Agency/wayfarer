@@ -144,9 +144,8 @@ impl UndirectedAdjacency {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnhanceOptions {
     /// Each node's incoming and outgoing edge counts by road type
-    /// (`RoadNode::incoming_road_type_counts`, `outgoing_road_type_counts`):
-    /// two small vectors of named counts per node (~0.2 GiB on a region), which
-    /// no package stores.
+    /// ([`RoadGraph::node_road_type_counts`]): two small vectors of named
+    /// counts per node (~0.2 GiB on a region), which no package stores.
     pub node_road_type_counts: bool,
 }
 
@@ -318,16 +317,6 @@ pub fn enhance_road_graph_with(
         node.incident_edge_count = saturating_u16(incident);
         node.junction_kind = junction_kind;
         node.highest_incident_road_type = highest_road_type.get(index).copied().flatten();
-        if options.node_road_type_counts {
-            node.incoming_road_type_counts = incoming_road_type_counts
-                .get(index)
-                .map(named_counts_from_tally)
-                .unwrap_or_default();
-            node.outgoing_road_type_counts = outgoing_road_type_counts
-                .get(index)
-                .map(named_counts_from_tally)
-                .unwrap_or_default();
-        }
         node.roundabout_entry_count = saturating_u16(
             incoming_roundabout_counts
                 .get(index)
@@ -342,6 +331,21 @@ pub fn enhance_road_graph_with(
         );
         node.is_complex_junction = junction_kind == RoadJunctionKind::Complex;
     }
+
+    graph.node_road_type_counts = if options.node_road_type_counts {
+        incoming_road_type_counts
+            .iter()
+            .zip(&outgoing_road_type_counts)
+            .map(|(incoming, outgoing)| NodeRoadTypeCounts {
+                incoming: named_counts_from_tally(incoming),
+                outgoing: named_counts_from_tally(outgoing),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    drop(incoming_road_type_counts);
+    drop(outgoing_road_type_counts);
 
     // By shared-info position (an id's last position, as `info_index_by_id`
     // answers), so the infos of one id all read the tier its last edge set.

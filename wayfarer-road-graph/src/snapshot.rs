@@ -16,13 +16,162 @@ const ROAD_GRAPH_ZSTD_LEVEL: i32 = 6;
 struct RoadGraphSnapshotEdge {
     source: usize,
     target: usize,
-    edge: RoadEdge,
+    edge: SnapshotEdge,
+}
+
+/// A [`RoadEdge`] as snapshots store it: with the source lineage and coverage
+/// id the graph now keeps on the edge's shared info, so the format stays
+/// [`ROAD_GRAPH_SNAPSHOT_VERSION`] 1. Fields in snapshot order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotEdge {
+    edge_id: u64,
+    shared_edge_info_id: u64,
+    distance_m: f32,
+    base_cost: f32,
+    mobility_mode_mask: ModeMask,
+    osm_forward_mode_mask: ModeMask,
+    osm_reverse_mode_mask: ModeMask,
+    traversal_direction: TraversalDirection,
+    segment_index: u32,
+    source_lineage_ids: Vec<i64>,
+    coverage_id: Option<String>,
+    component_id: Option<u32>,
+    start_heading_deg: Option<u16>,
+    end_heading_deg: Option<u16>,
+    inferred_speed_kph: Option<u16>,
+    estimated_travel_time_s: Option<f32>,
+    opposing_edge_id: Option<u64>,
+    hierarchy_tier: Option<RoadHierarchyTier>,
+    end_control: TrafficControl,
+    end_minor_approach: bool,
+}
+
+impl SnapshotEdge {
+    fn new(edge: &RoadEdge, info: Option<SharedInfoRef<'_>>) -> Self {
+        Self {
+            edge_id: edge.edge_id,
+            shared_edge_info_id: edge.shared_edge_info_id,
+            distance_m: edge.distance_m,
+            base_cost: edge.base_cost,
+            mobility_mode_mask: edge.mobility_mode_mask,
+            osm_forward_mode_mask: edge.osm_forward_mode_mask,
+            osm_reverse_mode_mask: edge.osm_reverse_mode_mask,
+            traversal_direction: edge.traversal_direction,
+            segment_index: edge.segment_index,
+            source_lineage_ids: info.map_or_else(Vec::new, |info| info.source_lineage_ids.to_vec()),
+            coverage_id: info.and_then(|info| info.coverage_id.map(|id| id.to_string())),
+            component_id: edge.component_id,
+            start_heading_deg: edge.start_heading_deg,
+            end_heading_deg: edge.end_heading_deg,
+            inferred_speed_kph: edge.inferred_speed_kph,
+            estimated_travel_time_s: edge.estimated_travel_time_s,
+            opposing_edge_id: edge.opposing_edge_id,
+            hierarchy_tier: edge.hierarchy_tier,
+            end_control: edge.end_control,
+            end_minor_approach: edge.end_minor_approach,
+        }
+    }
+
+    fn into_edge(self) -> RoadEdge {
+        RoadEdge {
+            edge_id: self.edge_id,
+            shared_edge_info_id: self.shared_edge_info_id,
+            distance_m: self.distance_m,
+            base_cost: self.base_cost,
+            mobility_mode_mask: self.mobility_mode_mask,
+            osm_forward_mode_mask: self.osm_forward_mode_mask,
+            osm_reverse_mode_mask: self.osm_reverse_mode_mask,
+            traversal_direction: self.traversal_direction,
+            segment_index: self.segment_index,
+            component_id: self.component_id,
+            start_heading_deg: self.start_heading_deg,
+            end_heading_deg: self.end_heading_deg,
+            inferred_speed_kph: self.inferred_speed_kph,
+            estimated_travel_time_s: self.estimated_travel_time_s,
+            opposing_edge_id: self.opposing_edge_id,
+            hierarchy_tier: self.hierarchy_tier,
+            end_control: self.end_control,
+            end_minor_approach: self.end_minor_approach,
+        }
+    }
+}
+
+/// A [`RoadNode`] as snapshots store it: with its road type counts (the
+/// graph's [`RoadGraph::node_road_type_counts`]). Fields in snapshot order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotNode {
+    id: i64,
+    lat: f64,
+    lng: f64,
+    source_node_id: Option<i64>,
+    component_id: Option<u32>,
+    incoming_edge_count: u16,
+    outgoing_edge_count: u16,
+    incident_edge_count: u16,
+    junction_kind: RoadJunctionKind,
+    highest_incident_road_type: Option<RoadType>,
+    incoming_road_type_counts: Vec<RoadGraphNamedCount>,
+    outgoing_road_type_counts: Vec<RoadGraphNamedCount>,
+    roundabout_entry_count: u16,
+    roundabout_exit_count: u16,
+    is_complex_junction: bool,
+    barrier_class: u8,
+    barrier_access: u16,
+}
+
+impl SnapshotNode {
+    fn new(node: &RoadNode, counts: Option<&NodeRoadTypeCounts>) -> Self {
+        Self {
+            id: node.id,
+            lat: node.lat,
+            lng: node.lng,
+            source_node_id: node.source_node_id,
+            component_id: node.component_id,
+            incoming_edge_count: node.incoming_edge_count,
+            outgoing_edge_count: node.outgoing_edge_count,
+            incident_edge_count: node.incident_edge_count,
+            junction_kind: node.junction_kind,
+            highest_incident_road_type: node.highest_incident_road_type,
+            incoming_road_type_counts: counts.map_or_else(Vec::new, |c| c.incoming.clone()),
+            outgoing_road_type_counts: counts.map_or_else(Vec::new, |c| c.outgoing.clone()),
+            roundabout_entry_count: node.roundabout_entry_count,
+            roundabout_exit_count: node.roundabout_exit_count,
+            is_complex_junction: node.is_complex_junction,
+            barrier_class: node.barrier_class,
+            barrier_access: node.barrier_access,
+        }
+    }
+
+    fn into_parts(self) -> (RoadNode, NodeRoadTypeCounts) {
+        let counts = NodeRoadTypeCounts {
+            incoming: self.incoming_road_type_counts,
+            outgoing: self.outgoing_road_type_counts,
+        };
+        let node = RoadNode {
+            id: self.id,
+            lat: self.lat,
+            lng: self.lng,
+            source_node_id: self.source_node_id,
+            component_id: self.component_id,
+            incoming_edge_count: self.incoming_edge_count,
+            outgoing_edge_count: self.outgoing_edge_count,
+            incident_edge_count: self.incident_edge_count,
+            junction_kind: self.junction_kind,
+            highest_incident_road_type: self.highest_incident_road_type,
+            roundabout_entry_count: self.roundabout_entry_count,
+            roundabout_exit_count: self.roundabout_exit_count,
+            is_complex_junction: self.is_complex_junction,
+            barrier_class: self.barrier_class,
+            barrier_access: self.barrier_access,
+        };
+        (node, counts)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoadGraphSnapshot {
     graph_id: String,
-    nodes: Vec<RoadNode>,
+    nodes: Vec<SnapshotNode>,
     edges: Vec<RoadGraphSnapshotEdge>,
     #[serde(default)]
     shared_edge_infos: Vec<SharedEdgeInfo>,
@@ -41,8 +190,12 @@ fn road_graph_snapshot(graph: &RoadGraph) -> RoadGraphSnapshot {
     let mut nodes = Vec::new();
     for node_index in graph.graph.node_indices() {
         node_lookup.insert(node_index, nodes.len());
-        nodes.push(graph.graph[node_index].clone());
+        nodes.push(SnapshotNode::new(
+            &graph.graph[node_index],
+            graph.node_road_type_counts.get(node_index.index()),
+        ));
     }
+    let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
 
     let edges = graph
         .graph
@@ -53,7 +206,10 @@ fn road_graph_snapshot(graph: &RoadGraph) -> RoadGraphSnapshot {
             Some(RoadGraphSnapshotEdge {
                 source,
                 target,
-                edge: edge_ref.weight().clone(),
+                edge: SnapshotEdge::new(
+                    edge_ref.weight(),
+                    shared_edge_info(graph, &info_index, edge_ref.weight().shared_edge_info_id),
+                ),
             })
         })
         .collect::<Vec<_>>();
@@ -96,9 +252,22 @@ fn deserialize_road_graph_snapshot(bytes: &[u8]) -> Result<RoadGraph, String> {
     graph.set_resolved_restrictions(snapshot.resolved_restrictions);
 
     let mut node_indices = Vec::with_capacity(snapshot.nodes.len());
+    let mut node_road_type_counts = Vec::with_capacity(snapshot.nodes.len());
     for node in snapshot.nodes {
+        let (node, counts) = node.into_parts();
         node_indices.push(graph.add_node(node));
+        node_road_type_counts.push(counts);
     }
+    // Counts are all empty in a snapshot of a graph without them.
+    if node_road_type_counts
+        .iter()
+        .any(|counts| !counts.incoming.is_empty() || !counts.outgoing.is_empty())
+    {
+        graph.node_road_type_counts = node_road_type_counts;
+    }
+    // Each shared info takes the lineage and coverage id of its first edge.
+    let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
+    let mut info_seen = vec![false; graph.shared_edge_infos.len()];
     for edge in snapshot.edges {
         let source = *node_indices
             .get(edge.source)
@@ -106,7 +275,20 @@ fn deserialize_road_graph_snapshot(bytes: &[u8]) -> Result<RoadGraph, String> {
         let target = *node_indices
             .get(edge.target)
             .ok_or_else(|| format!("Missing target node {}", edge.target))?;
-        graph.add_edge(source, target, edge.edge);
+        let SnapshotEdge {
+            ref source_lineage_ids,
+            ref coverage_id,
+            shared_edge_info_id,
+            ..
+        } = edge.edge;
+        if let Some(index) = info_index.get(shared_edge_info_id)
+            && !std::mem::replace(&mut info_seen[index], true)
+        {
+            let infos = &mut graph.shared_edge_infos;
+            infos.set_source_lineage_ids(index, source_lineage_ids.clone());
+            infos.set_coverage_id(index, coverage_id.as_deref().map(Arc::from));
+        }
+        graph.add_edge(source, target, edge.edge.into_edge());
     }
 
     Ok(graph)

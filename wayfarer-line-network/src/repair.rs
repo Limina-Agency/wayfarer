@@ -37,42 +37,71 @@ fn from_e7(point: [i32; 2]) -> PointKey {
 /// A grid cell; cells are E7 coordinates over [`TOPOLOGY_REPAIR_GRID_SIZE`].
 type Cell = (i32, i32);
 
+/// A segment by its line and its index in the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SegmentRef {
+    line: u32,
+    segment: u32,
+}
+
+/// A segment in one grid cell: 16 bytes. Ordered by cell, then segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Occupancy {
+    cell: Cell,
+    segment: SegmentRef,
+}
+
+/// A line's segments that have length, as (index, start, end).
+fn line_segments(line: &RawLine) -> impl Iterator<Item = (usize, PointKey, PointKey)> + '_ {
+    line.points
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, window)| {
+            let (a, b) = (window[0].key(), window[1].key());
+            (a != b).then_some((index, a, b))
+        })
+}
+
+/// How many grid cells [`for_each_segment_grid_cell`] visits.
+fn segment_cell_count(a: PointKey, b: PointKey) -> usize {
+    let span = |low: i64, high: i64| (grid_cell(high) - grid_cell(low)) as usize + 1;
+    span(a.lat.min(b.lat), a.lat.max(b.lat)) * span(a.lng.min(b.lng), a.lng.max(b.lng))
+}
+
 pub(crate) fn repair_road_crossings(raw_lines: &mut [RawLine], stats: &mut SharedLineNetworkStats) {
     stats.topology_repair_input_road_lines += raw_lines.len();
     let line_count = u32::try_from(raw_lines.len()).expect("road line count fits in u32");
-    let segments = raw_lines
-        .iter()
-        .enumerate()
-        .flat_map(|(line_index, line)| {
-            line.points
-                .windows(2)
-                .enumerate()
-                .filter_map(move |(segment_index, window)| {
-                    let a = window[0].key();
-                    let b = window[1].key();
-                    (a != b).then(|| RepairSegment {
-                        line_index: line_index as u32,
-                        segment_index: u32::try_from(segment_index)
-                            .expect("a line's segment count fits in u32"),
-                        a: e7(a),
-                        b: e7(b),
-                    })
-                })
-        })
-        .collect::<Vec<_>>();
-    if segments.len() < 2 {
-        return;
-    }
 
     // Every (cell, segment) occupancy, sorted so each cell's segments are
-    // contiguous and in segment order: what a map of per-cell vectors held,
-    // without an allocation per cell and per segment.
-    let mut occupancy = Vec::<(Cell, u32)>::with_capacity(segments.len() + segments.len() / 2);
-    for (segment_index, segment) in segments.iter().enumerate() {
-        let segment_index = u32::try_from(segment_index).expect("road segment count fits in u32");
-        for_each_segment_grid_cell(segment.a(), segment.b(), |cell| {
-            occupancy.push((cell, segment_index));
-        });
+    // contiguous and in segment order (line, then segment within it): what a
+    // map of per-cell vectors held, without an allocation per cell and per
+    // segment. A segment is read back from its line when its cell is tested,
+    // so no array of every segment is held next to the occupancies, and the
+    // occupancies are counted first so their vector is allocated once.
+    let occupancy_count = raw_lines
+        .par_iter()
+        .map(|line| {
+            line_segments(line)
+                .map(|(_, a, b)| segment_cell_count(a, b))
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    let mut occupancy = Vec::<Occupancy>::with_capacity(occupancy_count);
+    let mut segment_count = 0usize;
+    for (line_index, line) in raw_lines.iter().enumerate() {
+        for (segment_index, a, b) in line_segments(line) {
+            segment_count += 1;
+            let segment = SegmentRef {
+                line: line_index as u32,
+                segment: u32::try_from(segment_index).expect("a line's segment count fits in u32"),
+            };
+            for_each_segment_grid_cell(a, b, |cell| {
+                occupancy.push(Occupancy { cell, segment });
+            });
+        }
+    }
+    if segment_count < 2 {
+        return;
     }
     occupancy.par_sort_unstable();
 
@@ -80,13 +109,12 @@ pub(crate) fn repair_road_crossings(raw_lines: &mut [RawLine], stats: &mut Share
     // the counters only add up, and the insertions land in sets, so neither
     // depends on the order cells are visited in.
     let tally = occupancy
-        .par_chunk_by(|left, right| left.0 == right.0)
+        .par_chunk_by(|left, right| left.cell == right.cell)
         .fold(RepairTally::default, |mut tally, cell| {
-            tally.test_cell(cell, &segments, raw_lines);
+            tally.test_cell(cell, raw_lines);
             tally
         })
         .reduce(RepairTally::default, RepairTally::merge);
-    drop(segments);
     stats.topology_repair_checked_segment_pairs += tally.checked_segment_pairs;
     stats.topology_repair_skipped_same_feature += tally.skipped_same_feature;
     stats.topology_repair_skipped_incompatible_plane += tally.skipped_incompatible_plane;
@@ -167,25 +195,32 @@ struct RepairTally {
     skipped_endpoint_touches: usize,
     repaired_crossings: usize,
     insertions: Vec<(u32, u32, PointKey)>,
+    /// A cell's segments, reused from cell to cell.
+    scratch: Vec<RepairSegment>,
 }
 
 impl RepairTally {
-    fn test_cell(
-        &mut self,
-        cell_segments: &[(Cell, u32)],
-        segments: &[RepairSegment],
-        raw_lines: &[RawLine],
-    ) {
-        let cell = cell_segments[0].0;
-        for left_pos in 0..cell_segments.len() {
-            for right_pos in (left_pos + 1)..cell_segments.len() {
-                let left_index = cell_segments[left_pos].1 as usize;
-                let right_index = cell_segments[right_pos].1 as usize;
-                let pair = if left_index < right_index {
-                    (left_index, right_index)
-                } else {
-                    (right_index, left_index)
-                };
+    fn test_cell(&mut self, cell_segments: &[Occupancy], raw_lines: &[RawLine]) {
+        let cell = cell_segments[0].cell;
+        // The cell's segments, read from their lines once: in segment order,
+        // as the occupancies are.
+        let mut segments = std::mem::take(&mut self.scratch);
+        segments.clear();
+        segments.extend(cell_segments.iter().map(|occupancy| {
+            let SegmentRef { line, segment } = occupancy.segment;
+            let points = &raw_lines[line as usize].points;
+            RepairSegment {
+                line_index: line,
+                segment_index: segment,
+                a: e7(points[segment as usize].key()),
+                b: e7(points[segment as usize + 1].key()),
+            }
+        }));
+        for left_pos in 0..segments.len() {
+            for right_pos in (left_pos + 1)..segments.len() {
+                // Occupancies are in segment order, so `left_pos` is the
+                // earlier segment of the pair.
+                let pair = (left_pos, right_pos);
                 // A segment occupies every cell of its bounding box, so a pair
                 // surfaces in each cell they share. Testing it only in the
                 // lexicographically smallest shared cell keeps the work at one
@@ -235,6 +270,7 @@ impl RepairTally {
                 self.repaired_crossings += 1;
             }
         }
+        self.scratch = segments;
     }
 
     fn merge(mut self, mut other: Self) -> Self {

@@ -61,9 +61,10 @@ pub struct CompileRequest {
     /// global pool is not used) and the ingest runs this many decode workers,
     /// plus a reader thread. `None` runs on the current rayon pool (the global
     /// one, or the caller's inside `ThreadPool::install`, which is how a
-    /// caller sets thread names, stack sizes or priorities) with the memory
-    /// profile's decode workers, at most that pool's size. The package's bytes
-    /// are the same for every thread count.
+    /// caller sets thread names, stack sizes or priorities) with one decode
+    /// worker per thread of that pool (at most two with
+    /// [`MemoryProfile::Low`]). The package's bytes are the same for every
+    /// thread count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<usize>,
 }

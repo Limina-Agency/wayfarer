@@ -28,11 +28,11 @@ pub(crate) enum BrunnelKind {
 }
 
 /// A topology node's identity within one layer: its source node, or its
-/// position under an interned [`SnapCompatKey`].
+/// E7 position under an interned [`SnapCompatKey`] (16 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum NodeKey {
     Source(i64),
-    Snapped(PointKey, u32),
+    Snapped([i32; 2], u32),
 }
 
 /// Whether a point's source node, or its position under the line's snap key,
@@ -102,7 +102,8 @@ pub(crate) struct RawLine {
 struct LocalNodeRegistry {
     /// Ids are assigned in first-seen order, so the map's own order is moot.
     by_key: FxHashMap<NodeKey, u32>,
-    metadata: Vec<(PointKey, Option<i64>)>,
+    /// Each node's position and source node, by id.
+    metadata: Vec<RawPoint>,
 }
 
 impl LocalNodeRegistry {
@@ -112,7 +113,7 @@ impl LocalNodeRegistry {
         } else {
             let id = self.metadata.len() as u32;
             self.by_key.insert(key, id);
-            self.metadata.push((point, source_node_id));
+            self.metadata.push(RawPoint::new(point, source_node_id));
             id
         }
     }
@@ -125,13 +126,10 @@ pub(crate) fn append_layer_network(
     render_products: bool,
 ) {
     let layer = inputs.first().map(|input| input.layer);
-    // Each distinct routing value once, shared by its lines and their edges.
-    let mut routing_values = FxHashMap::<RoadRoutingAttrs, Arc<RoadRoutingAttrs>>::default();
     let mut raw_lines = inputs
         .into_iter()
-        .filter_map(|input| raw_line_from_input(input, &mut routing_values))
+        .filter_map(raw_line_from_input)
         .collect::<Vec<_>>();
-    drop(routing_values);
     if raw_lines.is_empty() {
         return;
     }
@@ -202,12 +200,13 @@ pub(crate) fn append_layer_network(
     drop(by_key);
     network.topology.nodes.reserve_exact(metadata.len());
 
-    for (local_id, (point, source_node_id)) in metadata.iter().enumerate() {
+    for (local_id, point) in metadata.iter().enumerate() {
+        let (key, source_node_id) = (point.key(), point.source_node_id());
         network.topology.nodes.push(SharedTopologyNode {
             id: node_offset + local_id as u32,
-            lat: from_fixed(point.lat),
-            lng: from_fixed(point.lng),
-            source_node_id: *source_node_id,
+            lat: from_fixed(key.lat),
+            lng: from_fixed(key.lng),
+            source_node_id,
         });
     }
 
@@ -231,10 +230,7 @@ pub(crate) fn append_layer_network(
     observer(&format!("{layer_name}_render_products"));
 }
 
-fn raw_line_from_input(
-    input: SharedLineInput,
-    routing_values: &mut FxHashMap<RoadRoutingAttrs, Arc<RoadRoutingAttrs>>,
-) -> Option<RawLine> {
+fn raw_line_from_input(input: SharedLineInput) -> Option<RawLine> {
     // Already normalized and interned by `push_input`, and normalization is
     // idempotent — re-running it here would only copy the shared list back out.
     let snap_compat = snap_compat_key(input.layer, &input.attrs);
@@ -260,17 +256,6 @@ fn raw_line_from_input(
         return None;
     }
     points.shrink_to_fit();
-    let routing = input
-        .routing
-        .map(|routing| match routing_values.get(&routing) {
-            Some(shared) => Arc::clone(shared),
-            None => {
-                let shared = Arc::new(routing.clone());
-                routing_values.insert(routing, Arc::clone(&shared));
-                shared
-            }
-        });
-
     Some(RawLine {
         feature_id: input.feature_id,
         layer: input.layer,
@@ -280,7 +265,8 @@ fn raw_line_from_input(
         min_zoom: input.min_zoom,
         max_zoom: input.max_zoom,
         sort_order: input.sort_order,
-        routing,
+        // Shared by `push_input`.
+        routing: input.routing,
         source_lineage_ids: input.source_lineage_ids.into(),
         snap_compat,
     })
@@ -369,9 +355,10 @@ fn append_topology_edges(
 
 /// Whether each point's source node, and its position under its line's snap
 /// key, occurs more than once in the layer, flattened in line order. Counted
-/// by sorting `(key, point)` pairs, one key at a time: 16 bytes a point,
-/// where hash maps of counts sized to the point count took ~20 times that
-/// together.
+/// by sorting `(key, point)` pairs, one key at a time and one share of the
+/// keys at a time ([`RECURRENCE_SHARES`]; equal keys fall in the same share):
+/// 16 bytes for a share's points, where hash maps of counts sized to the
+/// point count took ~20 times that for all of them together.
 fn point_recurrence(raw_lines: &[RawLine], line_snap_ids: &[u32]) -> Vec<PointRecurrence> {
     let point_count = raw_lines
         .iter()
@@ -385,43 +372,78 @@ fn point_recurrence(raw_lines: &[RawLine], line_snap_ids: &[u32]) -> Vec<PointRe
         };
         point_count
     ];
+    let points = || raw_lines.iter().flat_map(|line| &line.points).enumerate();
+    let snapped_points = || {
+        raw_lines
+            .iter()
+            .zip(line_snap_ids)
+            .flat_map(|(line, &snap_id)| line.points.iter().map(move |point| (point, snap_id)))
+            .enumerate()
+    };
 
-    let mut by_source = raw_lines
-        .iter()
-        .flat_map(|line| &line.points)
-        .enumerate()
-        .filter_map(|(index, point)| {
+    let mut source_counts = [0usize; RECURRENCE_SHARES];
+    let mut snapped_counts = [0usize; RECURRENCE_SHARES];
+    for (_, (point, snap_id)) in snapped_points() {
+        if let Some(node_id) = point.source_node_id() {
+            source_counts[source_share(node_id)] += 1;
+        }
+        snapped_counts[snapped_share(point, snap_id)] += 1;
+    }
+
+    for (share, count) in source_counts.into_iter().enumerate() {
+        let mut by_source = Vec::with_capacity(count);
+        by_source.extend(points().filter_map(|(index, point)| {
             point
                 .source_node_id()
+                .filter(|node_id| source_share(*node_id) == share)
                 .map(|node_id| (node_id, point_index(index)))
-        })
-        .collect::<Vec<_>>();
-    by_source.par_sort_unstable();
-    for run in by_source.chunk_by(|left, right| left.0 == right.0) {
-        if run.len() > 1 {
-            for (_, index) in run {
-                recurrence[*index as usize].repeated_source = true;
+        }));
+        by_source.par_sort_unstable();
+        for run in by_source.chunk_by(|left, right| left.0 == right.0) {
+            if run.len() > 1 {
+                for (_, index) in run {
+                    recurrence[*index as usize].repeated_source = true;
+                }
             }
         }
     }
-    drop(by_source);
 
-    let mut by_snapped = raw_lines
-        .iter()
-        .zip(line_snap_ids)
-        .flat_map(|(line, &snap_id)| line.points.iter().map(move |point| (point, snap_id)))
-        .enumerate()
-        .map(|(index, (point, snap_id))| ([point.lat, point.lng], snap_id, point_index(index)))
-        .collect::<Vec<_>>();
-    by_snapped.par_sort_unstable();
-    for run in by_snapped.chunk_by(|left, right| (left.0, left.1) == (right.0, right.1)) {
-        if run.len() > 1 {
-            for (_, _, index) in run {
-                recurrence[*index as usize].repeated_snapped = true;
+    for (share, count) in snapped_counts.into_iter().enumerate() {
+        let mut by_snapped = Vec::with_capacity(count);
+        by_snapped.extend(
+            snapped_points()
+                .filter(|&(_, (point, snap_id))| snapped_share(point, snap_id) == share)
+                .map(|(index, (point, snap_id))| {
+                    ([point.lat, point.lng], snap_id, point_index(index))
+                }),
+        );
+        by_snapped.par_sort_unstable();
+        for run in by_snapped.chunk_by(|left, right| (left.0, left.1) == (right.0, right.1)) {
+            if run.len() > 1 {
+                for (_, _, index) in run {
+                    recurrence[*index as usize].repeated_snapped = true;
+                }
             }
         }
     }
     recurrence
+}
+
+/// The shares [`point_recurrence`] splits each key's points into: the top
+/// [`RECURRENCE_SHARE_BITS`] bits of a multiplicative hash of the key.
+const RECURRENCE_SHARE_BITS: u32 = 2;
+const RECURRENCE_SHARES: usize = 1 << RECURRENCE_SHARE_BITS;
+
+fn share_of(key: u64) -> usize {
+    (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (u64::BITS - RECURRENCE_SHARE_BITS)) as usize
+}
+
+fn source_share(node_id: i64) -> usize {
+    share_of(node_id as u64)
+}
+
+fn snapped_share(point: &RawPoint, snap_id: u32) -> usize {
+    share_of((u64::from(point.lat as u32) << 32 | u64::from(point.lng as u32)) ^ u64::from(snap_id))
 }
 
 /// A point's E7 coordinates. Line points are the node store's `i32` E7
@@ -433,12 +455,12 @@ pub(crate) fn e7(point: PointKey) -> [i32; 2] {
 
 fn node_key_for_point(point: &RawPoint, snap_id: u32, prefer_snapped: bool) -> NodeKey {
     if prefer_snapped {
-        NodeKey::Snapped(point.key(), snap_id)
+        NodeKey::Snapped([point.lat, point.lng], snap_id)
     } else {
         point
             .source_node_id()
             .map(NodeKey::Source)
-            .unwrap_or(NodeKey::Snapped(point.key(), snap_id))
+            .unwrap_or(NodeKey::Snapped([point.lat, point.lng], snap_id))
     }
 }
 
