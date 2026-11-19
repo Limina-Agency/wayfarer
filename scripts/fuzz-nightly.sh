@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Time-boxed fuzzing of every target at once, with overflow checks; the
-# nightly CI job runs it (.github/workflows/nightly.yml) and keeps the corpora
-# between runs.
+# "Gate and fuzz" workflow runs it (.github/workflows/nightly.yml, started by
+# hand) and keeps the corpora between runs.
 #
 #   scripts/fuzz-nightly.sh [seconds_per_target=1800] [target ...]
 #
