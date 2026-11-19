@@ -1471,6 +1471,71 @@ fn a_through_drive_avoids_a_destination_only_block() {
     }
 }
 
+/// A matrix cell crosses no destination-only pocket but its own two
+/// points', as a route between them does: with a target inside the block,
+/// the drive between its two sides still goes around it, and the target
+/// inside is reached (matrices used to open every point's pocket for every
+/// cell).
+#[test]
+fn matrix_cells_cross_no_pocket_of_another_point() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    let graph = grid_with_private_block();
+    let private = [
+        ((2, 2), (2, 3)),
+        ((2, 3), (2, 2)),
+        ((2, 3), (2, 4)),
+        ((2, 4), (2, 3)),
+    ]
+    .map(|(from, to)| grid_edge(&graph, from, to));
+    let reader = persist(&graph, &dir.path().join("grid.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let (west, east) = (GeoPoint::new(0.0023, 0.0008), GeoPoint::new(0.0027, 0.0051));
+    let inside = GeoPoint::new(0.0023, 0.00465);
+    for (name, engine) in [("reference", &oracle as &dyn Router), ("compact", &compact)] {
+        let around = route(engine, west, east, MobilityProfile::Wheeled, |request| {
+            request.options.max_correlation_distance_m = 15;
+        })
+        .unwrap();
+        assert!(!around.edge_ids.iter().any(|edge| private.contains(edge)));
+        for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
+            let context = format!("{name} {mode:?}");
+            let mut request = crate::RouteMatrixRequest::new(
+                vec![west],
+                vec![east, inside],
+                MobilityProfile::Wheeled,
+            );
+            request.options.max_correlation_distance_m = 15;
+            test_mode::set(Some(mode));
+            let result = engine.matrix(request);
+            test_mode::set(None);
+            let [across, into] = &result.cells[..] else {
+                panic!("{context}: {result:?}");
+            };
+            assert_eq!(
+                across.status,
+                crate::RouteMatrixCellStatus::Reachable,
+                "{context}"
+            );
+            assert!(
+                !across.edge_ids.iter().any(|edge| private.contains(edge)),
+                "{context}: {across:?}"
+            );
+            let cost = across.cost.unwrap();
+            assert!(
+                (cost - around.cost).abs() <= 1e-3 * around.cost,
+                "{context}: matrix {cost} vs route {}",
+                around.cost
+            );
+            assert_eq!(
+                into.status,
+                crate::RouteMatrixCellStatus::Reachable,
+                "{context}"
+            );
+        }
+    }
+}
+
 fn budget_failures(result: &crate::RouteMatrixResult) -> Vec<(usize, usize)> {
     result
         .cells

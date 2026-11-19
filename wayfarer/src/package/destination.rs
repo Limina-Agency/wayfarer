@@ -91,7 +91,13 @@ impl DestinationPockets {
         self.edges.is_empty()
     }
 
-    fn pocket_edges(&self, pocket: u32) -> &[u32] {
+    /// The pocket `edge` lies in, if any.
+    pub(crate) fn pocket_of(&self, edge: u32) -> Option<u32> {
+        self.pocket_of.get(&edge).copied()
+    }
+
+    /// The edges of `pocket`.
+    pub(crate) fn pocket_edges(&self, pocket: u32) -> &[u32] {
         &self.edges[self.first[pocket as usize] as usize..self.first[pocket as usize + 1] as usize]
     }
 }

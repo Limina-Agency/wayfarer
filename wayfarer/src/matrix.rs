@@ -180,7 +180,28 @@ impl RoutingEngine {
                 &mut cells,
                 !strict,
                 None,
+                None,
             );
+            // The strict pass opens the pockets of every source and target
+            // for every cell; a cell whose path crossed the pocket of
+            // another point is searched again with its own two only.
+            if let Ok((expansions, visited, settled)) = &mut outcome
+                && strict
+            {
+                match self.confine_to_own_pockets(
+                    &request,
+                    &source_candidates,
+                    &target_candidates,
+                    &mut cells,
+                ) {
+                    Ok((more_expansions, more_visited, more_settled)) => {
+                        *expansions += more_expansions;
+                        *visited += more_visited;
+                        *settled += more_settled;
+                    }
+                    Err(error) => outcome = Err(error),
+                }
+            }
             // Cells that cannot connect without crossing a destination-only
             // road get the relaxed search, as routes do. Only those cells are
             // searched again (see `matrix_cells`' `retry`).
@@ -197,6 +218,7 @@ impl RoutingEngine {
                     &mut relaxed,
                     true,
                     only_retried.then_some(retry.as_slice()),
+                    None,
                 ) {
                     Ok((more_expansions, more_visited, more_settled)) => {
                         *expansions += more_expansions;
@@ -260,6 +282,12 @@ impl RoutingEngine {
     /// differently focused expansion could label another first (none did in
     /// the Krakow and Malopolskie matrices measured). The mode is chosen
     /// from the whole matrix either way.
+    ///
+    /// `confined` (strict passes only): the candidate edges whose
+    /// destination-only pockets the pass unblocks, in place of every
+    /// source's and target's; the query then does not depend on the
+    /// endpoints either, so `retry` may limit such a pass too.
+    #[allow(clippy::too_many_arguments)]
     fn matrix_cells(
         &self,
         request: &RouteMatrixRequest,
@@ -268,8 +296,9 @@ impl RoutingEngine {
         cells: &mut [RouteMatrixCell],
         allow_destination_only: bool,
         retry: Option<&[bool]>,
+        confined: Option<&[u32]>,
     ) -> Result<(usize, usize, usize), RouteError> {
-        debug_assert!(retry.is_none() || allow_destination_only);
+        debug_assert!(retry.is_none() || allow_destination_only || confined.is_some());
         let target_count = target_candidates.len();
         let retries = |source: usize, target: usize| {
             retry.is_none_or(|retry| retry[source * target_count + target])
@@ -358,10 +387,19 @@ impl RoutingEngine {
         let unblocked = if allow_destination_only {
             FxHashMap::default()
         } else {
+            let endpoints = match confined {
+                Some(edges) => edges.to_vec(),
+                None => source_edges
+                    .iter()
+                    .chain(&target_edges)
+                    .flatten()
+                    .copied()
+                    .collect(),
+            };
             graph.unblock_destination_pockets(
                 &request.options,
                 request.profile,
-                source_edges.iter().chain(&target_edges).flatten().copied(),
+                endpoints,
                 &mut cost_overrides,
                 &mut durations,
             )
@@ -728,6 +766,102 @@ impl RoutingEngine {
             }
         }
         Ok((expansions, visited, settled))
+    }
+}
+
+impl RoutingEngine {
+    /// Searches again, on the strict column, the found cells whose path
+    /// crossed a destination-only pocket that neither of their own endpoints
+    /// lies in, with only their own endpoints' pockets unblocked, as a route
+    /// between the two points has them (see `package::destination`). Every
+    /// other found cell stands: its path is feasible with its own pockets
+    /// alone, and the cheapest even with every pocket unblocked. Cells that
+    /// then find no path are left for the relaxed pass. Returns the
+    /// searches' (expansions, visited, settled).
+    fn confine_to_own_pockets(
+        &self,
+        request: &RouteMatrixRequest,
+        source_candidates: &[&[CorrelatedLocation]],
+        target_candidates: &[&[CorrelatedLocation]],
+        cells: &mut [RouteMatrixCell],
+    ) -> Result<(usize, usize, usize), RouteError> {
+        let graph = self.package();
+        let view = graph.view();
+        let pockets = graph.destination_pockets(request.profile);
+        let own = |candidates: &&[CorrelatedLocation]| {
+            let mut own = candidates
+                .iter()
+                .filter_map(|candidate| resolve_location(view, candidate))
+                .filter_map(|edge| pockets.pocket_of(edge))
+                .collect::<Vec<_>>();
+            own.sort_unstable();
+            own.dedup();
+            own
+        };
+        let source_pockets = source_candidates.iter().map(own).collect::<Vec<_>>();
+        let target_pockets = target_candidates.iter().map(own).collect::<Vec<_>>();
+        // The pockets the strict pass unblocked, by edge id.
+        let mut unblocked = FxHashMap::default();
+        for pocket in source_pockets.iter().chain(&target_pockets).flatten() {
+            for edge in pockets.pocket_edges(*pocket) {
+                unblocked.insert(view.edge_id(*edge as usize), *pocket);
+            }
+        }
+        if unblocked.is_empty() {
+            return Ok((0, 0, 0));
+        }
+        // Cells to search again, by the pockets their endpoints lie in.
+        let target_count = target_candidates.len();
+        let mut groups = std::collections::BTreeMap::<Vec<u32>, Vec<bool>>::new();
+        for (index, cell) in cells.iter().enumerate() {
+            if cell.status != RouteMatrixCellStatus::Reachable {
+                continue;
+            }
+            let (source, target) = (
+                &source_pockets[cell.source_index],
+                &target_pockets[cell.target_index],
+            );
+            let crosses = cell.edge_ids.iter().any(|edge| {
+                unblocked
+                    .get(edge)
+                    .is_some_and(|pocket| !source.contains(pocket) && !target.contains(pocket))
+            });
+            if crosses {
+                let mut key = source.iter().chain(target).copied().collect::<Vec<_>>();
+                key.sort_unstable();
+                key.dedup();
+                groups
+                    .entry(key)
+                    .or_insert_with(|| vec![false; cells.len()])[index] = true;
+            }
+        }
+        let mut counts = (0, 0, 0);
+        for (key, retry) in groups {
+            // One edge of each pocket names it.
+            let endpoints = key
+                .iter()
+                .filter_map(|pocket| pockets.pocket_edges(*pocket).first().copied())
+                .collect::<Vec<_>>();
+            let mut confined = matrix_cell_grid(source_candidates.len(), target_count);
+            let (expansions, visited, settled) = self.matrix_cells(
+                request,
+                source_candidates,
+                target_candidates,
+                &mut confined,
+                false,
+                Some(&retry),
+                Some(&endpoints),
+            )?;
+            counts.0 += expansions;
+            counts.1 += visited;
+            counts.2 += settled;
+            for ((cell, searched), retried) in cells.iter_mut().zip(confined).zip(&retry) {
+                if *retried {
+                    *cell = searched;
+                }
+            }
+        }
+        Ok(counts)
     }
 }
 
