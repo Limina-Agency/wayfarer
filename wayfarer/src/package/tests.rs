@@ -7833,6 +7833,81 @@ fn cch_potentials_are_exact_node_distances() {
 }
 
 #[test]
+fn via_candidates_match_the_reference_listing() {
+    let dir = tempdir().unwrap();
+    let graphs = [
+        ("grid", grid_graph()),
+        ("costing", costing_grid_graph()),
+        ("junction", junction_graph()),
+        ("restricted", randomly_restricted_grid(7)),
+    ];
+    let mut listed = 0usize;
+    for (name, graph) in graphs {
+        let fixture = persist(&graph, &dir.path().join(format!("{name}.mrt")));
+        let package = &fixture.package;
+        let view = package.file.view();
+        let potentials = package.cch.prepare(&view).expect("potentials").clone();
+        let topology = &potentials.topology;
+        for (column, metric) in potentials.metrics.iter().enumerate() {
+            let costs = &view.edge_cost[column * view.edge_count..(column + 1) * view.edge_count];
+            for source in 0..view.node_count as u32 {
+                for target in 0..view.node_count as u32 {
+                    // Both trees in one sweep: the two sweeps' values, bit for bit.
+                    let both = topology.both_to_all(metric, source, target);
+                    let from = topology.one_to_all(metric, source, false);
+                    let to = topology.one_to_all(metric, target, true);
+                    assert!(
+                        both.iter()
+                            .zip(from.iter().zip(&to))
+                            .all(|(pair, (f, t))| pair[0].to_bits() == f.to_bits()
+                                && pair[1].to_bits() == t.to_bits()),
+                        "{name}: trees {source} -> {target}"
+                    );
+                    let excluded = [
+                        rustc_hash::FxHashSet::default(),
+                        (0..view.edge_count as u32).step_by(5).collect(),
+                    ];
+                    for excluded in &excluded {
+                        for (max_ratio, min_plateau) in [(1.6, 0.15), (3.0, 0.0)] {
+                            let expected = cch::via_candidates_reference(
+                                &view,
+                                topology,
+                                metric,
+                                costs,
+                                source,
+                                target,
+                                max_ratio,
+                                min_plateau,
+                                excluded,
+                            );
+                            let (mut candidates, trees) = cch::via_plateaus(
+                                &view,
+                                topology,
+                                metric,
+                                costs,
+                                source,
+                                target,
+                                max_ratio,
+                                min_plateau,
+                                excluded,
+                            );
+                            if let Some(trees) = trees {
+                                candidates.extend(cch::via_singles(
+                                    &view, topology, costs, &trees, excluded,
+                                ));
+                            }
+                            assert_eq!(candidates, expected, "{name}: {source} -> {target}");
+                            listed += candidates.len();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(listed > 0);
+}
+
+#[test]
 fn routes_bounded_by_cch_potentials_equal_routes_bounded_by_the_straight_line() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("costing.mrt");

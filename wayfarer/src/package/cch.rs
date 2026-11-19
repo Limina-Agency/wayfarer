@@ -1103,6 +1103,301 @@ impl CchTopology {
 // -------------------------------------------------------------------------
 
 impl CchTopology {
+    /// Node-level distances from `source` to every node and from every node
+    /// to `target`, by rank, in metric units, as `[from, to]` pairs (PHAST:
+    /// the elimination-tree search up from each, then one sweep down the
+    /// ranks for both trees, which reads every arc once).
+    pub(crate) fn both_to_all(
+        &self,
+        metric: &CchMetric,
+        source: u32,
+        target: u32,
+    ) -> Vec<[f32; 2]> {
+        let n = self.rank.len();
+        let mut distance = vec![[f32::INFINITY; 2]; n];
+        let mut space = Vec::new();
+        // Forward: up the tree along arcs low → high (`up`), then down along
+        // high → low (`down`). Backward the other way round.
+        elimination_search(self, source, &metric.up, &mut space);
+        for (x, d) in &space {
+            distance[*x as usize][0] = *d as f32;
+        }
+        elimination_search(self, target, &metric.down, &mut space);
+        for (x, d) in &space {
+            distance[*x as usize][1] = *d as f32;
+        }
+        // Every upward neighbour has a higher rank: one sweep down the
+        // ranks, in memory order.
+        for x in (0..n).rev() {
+            let arcs = self.first_up[x] as usize..self.first_up[x + 1] as usize;
+            let [mut from, mut to] = distance[x];
+            for ((y, down), up) in self.up_head[arcs.clone()]
+                .iter()
+                .zip(&metric.down[arcs.clone()])
+                .zip(&metric.up[arcs])
+            {
+                let [from_y, to_y] = distance[*y as usize];
+                let value = from_y + *down;
+                if value < from {
+                    from = value;
+                }
+                let value = to_y + *up;
+                if value < to {
+                    to = value;
+                }
+            }
+            distance[x] = [from, to];
+        }
+        distance
+    }
+}
+
+/// Single-edge via candidates after the plateaus (see [`via_plateaus`]).
+const VIA_FALLBACK_EDGES: usize = 24;
+
+/// Ranks per task of the plateau scan.
+const PLATEAU_SCAN_CHUNK: usize = 16_384;
+
+/// A via edge for an alternative route: the middle of a plateau, a stretch
+/// of edges on both the shortest-path tree from the origin and the one to
+/// the destination (Bader et al.), so that the route through it is locally
+/// optimal over the plateau's length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ViaCandidate {
+    pub edge: u32,
+    /// Node-level cost of the route through the plateau (metric units).
+    pub cost: f64,
+    /// The plateau's length (metric units).
+    pub plateau: f64,
+}
+
+/// The two node-level trees of [`via_plateaus`] (by rank: distance from the
+/// source, distance to the target) and its cost bound, kept for
+/// [`via_singles`].
+pub(crate) struct ViaTrees {
+    distance: Vec<[f32; 2]>,
+    bound: f32,
+}
+
+/// Via candidates between nodes `source` and `target` on `metric` (customized
+/// from per-edge `costs`), using none of the `excluded` edges, whose route
+/// costs at most `max_ratio * D` (`D` the shortest distance): the plateaus
+/// at least `min_plateau * D` long, longest first. For short detours a
+/// plateau cannot catch (both trees may leave a short branch at its ends),
+/// [`via_singles`] lists single edges from the returned trees, which are
+/// `None` when the target cannot be reached.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn via_plateaus(
+    g: &Sections<'_>,
+    topology: &CchTopology,
+    metric: &CchMetric,
+    costs: &[f32],
+    source: u32,
+    target: u32,
+    max_ratio: f64,
+    min_plateau: f64,
+    excluded: &rustc_hash::FxHashSet<u32>,
+) -> (Vec<ViaCandidate>, Option<ViaTrees>) {
+    let distance = topology.both_to_all(metric, source, target);
+    let rank = &topology.rank;
+    let total = f64::from(distance[rank[target as usize] as usize][0]);
+    if !total.is_finite() || total <= 0.0 {
+        return (Vec::new(), None);
+    }
+    let bound = (max_ratio * total) as f32;
+    let plateau = plateau_edges(g, topology, costs, &distance, bound);
+    let candidates = plateau_chains(topology, &plateau, &distance, total, min_plateau, excluded);
+    (candidates, Some(ViaTrees { distance, bound }))
+}
+
+/// Plateau edges: (tail, edge, head) on both trees, at most one out of each
+/// tail (its first), by the tail's rank.
+fn plateau_edges(
+    g: &Sections<'_>,
+    topology: &CchTopology,
+    costs: &[f32],
+    distance: &[[f32; 2]],
+    bound: f32,
+) -> Vec<(u32, u32, u32)> {
+    let rank = &topology.rank;
+    // f32 sums along the sweeps: equal within a few ulps of the distance.
+    let tolerance = |value: f32| 1e-5 * value.max(1.0) + 1e-5;
+    let inside = |from: f32, to: f32| from + to <= bound;
+    let n = g.node_count;
+    (0..n.div_ceil(PLATEAU_SCAN_CHUNK))
+        .into_par_iter()
+        .map(|chunk| {
+            let ranks = chunk * PLATEAU_SCAN_CHUNK..((chunk + 1) * PLATEAU_SCAN_CHUNK).min(n);
+            let mut found = Vec::new();
+            for (ru, [from_u, to_u]) in ranks.clone().zip(&distance[ranks]) {
+                if !inside(*from_u, *to_u) {
+                    continue;
+                }
+                let u = topology.node[ru];
+                for e in g.first_out[u as usize]..g.first_out[u as usize + 1] {
+                    let w = g.edge_target[e as usize];
+                    let c = costs[e as usize];
+                    if w == u || !c.is_finite() {
+                        continue;
+                    }
+                    let [from_w, to_w] = distance[rank[w as usize] as usize];
+                    if !inside(from_w, to_w) {
+                        continue;
+                    }
+                    let on_from = (from_u + c - from_w).abs() <= tolerance(from_w);
+                    let on_to = (to_w + c - to_u).abs() <= tolerance(*to_u);
+                    if on_from && on_to {
+                        found.push((u, e, w));
+                        break;
+                    }
+                }
+            }
+            found
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// The plateaus among `plateau`'s edges (chains of them, each started at a
+/// tail no plateau edge enters, in `plateau`'s order) at least `min_plateau
+/// * total` long and on none of the `excluded` edges, longest first.
+fn plateau_chains(
+    topology: &CchTopology,
+    plateau: &[(u32, u32, u32)],
+    distance: &[[f32; 2]],
+    total: f64,
+    min_plateau: f64,
+    excluded: &rustc_hash::FxHashSet<u32>,
+) -> Vec<ViaCandidate> {
+    let rank = &topology.rank;
+    let n = rank.len();
+    // By the tail's rank: its plateau edge's index in `plateau`, plus one
+    // (0: none); a tail has at most one.
+    let mut next = vec![0u32; n];
+    let mut heads = Bits::new(n);
+    for (index, (u, _, w)) in plateau.iter().enumerate() {
+        next[rank[*u as usize] as usize] = index as u32 + 1;
+        heads.insert(rank[*w as usize] as usize);
+    }
+    let from = |r: usize| distance[r][0];
+    let mut seen = Bits::new(n);
+    let mut candidates = Vec::new();
+    let mut chain = Vec::new();
+    for (start, _, _) in plateau {
+        let rs = rank[*start as usize] as usize;
+        if heads.contains(rs) || !seen.insert(rs) {
+            continue;
+        }
+        // (edge, rank of its head) along the chain.
+        chain.clear();
+        let mut last = rs;
+        while next[last] != 0 {
+            let (_, edge, head) = plateau[next[last] as usize - 1];
+            let rh = rank[head as usize] as usize;
+            chain.push((edge, rh));
+            if !seen.insert(rh) {
+                break;
+            }
+            last = rh;
+        }
+        if chain.iter().any(|(edge, _)| excluded.contains(edge)) {
+            continue;
+        }
+        let length = f64::from(from(last) - from(rs));
+        if length < min_plateau * total {
+            continue;
+        }
+        let middle = f64::from(from(rs)) + length / 2.0;
+        let edge = chain
+            .iter()
+            .find(|(_, rh)| f64::from(from(*rh)) >= middle)
+            .map_or(chain[0].0, |(edge, _)| *edge);
+        candidates.push(ViaCandidate {
+            edge,
+            cost: f64::from(distance[rs][0] + distance[rs][1]),
+            plateau: length,
+        });
+    }
+    candidates.sort_by(|a, b| {
+        b.plateau
+            .total_cmp(&a.plateau)
+            .then(a.cost.total_cmp(&b.cost))
+            .then(a.edge.cmp(&b.edge))
+    });
+    candidates
+}
+
+/// A fixed-size bit set.
+struct Bits(Vec<u64>);
+
+impl Bits {
+    fn new(len: usize) -> Self {
+        Self(vec![0; len.div_ceil(64)])
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        self.0[index >> 6] >> (index & 63) & 1 != 0
+    }
+
+    /// Whether `index` was not in the set yet.
+    fn insert(&mut self, index: usize) -> bool {
+        let fresh = !self.contains(index);
+        self.0[index >> 6] |= 1 << (index & 63);
+        fresh
+    }
+}
+
+/// The single-edge via candidates that follow [`via_plateaus`]' plateaus: up
+/// to [`VIA_FALLBACK_EDGES`] edges on none of the `excluded` edges, by the
+/// cost of the cheapest route through them within the bound (plateau 0),
+/// then by edge.
+pub(crate) fn via_singles(
+    g: &Sections<'_>,
+    topology: &CchTopology,
+    costs: &[f32],
+    trees: &ViaTrees,
+    excluded: &rustc_hash::FxHashSet<u32>,
+) -> Vec<ViaCandidate> {
+    let (distance, bound, rank) = (&trees.distance, trees.bound, &topology.rank);
+    let mut singles = (0..g.node_count)
+        .into_par_iter()
+        .filter(|r| distance[*r][0] + distance[*r][1] <= bound)
+        .flat_map_iter(|ru| {
+            let u = topology.node[ru];
+            (g.first_out[u as usize]..g.first_out[u as usize + 1]).filter_map(move |e| {
+                let w = g.edge_target[e as usize];
+                let c = costs[e as usize];
+                if w == u || !c.is_finite() || excluded.contains(&e) {
+                    return None;
+                }
+                let cost = distance[ru][0] + c + distance[rank[w as usize] as usize][1];
+                (cost <= bound).then_some((cost, e))
+            })
+        })
+        .collect::<Vec<_>>();
+    let order = |a: &(f32, u32), b: &(f32, u32)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+    let keep = VIA_FALLBACK_EDGES.min(singles.len());
+    if keep > 0 && keep < singles.len() {
+        singles.select_nth_unstable_by(keep - 1, order);
+        singles.truncate(keep);
+    }
+    singles.sort_unstable_by(order);
+    singles
+        .into_iter()
+        .map(|(cost, edge)| ViaCandidate {
+            edge,
+            cost: f64::from(cost),
+            plateau: 0.0,
+        })
+        .collect()
+}
+
+// The via candidates as they were first computed (two separate sweeps, the
+// plateau chains in hash maps, the single edges always listed): the
+// reference the tests compare `via_plateaus` and `via_singles` with.
+
+#[cfg(test)]
+impl CchTopology {
     /// Node-level distances from `node` to every node (`reversed`: from every
     /// node to `node`), by rank, in metric units (PHAST: the elimination-tree
     /// search up from `node`, then one sweep down the ranks).
@@ -1138,31 +1433,11 @@ impl CchTopology {
     }
 }
 
-/// A via edge for an alternative route: the middle of a plateau, a stretch
-/// of edges on both the shortest-path tree from the origin and the one to
-/// the destination (Bader et al.), so that the route through it is locally
-/// optimal over the plateau's length.
-/// Single-edge via candidates after the plateaus (see [`via_candidates`]).
-const VIA_FALLBACK_EDGES: usize = 24;
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ViaCandidate {
-    pub edge: u32,
-    /// Node-level cost of the route through the plateau (metric units).
-    pub cost: f64,
-    /// The plateau's length (metric units).
-    pub plateau: f64,
-}
-
-/// Via candidates between nodes `source` and `target` on `metric` (customized
-/// from per-edge `costs`), using none of the `excluded` edges, whose route
-/// costs at most `max_ratio * D` (`D` the shortest distance): first the
-/// plateaus at least `min_plateau * D` long, longest first; then, for short
-/// detours a plateau cannot catch (both trees may leave a short branch at
-/// its ends), up to [`VIA_FALLBACK_EDGES`] single edges by the cost of the
-/// route through them (plateau 0).
+/// The plateaus of [`via_plateaus`] followed by every candidate of
+/// [`via_singles`].
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn via_candidates(
+pub(crate) fn via_candidates_reference(
     g: &Sections<'_>,
     topology: &CchTopology,
     metric: &CchMetric,
