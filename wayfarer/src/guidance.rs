@@ -18,10 +18,59 @@ const FORK_MAX_ANGLE_DEG: i16 = 45;
 /// Traffic joining within this angle of the departure makes a merge.
 const MERGE_MAX_ANGLE_DEG: i16 = 45;
 
+#[cfg(test)]
 pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
+    build_maneuvers_with(leg, None)
+}
+
+/// A leg's geometry with, when the leg builder kept them, the haversine
+/// lengths of its steps (`segment_m[i]` from point `i - 1` to point `i`).
+#[derive(Clone, Copy)]
+pub(crate) struct Shape<'a> {
+    points: &'a [GeoPoint],
+    segment_m: Option<&'a [f64]>,
+}
+
+impl<'a> Shape<'a> {
+    fn plain(points: &'a [GeoPoint]) -> Self {
+        Self {
+            points,
+            segment_m: None,
+        }
+    }
+
+    /// `points[from].distance_to(points[to])`, kept or computed.
+    fn length(&self, from: usize, to: usize) -> f64 {
+        if let Some(segment_m) = self.segment_m {
+            if to == from + 1 {
+                return segment_m[to];
+            }
+            if from == to + 1 {
+                return segment_m[from];
+            }
+        }
+        self.points[from].distance_to(self.points[to])
+    }
+}
+
+impl std::ops::Deref for Shape<'_> {
+    type Target = [GeoPoint];
+    fn deref(&self) -> &[GeoPoint] {
+        self.points
+    }
+}
+
+pub(crate) fn build_maneuvers_with(
+    leg: &RouteLeg,
+    segment_m: Option<&[f64]>,
+) -> Vec<RouteManeuver> {
     if leg.geometry.len() < 2 {
         return Vec::new();
     }
+    let shape = Shape {
+        points: &leg.geometry,
+        segment_m: segment_m.filter(|segment_m| segment_m.len() == leg.geometry.len()),
+    };
 
     let shapes = EdgeShapes::new(leg);
     let mut maneuvers = Vec::new();
@@ -36,7 +85,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
         "route.start",
         first_edge,
         None,
-        &leg.geometry,
+        shape,
         0,
         shapes.range(0).1.max(1),
         None,
@@ -61,7 +110,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
                 "route.hazard",
                 Some(edge),
                 None,
-                &leg.geometry,
+                shape,
                 begin_shape_index,
                 end_shape_index,
                 None,
@@ -110,7 +159,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
             continue;
         }
         let previous_name = leg.edges[index - 1].name.as_deref();
-        let turn_angle = shapes.turn_angle(&leg.geometry, index);
+        let turn_angle = shapes.turn_angle(shape, index);
         let significant_turn = turn_angle
             .map(|angle| f64::from(angle).abs() >= TURN_THRESHOLD_DEG)
             .unwrap_or(false);
@@ -190,7 +239,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
             // `turn:lanes` describes the lanes at the end of the way that
             // approaches the junction.
             Some(&leg.edges[index - 1]),
-            &leg.geometry,
+            shape,
             begin_shape_index,
             end_shape_index,
             turn_angle,
@@ -270,7 +319,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
         "route.destination",
         leg.edges.last(),
         None,
-        &leg.geometry,
+        shape,
         last_shape_index,
         last_shape_index,
         None,
@@ -328,7 +377,7 @@ impl<'l> EdgeShapes<'l> {
     /// The signed turn (degrees, negative to the left) from edge
     /// `edge_index - 1` onto edge `edge_index`, from bearings over up to
     /// `BEARING_DISTANCE_M` on either edge.
-    fn turn_angle(&self, geometry: &[GeoPoint], edge_index: usize) -> Option<i16> {
+    fn turn_angle(&self, geometry: Shape<'_>, edge_index: usize) -> Option<i16> {
         let previous_begin = self.range(edge_index.checked_sub(1)?).0;
         let (junction, end) = self.range(edge_index);
         let before = bearing_before(geometry, junction, previous_begin)?;
@@ -395,7 +444,7 @@ fn append_dynamic_overlay_maneuvers(leg: &RouteLeg, maneuvers: &mut Vec<RouteMan
         }
         maneuvers.push(dynamic_overlay_maneuver(
             dynamic_overlay,
-            &leg.geometry,
+            Shape::plain(&leg.geometry),
             segment.begin_shape_index,
             segment.end_shape_index,
         ));
@@ -404,7 +453,7 @@ fn append_dynamic_overlay_maneuvers(leg: &RouteLeg, maneuvers: &mut Vec<RouteMan
 
 fn dynamic_overlay_maneuver(
     dynamic_overlay: &RouteShapeDynamicOverlay,
-    geometry: &[GeoPoint],
+    geometry: Shape<'_>,
     begin_shape_index: usize,
     end_shape_index: usize,
 ) -> RouteManeuver {
@@ -598,7 +647,7 @@ fn should_suppress_short_connector(
         return false;
     };
     let next_turn_is_significant = shapes
-        .turn_angle(&leg.geometry, index + 1)
+        .turn_angle(Shape::plain(&leg.geometry), index + 1)
         .map(|angle| f64::from(angle).abs() >= TURN_THRESHOLD_DEG)
         .unwrap_or(false);
     next_turn_is_significant || next_edge.name != edge.name
@@ -620,7 +669,7 @@ fn maneuver(
     instruction_key: &str,
     edge: Option<&crate::types::RouteEdgeAttribution>,
     approach_edge: Option<&crate::types::RouteEdgeAttribution>,
-    geometry: &[GeoPoint],
+    geometry: Shape<'_>,
     begin_shape_index: usize,
     end_shape_index: usize,
     turn_angle_deg: Option<i16>,
@@ -1135,7 +1184,7 @@ fn post_transition_instruction(kind: RouteManeuverKind, instruction: &str) -> Op
 }
 
 fn bearing_at(
-    geometry: &[GeoPoint],
+    geometry: Shape<'_>,
     begin_shape_index: usize,
     end_shape_index: usize,
 ) -> Option<u16> {
@@ -1224,7 +1273,7 @@ fn fork_phrase(angle: i16) -> &'static str {
 /// The bearing (degrees) of the route arriving at `shape_index`, from the
 /// point up to `BEARING_DISTANCE_M` before it, not before `first_shape_index`.
 fn bearing_before(
-    geometry: &[GeoPoint],
+    geometry: Shape<'_>,
     shape_index: usize,
     first_shape_index: usize,
 ) -> Option<f64> {
@@ -1240,11 +1289,7 @@ fn bearing_before(
 
 /// The bearing (degrees) of the route leaving `shape_index`, to the point up
 /// to `BEARING_DISTANCE_M` after it, not after `last_shape_index`.
-fn bearing_after(
-    geometry: &[GeoPoint],
-    shape_index: usize,
-    last_shape_index: usize,
-) -> Option<f64> {
+fn bearing_after(geometry: Shape<'_>, shape_index: usize, last_shape_index: usize) -> Option<f64> {
     let from = *geometry.get(shape_index)?;
     let last_shape_index = last_shape_index.min(geometry.len().saturating_sub(1));
     let to = point_along(
@@ -1258,14 +1303,14 @@ fn bearing_after(
 /// steps, or the last point reached when they are shorter; None when they
 /// cover no distance.
 fn point_along(
-    geometry: &[GeoPoint],
+    geometry: Shape<'_>,
     steps: impl Iterator<Item = (usize, usize)>,
 ) -> Option<GeoPoint> {
     let mut remaining = BEARING_DISTANCE_M;
     let mut reached = None;
     for (from, to) in steps {
         let (a, b) = (geometry[from], geometry[to]);
-        let length = a.distance_to(b);
+        let length = geometry.length(from, to);
         if length <= 0.01 {
             continue;
         }

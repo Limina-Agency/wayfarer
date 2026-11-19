@@ -1,8 +1,9 @@
-use crate::costing::{CostingPolicy, EdgeCostDecision, selected_vehicle_speed_source};
+use crate::costing::{
+    CostingPolicy, EdgeCostClasses, EdgeCostDecision, selected_vehicle_speed_source,
+};
 use crate::graph_view::{GraphViewEdge, PackageGraphView};
-use crate::guidance::build_maneuvers;
+use crate::guidance::build_maneuvers_with;
 use crate::search::{RouteSearchStep, SearchRoute};
-use crate::spatial::directed_geometry;
 use crate::types::{
     GeoPoint, LegResult, MobilityProfile, RouteCostBreakdown, RouteCostDriverKind,
     RouteCostDriverSummary, RouteCostSummary, RouteEdgeAttribution, RouteError, RouteLeg,
@@ -32,6 +33,8 @@ pub(crate) fn build_route_result(
     let mut edges = Vec::new();
     let mut shape_segments = Vec::new();
     let costing = CostingPolicy::new(profile, options);
+    let views = LegViews::of(access);
+    let mut scratch = GeometryScratch::default();
     let records = access
         .edge_records_for_path(&route.edge_indexes, &route.edge_ids)
         .into_iter()
@@ -41,11 +44,19 @@ pub(crate) fn build_route_result(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let classes = records
+        .iter()
+        .map(|record| EdgeCostClasses::from_shared_info(&record.shared_info))
+        .collect::<Vec<_>>();
     let edge_count = records.len();
+    edges.reserve_exact(edge_count);
+    shape_segments.reserve_exact(edge_count);
     // The origin seed may traverse nothing (an origin at the end of its edge),
     // so the path can start on the next edge, which it then crosses whole.
     let starts_on_origin_edge = route.edge_ids.first() == Some(&route.origin.edge_id);
     let mut recost_steps = Vec::with_capacity(edge_count);
+    // The previous record's junction speed, once computed.
+    let (mut previous_speed, mut speed) = (None::<f64>, None::<f64>);
     for (index, record) in records.iter().enumerate() {
         let start_fraction = if index == 0 && starts_on_origin_edge {
             route.origin.fraction_along_edge
@@ -57,8 +68,13 @@ pub(crate) fn build_route_result(
         } else {
             1.0
         };
-        let append_outcome =
-            append_edge_geometry(&mut geometry, record, start_fraction, end_fraction);
+        let append_outcome = append_edge_geometry(
+            &mut geometry,
+            record,
+            start_fraction,
+            end_fraction,
+            &mut scratch,
+        );
         let mut quality_flags = Vec::new();
         if index == 0 && start_fraction > f64::EPSILON {
             quality_flags.push(RouteShapeQualityFlag::ClippedOriginEdge);
@@ -86,14 +102,19 @@ pub(crate) fn build_route_result(
         });
         edges.push(edge_attribution(
             access,
+            &views,
             &costing,
             profile,
             options,
-            record,
-            index.checked_sub(1).map(|previous| &records[previous]),
+            (record, classes[index]),
+            index
+                .checked_sub(1)
+                .map(|previous| (&records[previous], classes[previous])),
             start_fraction,
             end_fraction,
+            (&mut previous_speed, &mut speed),
         ));
+        previous_speed = speed.take();
         recost_steps.push(RecostStep::Edge {
             record: index,
             start_fraction,
@@ -110,8 +131,8 @@ pub(crate) fn build_route_result(
         edges,
         shape_segments,
     };
-    let recosts = build_recost_summaries(&records, &recost_steps, options);
-    let maneuvers = build_maneuvers(&leg);
+    let recosts = build_recost_summaries(&records, &classes, &recost_steps, options);
+    let maneuvers = build_maneuvers_with(&leg, Some(&scratch.geometry_segment_m));
     let cost_summary = route_cost_summary(&leg);
     let pieces = route_pieces(&records, &recost_steps);
     let qualified_access = crate::sar::qualified_access(&pieces, profile, options);
@@ -136,6 +157,21 @@ pub(crate) fn build_route_result(
         qualified_access,
         sar,
     })
+}
+
+/// The package views leg building reads per edge, built once per leg.
+struct LegViews<'a> {
+    request: crate::package::request::RequestView<'a>,
+    sections: wayfarer_package::format::Sections<'a>,
+}
+
+impl<'a> LegViews<'a> {
+    fn of(access: &'a PackageGraphView) -> Self {
+        Self {
+            request: access.request(),
+            sections: access.routing_package().file().view(),
+        }
+    }
 }
 
 /// The traversed graph-edge pieces of a leg, in order, for the access and
@@ -177,10 +213,18 @@ fn build_route_result_from_steps(
     let mut edges = Vec::new();
     let mut shape_segments = Vec::new();
     let costing = CostingPolicy::new(profile, options);
+    let views = LegViews::of(access);
+    let mut scratch = GeometryScratch::default();
     let mut records = Vec::new();
+    let mut classes = Vec::<EdgeCostClasses>::new();
     let mut recost_steps = Vec::with_capacity(route.steps.len());
+    edges.reserve_exact(route.steps.len());
+    shape_segments.reserve_exact(route.steps.len());
+    records.reserve_exact(route.steps.len());
     // The record the route arrived on, unless it crossed a connector since.
     let mut previous_record = None::<usize>;
+    // Its junction speed, once computed.
+    let (mut previous_speed, mut speed) = (None::<f64>, None::<f64>);
     for (step_index, step) in route.steps.iter().enumerate() {
         match step {
             RouteSearchStep::GraphEdge {
@@ -195,8 +239,13 @@ fn build_route_result_from_steps(
                     .pop()
                     .flatten()
                     .ok_or(RouteError::MissingEdgeMetadata { edge_id: *edge_id })?;
-                let append_outcome =
-                    append_edge_geometry(&mut geometry, &record, *start_fraction, *end_fraction);
+                let append_outcome = append_edge_geometry(
+                    &mut geometry,
+                    &record,
+                    *start_fraction,
+                    *end_fraction,
+                    &mut scratch,
+                );
                 let mut segment_flags = quality_flags.clone();
                 append_endpoint_shape_flags(
                     &mut segment_flags,
@@ -211,16 +260,20 @@ fn build_route_result_from_steps(
                 if append_outcome.shape_fallback_used {
                     segment_flags.push(RouteShapeQualityFlag::ShapeFallbackUsed);
                 }
+                let record_classes = EdgeCostClasses::from_shared_info(&record.shared_info);
                 let attribution = edge_attribution(
                     access,
+                    &views,
                     &costing,
                     profile,
                     options,
-                    &record,
-                    previous_record.map(|previous| &records[previous]),
+                    (&record, record_classes),
+                    previous_record.map(|previous| (&records[previous], classes[previous])),
                     *start_fraction,
                     *end_fraction,
+                    (&mut previous_speed, &mut speed),
                 );
+                previous_speed = speed.take();
                 let dynamic_overlay = segment_flags
                     .contains(&RouteShapeQualityFlag::SsvgPartialEdgeSplit)
                     .then_some(RouteShapeDynamicOverlay {
@@ -253,6 +306,7 @@ fn build_route_result_from_steps(
                 });
                 edges.push(attribution);
                 records.push(record);
+                classes.push(record_classes);
                 previous_record = Some(records.len() - 1);
                 recost_steps.push(RecostStep::Edge {
                     record: records.len() - 1,
@@ -314,6 +368,7 @@ fn build_route_result_from_steps(
                     }),
                 });
                 previous_record = None;
+                previous_speed = None;
                 recost_steps.push(RecostStep::Connector {
                     distance_m: *distance_m,
                     cost: *cost,
@@ -332,8 +387,9 @@ fn build_route_result_from_steps(
         edges,
         shape_segments,
     };
-    let recosts = build_recost_summaries(&records, &recost_steps, options);
-    let maneuvers = build_maneuvers(&leg);
+    let recosts = build_recost_summaries(&records, &classes, &recost_steps, options);
+    // Connector points are pushed without their lengths: guidance computes them.
+    let maneuvers = build_maneuvers_with(&leg, None);
     let cost_summary = route_cost_summary(&leg);
     let pieces = route_pieces(&records, &recost_steps);
     let qualified_access = crate::sar::qualified_access(&pieces, profile, options);
@@ -366,13 +422,15 @@ fn build_route_result_from_steps(
 #[allow(clippy::too_many_arguments)]
 fn edge_attribution(
     access: &PackageGraphView,
+    ctx: &LegViews<'_>,
     costing: &CostingPolicy<'_>,
     profile: MobilityProfile,
     options: &RouteOptions,
-    record: &GraphViewEdge,
-    previous: Option<&GraphViewEdge>,
+    (record, record_classes): (&GraphViewEdge, EdgeCostClasses),
+    previous: Option<(&GraphViewEdge, EdgeCostClasses)>,
     start_fraction: f64,
     end_fraction: f64,
+    (previous_speed, speed): (&mut Option<f64>, &mut Option<f64>),
 ) -> RouteEdgeAttribution {
     let warning_ranges = options
         .warning_edge_ranges
@@ -382,16 +440,17 @@ fn edge_attribution(
         .collect::<Vec<_>>();
     let traversed_fraction = traversed_fraction(start_fraction, end_fraction);
     // Two fragments of one split edge meet mid-edge, not at a junction.
-    let junction = previous.filter(|previous| previous.edge.edge_id != record.edge.edge_id);
+    let junction = previous.filter(|(previous, _)| previous.edge.edge_id != record.edge.edge_id);
     let (junction_outgoing_edge_count, junction_incoming_edge_count) = match junction {
         None => (0, 0),
-        Some(previous) => {
+        Some((previous, _)) => {
             let outgoing_excluded = [previous.edge.shared_edge_info_id];
             let incoming_excluded = [
                 previous.edge.shared_edge_info_id,
                 record.edge.shared_edge_info_id,
             ];
-            let (outgoing, incoming) = access.junction_shared_info_counts(
+            let (outgoing, incoming) = access.junction_shared_info_counts_in(
+                &ctx.request,
                 Some(record.raw_edge_index),
                 record.source.id,
                 &outgoing_excluded,
@@ -401,14 +460,20 @@ fn edge_attribution(
         }
     };
     let (junction_branch_angles_deg, junction_joining_angles_deg) = junction
-        .map(|previous| access.junction_branch_angles(previous, record, profile))
+        .map(|(previous, _)| {
+            access.junction_branch_angles_in(&ctx.sections, previous, record, profile)
+        })
         .unwrap_or_default();
-    let mut cost_breakdown = edge_cost_breakdown(costing, record).unwrap_or_default();
-    if let Some(previous) = junction {
+    let mut cost_breakdown =
+        edge_cost_breakdown(costing, record, record_classes).unwrap_or_default();
+    if let Some((previous, _)) = junction {
         cost_breakdown.turn_penalty = costing.transition_cost_for_records(previous, record);
     }
-    let junction_delay_s = junction.map_or(0.0, |previous| {
-        costing.junction_delay_for_records(previous, record)
+    let junction_delay_s = junction.map_or(0.0, |(previous, previous_classes)| {
+        costing.junction_delay_for_records_memo(
+            (previous, previous_classes, previous_speed),
+            (record, record_classes, speed),
+        )
     });
     cost_breakdown.total_cost =
         cost_breakdown.edge_cost_without_turn() * traversed_fraction + cost_breakdown.turn_penalty;
@@ -517,7 +582,8 @@ fn edge_attribution(
         junction_branch_angles_deg,
         junction_joining_angles_deg,
         distance_m: f64::from(record.edge.distance_m) * traversed_fraction,
-        duration_s: costing.edge_duration_s(record) * traversed_fraction,
+        duration_s: costing.edge_duration_s_with_classes(record, record_classes)
+            * traversed_fraction,
         junction_delay_s,
         traversal_direction: record.edge.traversal_direction,
         cost_breakdown,
@@ -805,10 +871,11 @@ enum RecostStep {
 
 fn build_recost_summaries(
     records: &[GraphViewEdge],
+    classes: &[EdgeCostClasses],
     steps: &[RecostStep],
     options: &RouteOptions,
 ) -> Vec<RouteRecostSummary> {
-    let recost = |profile| recost_profile(records, steps, profile, options);
+    let recost = |profile| recost_profile(records, classes, steps, profile, options);
     // Handing five small jobs to the thread pool costs more than running them
     // (a pool wake-up per request); only long routes are worth splitting.
     if steps.len() < RECOST_PARALLEL_MIN_EDGES {
@@ -823,6 +890,7 @@ const RECOST_PARALLEL_MIN_EDGES: usize = 768;
 
 fn recost_profile(
     records: &[GraphViewEdge],
+    classes: &[EdgeCostClasses],
     steps: &[RecostStep],
     profile: MobilityProfile,
     options: &RouteOptions,
@@ -842,9 +910,12 @@ fn recost_profile(
     let mut overlay_multiplier_count = 0usize;
     let mut turn_penalty_total = 0.0;
 
-    let mut previous = None::<&GraphViewEdge>;
+    let mut previous = None::<(&GraphViewEdge, EdgeCostClasses)>;
+    // The previous record's junction speed, once computed.
+    let mut previous_speed = None::<f64>;
     for step in steps {
-        let (record, start_fraction, end_fraction) = match *step {
+        let mut speed = None::<f64>;
+        let (record, record_classes, start_fraction, end_fraction) = match *step {
             RecostStep::Connector {
                 distance_m: connector_distance_m,
                 cost: connector_cost,
@@ -852,18 +923,24 @@ fn recost_profile(
                 distance_m += connector_distance_m;
                 cost += connector_cost;
                 previous = None;
+                previous_speed = None;
                 continue;
             }
             RecostStep::Edge {
                 record,
                 start_fraction,
                 end_fraction,
-            } => (&records[record], start_fraction, end_fraction),
+            } => (
+                &records[record],
+                classes[record],
+                start_fraction,
+                end_fraction,
+            ),
         };
         let traversed_fraction = traversed_fraction(start_fraction, end_fraction);
         distance_m += f64::from(record.edge.distance_m) * traversed_fraction;
 
-        match costing.edge_cost(record) {
+        match costing.edge_cost_with_classes(record, record_classes) {
             EdgeCostDecision::Allowed(edge_cost) => {
                 let mut edge_total = edge_cost.cost * traversed_fraction;
                 duration_s += edge_cost.duration_s * traversed_fraction;
@@ -888,13 +965,16 @@ fn recost_profile(
                 if edge_cost.has_overlay_multiplier {
                     overlay_multiplier_count += 1;
                 }
-                if let Some(previous) =
-                    previous.filter(|previous| previous.edge.edge_id != record.edge.edge_id)
+                if let Some((previous, previous_classes)) =
+                    previous.filter(|(previous, _)| previous.edge.edge_id != record.edge.edge_id)
                 {
                     let turn_penalty = costing.transition_cost_for_records(previous, record);
                     turn_penalty_total += turn_penalty;
                     edge_total += turn_penalty;
-                    duration_s += costing.junction_delay_for_records(previous, record);
+                    duration_s += costing.junction_delay_for_records_memo(
+                        (previous, previous_classes, &mut previous_speed),
+                        (record, record_classes, &mut speed),
+                    );
                 }
                 cost += edge_total;
             }
@@ -905,7 +985,8 @@ fn recost_profile(
                 inaccessible_edge_count += 1;
             }
         }
-        previous = Some(record);
+        previous = Some((record, record_classes));
+        previous_speed = speed;
     }
 
     let accessible = blocked_edge_count == 0 && inaccessible_edge_count == 0;
@@ -931,8 +1012,9 @@ fn recost_profile(
 fn edge_cost_breakdown(
     costing: &CostingPolicy<'_>,
     record: &GraphViewEdge,
+    classes: EdgeCostClasses,
 ) -> Option<RouteCostBreakdown> {
-    match costing.edge_cost(record) {
+    match costing.edge_cost_with_classes(record, classes) {
         EdgeCostDecision::Allowed(cost) => Some(cost.breakdown),
         EdgeCostDecision::Blocked | EdgeCostDecision::NotAccessible => None,
     }
@@ -946,7 +1028,163 @@ struct AppendGeometryOutcome {
     shape_fallback_used: bool,
 }
 
+/// Scratch buffers of [`append_edge_geometry`], reused across a leg's edges.
+#[derive(Default)]
+struct GeometryScratch {
+    /// The directed polyline's segment lengths (`segment[i]` from point `i`).
+    segment_m: Vec<f64>,
+    /// The clipped points, each with the directed point index it is
+    /// bit-identical to, when it is one (its distances can be reused).
+    clipped: Vec<(GeoPoint, Option<usize>)>,
+    /// The leg geometry's step lengths (`geometry_segment_m[i]` from point
+    /// `i - 1` to point `i`, NaN for the first), for guidance's bearings.
+    geometry_segment_m: Vec<f64>,
+}
+
+/// `append_edge_geometry` without its intermediate vectors and with each
+/// segment's haversine length computed once: the same arithmetic on the same
+/// inputs as [`clipped_directed_geometry`] and the dedupe of
+/// `append_edge_geometry_reference`, so the points are bit-identical.
 fn append_edge_geometry(
+    geometry: &mut Vec<GeoPoint>,
+    record: &GraphViewEdge,
+    start_fraction: f64,
+    end_fraction: f64,
+    scratch: &mut GeometryScratch,
+) -> AppendGeometryOutcome {
+    let raw = &record.shared_info.geometry;
+    let n = raw.len();
+    let backward =
+        record.edge.traversal_direction == wayfarer_package::TraversalDirection::Backward;
+    let point = |index: usize| {
+        let (lat, lng) = raw[if backward { n - 1 - index } else { index }];
+        GeoPoint::new(lat, lng)
+    };
+    let clipped = &mut scratch.clipped;
+    clipped.clear();
+    let segment_m = &mut scratch.segment_m;
+    segment_m.clear();
+    let mut shape_fallback_used = false;
+    if n < 2 {
+        shape_fallback_used = true;
+        clipped.extend((0..n).map(|index| (point(index), Some(index))));
+    } else {
+        segment_m.extend((0..n - 1).map(|index| point(index).distance_to(point(index + 1))));
+        let start_fraction = start_fraction.clamp(0.0, 1.0);
+        let end_fraction = end_fraction.clamp(start_fraction, 1.0);
+        let total_distance: f64 = segment_m.iter().copied().sum();
+        if total_distance <= f64::EPSILON {
+            shape_fallback_used = true;
+            clipped.extend((0..n).map(|index| (point(index), Some(index))));
+        } else {
+            let start_distance = total_distance * start_fraction;
+            let end_distance = total_distance * end_fraction;
+            let at_distance = |distance_m: f64| -> (GeoPoint, Option<usize>) {
+                let mut cumulative = 0.0;
+                for (index, &segment_distance) in segment_m.iter().enumerate() {
+                    if segment_distance <= f64::EPSILON {
+                        continue;
+                    }
+                    if cumulative + segment_distance >= distance_m {
+                        let t = ((distance_m - cumulative) / segment_distance).clamp(0.0, 1.0);
+                        let (a, b) = (point(index), point(index + 1));
+                        let at =
+                            GeoPoint::new(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t);
+                        return (at, same_point_index(at, a, index, b, index + 1));
+                    }
+                    cumulative += segment_distance;
+                }
+                (point(n - 1), Some(n - 1))
+            };
+            clipped.push(at_distance(start_distance));
+            let mut cumulative = 0.0;
+            for (index, segment_distance) in segment_m.iter().enumerate() {
+                let segment_end = cumulative + segment_distance;
+                if segment_end > start_distance && segment_end < end_distance {
+                    clipped.push((point(index + 1), Some(index + 1)));
+                }
+                cumulative = segment_end;
+            }
+            let end_point = at_distance(end_distance);
+            let last = *clipped.last().expect("start point");
+            if cached_distance(last, end_point, segment_m) >= 0.01 {
+                clipped.push(end_point);
+            }
+        }
+    }
+
+    let mut begin_shape_index = geometry.len();
+    let mut end_shape_index = begin_shape_index;
+    let mut duplicated_edge_suppressed = false;
+    // The directed point index geometry's last point is, when this edge pushed it.
+    let mut last_index = None::<usize>;
+    let geometry_segment_m = &mut scratch.geometry_segment_m;
+    for &(point, index) in clipped.iter() {
+        let mut step_m = f64::NAN;
+        if let Some(last) = geometry.last().copied() {
+            let distance = cached_distance((last, last_index), (point, index), segment_m);
+            if distance < 0.01 {
+                duplicated_edge_suppressed = true;
+                begin_shape_index = geometry.len().saturating_sub(1);
+                end_shape_index = begin_shape_index;
+                continue;
+            }
+            step_m = distance;
+        }
+        geometry.push(point);
+        geometry_segment_m.push(step_m);
+        last_index = index;
+        end_shape_index = geometry.len().saturating_sub(1);
+    }
+    if geometry.is_empty() {
+        geometry.push(GeoPoint::new(record.source.lat, record.source.lng));
+        geometry_segment_m.push(f64::NAN);
+        end_shape_index = 0;
+        begin_shape_index = 0;
+    }
+    AppendGeometryOutcome {
+        begin_shape_index,
+        end_shape_index,
+        duplicated_edge_suppressed,
+        shape_fallback_used,
+    }
+}
+
+/// The directed point index `at` is bit-identical to, if it is `a` or `b`.
+fn same_point_index(
+    at: GeoPoint,
+    a: GeoPoint,
+    a_index: usize,
+    b: GeoPoint,
+    b_index: usize,
+) -> Option<usize> {
+    let same = |p: GeoPoint, q: GeoPoint| {
+        p.lat.to_bits() == q.lat.to_bits() && p.lng.to_bits() == q.lng.to_bits()
+    };
+    if same(at, a) {
+        Some(a_index)
+    } else if same(at, b) {
+        Some(b_index)
+    } else {
+        None
+    }
+}
+
+/// `a.distance_to(b)`, from the segment lengths when `a` and `b` are
+/// consecutive directed points (the same haversine of the same inputs).
+fn cached_distance(
+    (a, a_index): (GeoPoint, Option<usize>),
+    (b, b_index): (GeoPoint, Option<usize>),
+    segment_m: &[f64],
+) -> f64 {
+    match (a_index, b_index) {
+        (Some(i), Some(j)) if j == i + 1 && i < segment_m.len() => segment_m[i],
+        _ => a.distance_to(b),
+    }
+}
+
+#[cfg(test)]
+fn append_edge_geometry_reference(
     geometry: &mut Vec<GeoPoint>,
     record: &GraphViewEdge,
     start_fraction: f64,
@@ -1021,18 +1259,21 @@ fn fractions_close(left: f64, right: f64) -> bool {
     (left - right).abs() <= 1e-6
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 struct ClippedGeometry {
     points: Vec<GeoPoint>,
     shape_fallback_used: bool,
 }
 
+#[cfg(test)]
 fn clipped_directed_geometry(
     record: &GraphViewEdge,
     start_fraction: f64,
     end_fraction: f64,
 ) -> ClippedGeometry {
-    let directed = directed_geometry(&record.shared_info, record.edge.traversal_direction);
+    let directed =
+        crate::spatial::directed_geometry(&record.shared_info, record.edge.traversal_direction);
     if directed.len() < 2 {
         return ClippedGeometry {
             points: directed,
@@ -1077,6 +1318,7 @@ fn clipped_directed_geometry(
     }
 }
 
+#[cfg(test)]
 fn polyline_distance_m(points: &[GeoPoint]) -> f64 {
     points
         .windows(2)
@@ -1084,6 +1326,7 @@ fn polyline_distance_m(points: &[GeoPoint]) -> f64 {
         .sum()
 }
 
+#[cfg(test)]
 fn point_at_distance(points: &[GeoPoint], distance_m: f64) -> GeoPoint {
     let mut cumulative = 0.0;
     for segment in points.windows(2) {
@@ -1260,6 +1503,68 @@ mod tests {
                 .quality_flags
                 .contains(&RouteShapeQualityFlag::ClippedOriginEdge)
         );
+    }
+
+    #[test]
+    fn cached_geometry_append_matches_the_reference_clip() {
+        let mut builder = RoadGraphBuilder::new("geometry-parity");
+        for index in 0..4 {
+            let lng = 21.0 + f64::from(index) * 0.002;
+            builder.push_way(RoutableWay {
+                osm_way_id: i64::from(index) + 1,
+                points: vec![
+                    (52.0, lng),
+                    (52.0003, lng + 0.0004),
+                    (52.0003, lng + 0.0004),
+                    (52.0001, lng + 0.0011),
+                    (52.0, lng + 0.002),
+                ],
+                directional_access: DirectionalAccess::Both,
+                ..graph_step_way()
+            });
+        }
+        let graph = builder.finish();
+        let (package, _) =
+            crate::test_support::package(&graph, &PackageBuildOptions::default()).unwrap();
+        let view = PackageGraphView::new(Arc::new(package));
+        let records = graph
+            .graph
+            .edge_weights()
+            .map(|edge| view.edge_by_id(edge.edge_id).unwrap())
+            .collect::<Vec<_>>();
+        let fractions = [
+            (0.0, 1.0),
+            (0.0, 0.3),
+            (0.25, 1.0),
+            (0.4, 0.6),
+            (0.5, 0.5),
+            (1.0, 1.0),
+        ];
+        let mut scratch = GeometryScratch::default();
+        let (mut fast, mut reference) = (Vec::new(), Vec::new());
+        for record in &records {
+            for (start, end) in fractions {
+                let a = append_edge_geometry(&mut fast, record, start, end, &mut scratch);
+                let b = append_edge_geometry_reference(&mut reference, record, start, end);
+                assert_eq!(a, b);
+                assert_eq!(
+                    fast.iter()
+                        .map(|p| (p.lat.to_bits(), p.lng.to_bits()))
+                        .collect::<Vec<_>>(),
+                    reference
+                        .iter()
+                        .map(|p| (p.lat.to_bits(), p.lng.to_bits()))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        assert_eq!(scratch.geometry_segment_m.len(), fast.len());
+        for index in 1..fast.len() {
+            assert_eq!(
+                scratch.geometry_segment_m[index].to_bits(),
+                fast[index - 1].distance_to(fast[index]).to_bits()
+            );
+        }
     }
 
     #[test]

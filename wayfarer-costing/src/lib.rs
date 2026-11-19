@@ -1009,6 +1009,19 @@ impl<'a> CostModel<'a> {
             .edge_duration_s(&EdgeCostInputs::from_record(record), self.costing_options())
     }
 
+    /// [`Self::edge_duration_s`] with the record's cost classes already
+    /// derived (`EdgeCostClasses::from_shared_info` of its shared info).
+    pub fn edge_duration_s_with_classes(
+        &self,
+        record: &GraphViewEdge,
+        classes: EdgeCostClasses,
+    ) -> f64 {
+        self.profile_policy.edge_duration_s(
+            &EdgeCostInputs::from_parts(&record.edge, &record.shared_info, classes),
+            self.costing_options(),
+        )
+    }
+
     /// The junction delay (seconds) of moving from `previous` onto `next`:
     /// zero for walking profiles and for continuing along one segment (see
     /// [`junction`]). Speeds are the records' durations under this model.
@@ -1028,6 +1041,46 @@ impl<'a> CostModel<'a> {
         next: &GraphViewEdge,
         overrides: &impl EdgeOverrides,
     ) -> f64 {
+        self.junction_delay_for_records_with_classes(
+            previous,
+            EdgeCostClasses::from_shared_info(&previous.shared_info),
+            next,
+            EdgeCostClasses::from_shared_info(&next.shared_info),
+            overrides,
+        )
+    }
+
+    /// [`Self::junction_delay_for_records_with`] with both records' cost
+    /// classes already derived.
+    pub fn junction_delay_for_records_with_classes(
+        &self,
+        previous: &GraphViewEdge,
+        previous_classes: EdgeCostClasses,
+        next: &GraphViewEdge,
+        next_classes: EdgeCostClasses,
+        overrides: &impl EdgeOverrides,
+    ) -> f64 {
+        self.junction_delay_for_records_memo(
+            (previous, previous_classes, &mut None),
+            (next, next_classes, &mut None),
+            overrides,
+        )
+    }
+
+    /// [`Self::junction_delay_for_records_with_classes`] remembering each
+    /// record's junction speed in its `Option` (filled when computed, read
+    /// when already filled), so a leg computes each edge's speed once for
+    /// the junctions on both its ends.
+    pub fn junction_delay_for_records_memo(
+        &self,
+        (previous, previous_classes, previous_speed): (
+            &GraphViewEdge,
+            EdgeCostClasses,
+            &mut Option<f64>,
+        ),
+        (next, next_classes, next_speed): (&GraphViewEdge, EdgeCostClasses, &mut Option<f64>),
+        overrides: &impl EdgeOverrides,
+    ) -> f64 {
         let Some(model) = self.junction else {
             return 0.0;
         };
@@ -1039,21 +1092,25 @@ impl<'a> CostModel<'a> {
         } else {
             transition_heading_delta(&previous.edge, &next.edge)
         };
-        let speed = |record: &GraphViewEdge| {
-            let length_m = f64::from(record.edge.distance_m);
-            let edge_id = record.edge.edge_id;
-            let duration_s = overrides.overridden_duration_s(
-                edge_id,
-                length_m.max(0.0),
-                self.edge_duration_s(record),
-            ) * overrides.duration_factor(edge_id);
-            edge_speed_mps(length_m, duration_s)
+        let speed = |record: &GraphViewEdge, classes: EdgeCostClasses, memo: &mut Option<f64>| {
+            *memo.get_or_insert_with(|| {
+                let length_m = f64::from(record.edge.distance_m);
+                let edge_id = record.edge.edge_id;
+                let duration_s = overrides.overridden_duration_s(
+                    edge_id,
+                    length_m.max(0.0),
+                    self.edge_duration_s_with_classes(record, classes),
+                ) * overrides.duration_factor(edge_id);
+                edge_speed_mps(length_m, duration_s)
+            })
         };
+        let previous_speed_mps = speed(previous, previous_classes, previous_speed);
+        let next_speed_mps = speed(next, next_classes, next_speed);
         model.delay_s(&JunctionTransition {
             turn_deg,
-            previous_speed_mps: speed(previous),
+            previous_speed_mps,
             previous_length_m: f64::from(previous.edge.distance_m),
-            next_speed_mps: speed(next),
+            next_speed_mps,
             next_length_m: f64::from(next.edge.distance_m),
             control: previous.edge.end_control,
             minor_approach: previous.edge.end_minor_approach,

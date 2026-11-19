@@ -220,7 +220,25 @@ impl PackageGraphView {
         outgoing_excluded_shared_info_ids: &[u64],
         incoming_excluded_shared_info_ids: &[u64],
     ) -> (Option<usize>, Option<usize>) {
-        let request = self.request();
+        self.junction_shared_info_counts_in(
+            &self.request(),
+            raw_edge_index,
+            source_node_id,
+            outgoing_excluded_shared_info_ids,
+            incoming_excluded_shared_info_ids,
+        )
+    }
+
+    /// [`Self::junction_shared_info_counts`] with the request view built once
+    /// by the caller (leg building calls it once per edge).
+    pub(crate) fn junction_shared_info_counts_in(
+        &self,
+        request: &crate::package::request::RequestView<'_>,
+        raw_edge_index: Option<usize>,
+        source_node_id: i64,
+        outgoing_excluded_shared_info_ids: &[u64],
+        incoming_excluded_shared_info_ids: &[u64],
+    ) -> (Option<usize>, Option<usize>) {
         let edge = raw_edge_index
             .and_then(|raw| u32::try_from(raw).ok())
             .filter(|edge| (*edge as usize) < self.graph.counts().edge_count);
@@ -247,14 +265,15 @@ impl PackageGraphView {
     /// approach to every other outgoing edge `profile` may take, U-turns onto
     /// `previous`' road excluded, and from the arrival of every other incoming
     /// edge `profile` may use (not `edge`'s own road) to the departure along
-    /// `edge`. Angles come from the edges' stored end headings.
-    pub(crate) fn junction_branch_angles(
+    /// `edge`. Angles come from the edges' stored end headings. `view` is the
+    /// package's sections, built once per leg by the caller.
+    pub(crate) fn junction_branch_angles_in(
         &self,
+        view: &wayfarer_package::format::Sections<'_>,
         previous: &GraphViewEdge,
         edge: &GraphViewEdge,
         profile: MobilityProfile,
     ) -> (Vec<i16>, Vec<i16>) {
-        let view = self.graph.view();
         let node = edge.source_index as usize;
         let (Some(approach), Some(departure)) =
             (previous.edge.end_heading_deg, edge.edge.start_heading_deg)

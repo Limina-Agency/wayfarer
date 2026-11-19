@@ -53,6 +53,43 @@ impl<'a> CostingPolicy<'a> {
         self.model.edge_cost(record, self)
     }
 
+    /// [`Self::edge_cost`] with the record's cost classes already derived.
+    pub(crate) fn edge_cost_with_classes(
+        &self,
+        record: &GraphViewEdge,
+        classes: EdgeCostClasses,
+    ) -> EdgeCostDecision {
+        self.model.edge_cost_inputs(
+            &EdgeCostInputs::from_parts(&record.edge, &record.shared_info, classes),
+            self,
+        )
+    }
+
+    /// [`Self::edge_duration_s`] with the record's cost classes already derived.
+    pub(crate) fn edge_duration_s_with_classes(
+        &self,
+        record: &GraphViewEdge,
+        classes: EdgeCostClasses,
+    ) -> f64 {
+        let edge_id = record.edge.edge_id;
+        self.overridden_duration_s(
+            edge_id,
+            f64::from(record.edge.distance_m).max(0.0),
+            self.model.edge_duration_s_with_classes(record, classes),
+        ) * self.duration_factor(edge_id)
+    }
+
+    /// [`Self::junction_delay_for_records`] remembering the
+    /// records' junction speeds (see `CostModel::junction_delay_for_records_memo`).
+    pub(crate) fn junction_delay_for_records_memo(
+        &self,
+        previous: (&GraphViewEdge, EdgeCostClasses, &mut Option<f64>),
+        next: (&GraphViewEdge, EdgeCostClasses, &mut Option<f64>),
+    ) -> f64 {
+        self.model
+            .junction_delay_for_records_memo(previous, next, self)
+    }
+
     /// Whether destination-only edges are usable (false on the strict pass of
     /// a request that avoids them fully).
     pub(crate) fn allows_destination_only(&self) -> bool {
@@ -98,6 +135,7 @@ impl<'a> CostingPolicy<'a> {
 
     /// The edge's travel time under the request: the profile's, with the
     /// request's speed overrides and discounts.
+    #[cfg(test)]
     pub(crate) fn edge_duration_s(&self, record: &GraphViewEdge) -> f64 {
         let edge_id = record.edge.edge_id;
         self.overridden_duration_s(
@@ -109,6 +147,7 @@ impl<'a> CostingPolicy<'a> {
 
     /// Seconds lost at the junction from `previous` onto `next` (see
     /// `wayfarer_costing::junction`).
+    #[cfg(any(test, feature = "reference"))]
     pub(crate) fn junction_delay_for_records(
         &self,
         previous: &GraphViewEdge,
