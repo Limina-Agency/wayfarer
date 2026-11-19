@@ -294,7 +294,7 @@ int32_t wayfarer_compile_start(const char *request_json,
                                        WayfarerCompileJob **job,
                                        char **out_json);
 
-/* The latest progress: {"stage": "index_nodes" | "collect_roads" |
+/* The latest progress: {"stage": "collect_roads" | "index_nodes" |
  * "finalize_graph" | "build_package" | "cch_order" | "write_package",
  * "stageFraction" (0 to 1, when known), "overall" (0 to 1), "message"}. */
 int32_t wayfarer_compile_progress(const WayfarerCompileJob *job,

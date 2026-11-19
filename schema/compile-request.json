@@ -32,7 +32,7 @@
       "type": "string"
     },
     "scratchDir": {
-      "description": "Where the compile keeps scratch files (the node store of large\nextracts). The compile works in a fresh directory of its own inside it\nand removes that directory when it ends, whatever the outcome; nothing\nelse in `scratch_dir` is touched. Default: the directory of `output`.",
+      "description": "Where the compile keeps scratch files (the encoded way facts while the\ngraph is built). The compile works in a fresh directory of its own\ninside it and removes that directory when it ends, whatever the\noutcome; nothing else in `scratch_dir` is touched. Default: the\ndirectory of `output`.",
       "type": [
         "string",
         "null"

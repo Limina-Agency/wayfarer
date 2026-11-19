@@ -693,15 +693,15 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "osm-pbf-ingest"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df69d8b1afc54a1bf22ad255f879ebce5b5265b40ba1aebd13fa25753aad3780"
+version = "0.4.0"
+source = "git+https://github.com/Limina-Agency/osm-pbf-ingest?branch=feat%2Flocate-nodes#43b78d51e56835f0e44de62f2d440177514898ea"
 dependencies = [
  "buffa",
  "compact_str",
  "crossbeam-channel",
  "flate2",
  "memmap2",
+ "quick-xml",
  "rayon",
  "roaring",
  "rustc-hash",
@@ -742,6 +742,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
