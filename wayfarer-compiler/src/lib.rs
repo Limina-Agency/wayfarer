@@ -227,17 +227,31 @@ pub(crate) fn compile_route_archive(
                 CompileError::Failed(format!("Failed to start the compile's threads: {error}"))
             })
             .and_then(|pool| pool.install(|| compile(threads))),
-        None => compile(
-            profile
-                .worker_threads()
-                .min(rayon::current_num_threads())
-                .max(1),
-        ),
+        None => compile(default_decode_workers(
+            profile,
+            rayon::current_num_threads(),
+        )),
     };
     if result.is_err() && request.graph.temp_dir.exists() {
         let _ = std::fs::remove_dir_all(&request.graph.temp_dir);
     }
     result
+}
+
+/// The ingest's decode workers when the request sets no thread count: one
+/// per thread of the pool the compile runs on for the standard profile, and
+/// the low-memory profile's own (at most two) within that pool.
+///
+/// The standard profile's own default in `osm-pbf-ingest` leaves two cores
+/// for the reader and the collector, but both are nearly idle while the
+/// workers decode, so on four cores it left half of them unused (Małopolskie's
+/// ingest took 4.2 s with it and 3.8 s with four workers).
+fn default_decode_workers(profile: IngestBuildProfile, pool_threads: usize) -> usize {
+    match profile {
+        IngestBuildProfile::DesktopFull => pool_threads,
+        IngestBuildProfile::MobileOperational => profile.worker_threads().min(pool_threads),
+    }
+    .max(1)
 }
 
 fn compile_with_job(
