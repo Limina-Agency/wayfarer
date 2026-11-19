@@ -138,7 +138,7 @@ fn cancel_in(stage: CompileStage) {
 }
 
 #[test]
-fn a_cancel_while_indexing_nodes_stops_the_compile_and_leaves_nothing() {
+fn a_cancel_while_locating_nodes_stops_the_compile_and_leaves_nothing() {
     cancel_in(CompileStage::IndexNodes);
 }
 
@@ -473,6 +473,6 @@ fn the_overall_share_rises_through_the_stages() {
             last = overall;
         }
     }
-    assert_eq!(CompileStage::IndexNodes.overall(Some(0.0)), 0.0);
+    assert_eq!(CompileStage::CollectRoads.overall(Some(0.0)), 0.0);
     assert_eq!(CompileStage::WritePackage.overall(Some(1.0)), 1.0);
 }
