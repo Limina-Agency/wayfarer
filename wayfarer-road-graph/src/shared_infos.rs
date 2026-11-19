@@ -54,9 +54,15 @@ impl SharedInfoRef<'_> {
 }
 
 /// Distinct attribute sets, numbered in the order they were first added.
+///
+/// Each set is boxed: a table that is rebuilt (merged, finished, compacted)
+/// moves its sets' boxes instead of copying the sets (616 bytes each, and
+/// millions of them on a country) into a second table beside the first.
 #[derive(Debug, Clone, Default)]
 pub struct SharedInfoClasses {
-    classes: Vec<SharedEdgeInfo>,
+    // Boxed on purpose, see above.
+    #[allow(clippy::vec_box)]
+    classes: Vec<Box<SharedEdgeInfo>>,
     /// Class content hash to the newest class with that hash; `next` chains
     /// the older ones (`u32::MAX` ends a chain).
     by_hash: FxHashMap<u64, u32>,
@@ -101,7 +107,9 @@ impl SharedInfoClasses {
         self.next.shrink_to_fit();
     }
 
-    pub(crate) fn into_vec(self) -> Vec<SharedEdgeInfo> {
+    /// The classes' attribute sets, by number.
+    #[allow(clippy::vec_box)]
+    pub(crate) fn into_boxes(self) -> Vec<Box<SharedEdgeInfo>> {
         self.classes
     }
 
@@ -110,14 +118,37 @@ impl SharedInfoClasses {
     pub fn intern(&mut self, mut attrs: SharedEdgeInfo) -> u32 {
         strip_segment_fields(&mut attrs);
         let hash = class_hash(&attrs);
-        let mut at = self.by_hash.get(&hash).copied().unwrap_or(u32::MAX);
-        let head = at;
+        match self.find(hash, &attrs) {
+            Ok(class) => class,
+            Err(head) => self.push(hash, head, Box::new(attrs)),
+        }
+    }
+
+    /// [`Self::intern`] for attributes already boxed: a new class keeps the
+    /// box.
+    pub(crate) fn intern_boxed(&mut self, mut attrs: Box<SharedEdgeInfo>) -> u32 {
+        strip_segment_fields(&mut attrs);
+        let hash = class_hash(&attrs);
+        match self.find(hash, &attrs) {
+            Ok(class) => class,
+            Err(head) => self.push(hash, head, attrs),
+        }
+    }
+
+    /// The class equal to `attrs`, or else the head of its hash's chain.
+    fn find(&self, hash: u64, attrs: &SharedEdgeInfo) -> Result<u32, u32> {
+        let head = self.by_hash.get(&hash).copied().unwrap_or(u32::MAX);
+        let mut at = head;
         while at != u32::MAX {
-            if class_eq(&self.classes[at as usize], &attrs) {
-                return at;
+            if class_eq(&self.classes[at as usize], attrs) {
+                return Ok(at);
             }
             at = self.next[at as usize];
         }
+        Err(head)
+    }
+
+    fn push(&mut self, hash: u64, head: u32, attrs: Box<SharedEdgeInfo>) -> u32 {
         let class = u32::try_from(self.classes.len()).expect("fewer than 2^32 classes");
         self.classes.push(attrs);
         self.next.push(head);
@@ -304,6 +335,12 @@ impl SharedEdgeInfos {
         self.edges[index].class = self.classes.intern(attrs);
     }
 
+    /// Takes the classes out, to be replaced with [`Self::replace_classes`];
+    /// until then the infos' classes are not there.
+    pub(crate) fn take_classes(&mut self) -> SharedInfoClasses {
+        std::mem::take(&mut self.classes)
+    }
+
     /// Gives info `i` class `classes_of[i]` of `classes`, which replace the
     /// old classes.
     pub(crate) fn replace_classes(&mut self, classes: SharedInfoClasses, classes_of: Vec<u32>) {
@@ -338,13 +375,12 @@ impl SharedEdgeInfos {
         // The classes move to their new places within the table, which is then
         // cut to the used ones: a second table, built while the first was still
         // held, was the class table's size again (3M classes of 616 bytes on
-        // Germany). The unused classes are emptied and go after the used ones.
+        // Germany). The unused classes go after the used ones.
         let classes = &mut self.classes.classes;
         let mut place = renumbered;
         let mut next_unused = used;
-        for (class, slot) in place.iter_mut().enumerate() {
+        for slot in &mut place {
             if *slot == u32::MAX {
-                classes[class] = SharedEdgeInfo::default();
                 *slot = next_unused;
                 next_unused += 1;
             }

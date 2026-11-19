@@ -186,9 +186,9 @@ impl RoadGraph {
         for run in runs {
             let global = run
                 .classes
-                .into_vec()
+                .into_boxes()
                 .into_iter()
-                .map(|attrs| classes.intern(attrs))
+                .map(|attrs| classes.intern_boxed(attrs))
                 .collect::<Vec<_>>();
             classes_of.extend(run.classes_of.iter().map(|local| global[*local as usize]));
             fallback.extend(run.without_own_facts);
