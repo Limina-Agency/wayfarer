@@ -63,7 +63,7 @@ The compiler is made to run as a background job inside an app (on iOS no
 worker process can be started):
 
 - **Progress.** `on_progress` gets a `CompileProgress` per step, the ingest's
-  included: a stage (`CompileStage`: `index_nodes`, `collect_roads`,
+  included: a stage (`CompileStage`: `collect_roads`, `index_nodes`,
   `finalize_graph`, `build_package`, `cch_order`, `write_package`, in that
   order), the stage's `stage_fraction` where its size is known (blobs read,
   build steps, bytes written), an `overall` share of the compile and an

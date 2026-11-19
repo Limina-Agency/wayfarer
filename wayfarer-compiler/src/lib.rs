@@ -33,11 +33,10 @@
 pub mod package_build;
 
 use osm_pbf_ingest::Tags;
-use osm_pbf_ingest::node_store::NodeLocationStore;
 use osm_pbf_ingest::{
-    INGEST_CANCELLED, IngestBuildProfile, IngestStage, NodeBatch, NormalizedRelation, Pass2Options,
-    Pass2Sink, PrepareOptions, PreparedIngestIndex, RelationBatch, RelationMemberType,
-    SharedIngestProgress, TagLookup as PbfTagLookup, WayBatch, prepare_ingest_index_with_options,
+    INGEST_CANCELLED, IngestBuildProfile, IngestStage, LocateOptions, LocatedNodes, NodeBatch,
+    NodeLocations, NormalizedRelation, Pass2Options, Pass2Sink, RelationBatch, RelationMemberType,
+    SharedIngestProgress, TagLookup as PbfTagLookup, WayBatch, locate_nodes,
     run_pass2_with_options,
 };
 pub use package_build::{PackageBuildOptions, PackageBuildReport};
@@ -81,7 +80,8 @@ use profiling::Phase;
 #[derive(Debug, Clone)]
 pub(crate) struct RoadGraphCompileRequest {
     pub input_pbf_path: PathBuf,
-    /// Scratch space (the node store of large extracts). The compile owns it:
+    /// Scratch space, if the compile needs any (today it writes none: node
+    /// locations are kept in memory). The compile owns it:
     /// it is removed when the compile ends, whether it succeeds, fails or is
     /// cancelled.
     pub temp_dir: PathBuf,
@@ -106,10 +106,14 @@ struct RoadGraphCompileResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CompileStage {
-    /// Ingest pass 1: node locations, relations and tagged nodes.
-    IndexNodes,
-    /// Ingest pass 2: road ways and turn-restriction relations.
+    /// The ingest's first pass: road ways and their relations (turn
+    /// restrictions, road routes), from the way and relation blobs.
     CollectRoads,
+    /// The ingest's second pass: the locations of the road ways' nodes, and
+    /// the barrier and traffic-control nodes, from the node blobs. It runs
+    /// after [`CollectRoads`](Self::CollectRoads); its id keeps the name it
+    /// had when it ran first and indexed every node.
+    IndexNodes,
     /// The road graph: topology, restrictions, enrichment and repair.
     FinalizeGraph,
     /// Edge costs and the package's sections other than the node order.
@@ -123,8 +127,8 @@ pub enum CompileStage {
 impl CompileStage {
     /// Every stage, in the order they run.
     pub const ALL: [Self; 6] = [
-        Self::IndexNodes,
         Self::CollectRoads,
+        Self::IndexNodes,
         Self::FinalizeGraph,
         Self::BuildPackage,
         Self::CchOrder,
@@ -133,8 +137,8 @@ impl CompileStage {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::IndexNodes => "index_nodes",
             Self::CollectRoads => "collect_roads",
+            Self::IndexNodes => "index_nodes",
             Self::FinalizeGraph => "finalize_graph",
             Self::BuildPackage => "build_package",
             Self::CchOrder => "cch_order",
@@ -146,8 +150,8 @@ impl CompileStage {
     /// estimates; only `overall` depends on them).
     fn weight(self) -> f64 {
         match self {
-            Self::IndexNodes => 0.20,
             Self::CollectRoads => 0.20,
+            Self::IndexNodes => 0.20,
             Self::FinalizeGraph => 0.25,
             Self::BuildPackage => 0.10,
             Self::CchOrder => 0.20,
@@ -170,7 +174,7 @@ impl CompileStage {
 
     fn of_ingest(stage: IngestStage) -> Self {
         match stage {
-            IngestStage::IngestPass1Index => Self::IndexNodes,
+            IngestStage::IngestNodeLocations | IngestStage::IngestPass1Index => Self::IndexNodes,
             _ => Self::CollectRoads,
         }
     }
@@ -341,6 +345,13 @@ fn compile_with_job(
 
 /// Compile the complete in-memory road graph directly from a PBF, without any
 /// vector-compiler or source-store state.
+///
+/// The ingest reads the ways before the nodes. Pass 2 (way and relation blobs
+/// only) collects the road ways with their node IDs; [`locate_nodes`] then
+/// reads the node blobs once and keeps the locations of exactly those nodes,
+/// and the barrier and traffic-control nodes. There is no node-location
+/// store: no lookup goes to disk or jumps around a store of every node of the
+/// file, so a country-sized extract no longer depends on the page cache.
 fn compile_road_graph_from_pbf(
     request: &RoadGraphCompileRequest,
     workers: usize,
@@ -356,34 +367,6 @@ fn compile_road_graph_from_pbf(
             CompileError::Failed(error)
         }
     };
-    let phase = Phase::start("prepare_ingest_index");
-    job.report(
-        CompileStage::IndexNodes,
-        Some(0.0),
-        0,
-        "Indexing node locations and relations",
-    );
-    // Pass 1 decodes every node, so it keeps the barrier nodes and pass 2
-    // reads only way and relation blobs, and only road ways.
-    let prepared = prepare_ingest_index_with_options(
-        &request.input_pbf_path,
-        request.build_profile,
-        &request.temp_dir,
-        PrepareOptions::new()
-            .worker_threads(workers)
-            .keep_nodes(|tags| is_kept_node(tags)),
-        &mut forward,
-        || job.cancelled(),
-    )
-    .map_err(ingest_error)?;
-    job.check()?;
-    job.report(
-        CompileStage::IndexNodes,
-        Some(1.0),
-        prepared.metrics.indexed_node_objects + prepared.metrics.indexed_relation_objects,
-        "Indexed node locations and relations",
-    );
-    drop(phase);
     let phase = Phase::start("pass2_collect_roads");
     job.report(
         CompileStage::CollectRoads,
@@ -391,7 +374,7 @@ fn compile_road_graph_from_pbf(
         0,
         "Collecting road ways",
     );
-    let mut roads = OsmRoadNetworkCollector::new(&prepared);
+    let mut roads = OsmRoadNetworkCollector::default();
     let summary = run_pass2_with_options(
         &request.input_pbf_path,
         request.build_profile,
@@ -412,12 +395,35 @@ fn compile_road_graph_from_pbf(
         "Collected road ways",
     );
     drop(phase);
-    // The line network needs no node locations: the index (a mapped scratch
-    // file, ~0.3 GiB resident on a region, and its relation tables) goes
-    // before it is built.
-    let roads = roads.release_index();
-    let phase = Phase::start("drop_ingest_index");
-    drop(prepared);
+    let phase = Phase::start("locate_road_nodes");
+    job.report(
+        CompileStage::IndexNodes,
+        Some(0.0),
+        0,
+        "Locating the road ways' nodes",
+    );
+    let node_ids = roads.take_node_ids().map_err(CompileError::Failed)?;
+    let located = locate_nodes(
+        &request.input_pbf_path,
+        request.build_profile,
+        node_ids,
+        LocateOptions::new()
+            .worker_threads(workers)
+            .keep_nodes(|tags| is_kept_node(tags)),
+        &mut forward,
+        || job.cancelled(),
+    )
+    .map_err(ingest_error)?;
+    job.check()?;
+    job.report(
+        CompileStage::IndexNodes,
+        Some(1.0),
+        located.metrics.scanned_node_objects,
+        "Located the road ways' nodes",
+    );
+    drop(phase);
+    let phase = Phase::start("place_road_ways");
+    let roads = roads.place(located)?;
     drop(phase);
     let phase = Phase::start("shared_line_network_finish");
     report_finalize_checkpoint(job, "before_line_network_finish", 0)?;
@@ -431,14 +437,42 @@ fn compile_road_graph_from_pbf(
     )
 }
 
-pub(crate) struct OsmRoadNetworkCollector<'a> {
-    node_store: &'a NodeLocationStore,
+/// Pass 2's sink: the road ways, their facts and the relations, before any
+/// node is located.
+#[derive(Default)]
+pub(crate) struct OsmRoadNetworkCollector {
+    /// The routable ways' lines in file order, pushed without geometry:
+    /// `node_chain` holds every node ID of the way until
+    /// [`place`](Self::place) keeps the located ones.
     builder: SharedLineNetworkBuilder,
+    /// How many lines `builder` holds.
+    pushed: usize,
+    /// The last way batch, collected but not yet appended: see
+    /// [`on_way_batch`](Pass2Sink::on_way_batch).
+    collected: Vec<Result<CollectedWay, String>>,
+    /// Ferries whose `duration` becomes their speed once their length is
+    /// known, with the position of their line in `builder`.
+    ferries: Vec<(usize, Box<PendingFerry>)>,
     turn_restrictions: Vec<RoadTurnRestriction>,
     route_memberships: Vec<RoadRouteMembership>,
-    barrier_node_tags: HashMap<i64, NodeBarrierTags>,
-    traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
+}
+
+/// A routable way as pass 2 saw it: its line without geometry, and
+/// `node_chain` every node ID of the way, located or not.
+struct UnplacedWay {
+    input: SharedLineInput,
+    /// A ferry whose `duration` becomes its speed once its length is known;
+    /// boxed, as `RoadWayFacts` is about 1 KB and ferries are few.
+    ferry: Option<Box<PendingFerry>>,
+}
+
+/// A ferry's facts, waiting for the length of its located geometry.
+struct PendingFerry {
+    facts: RoadWayFacts,
+    duration_s: f64,
+    /// Where its encoded facts go in [`EncodedWayFacts`].
+    slot: usize,
 }
 
 /// Per-way facts for every highway way, kept encoded ([`codec`]) from collection
@@ -462,9 +496,24 @@ impl EncodedWayFacts {
         self.bytes.extend_from_slice(encoded);
     }
 
+    /// Takes `way_id`'s place in the index now, for facts encoded later and
+    /// given to [`fill`](Self::fill) with the returned slot, so that a way id
+    /// inserted more than once resolves as if they had been inserted here.
+    fn reserve(&mut self, way_id: i64) -> usize {
+        self.index.push((way_id, u64::MAX));
+        self.index.len() - 1
+    }
+
+    /// The facts for a slot [`reserve`](Self::reserve) returned.
+    fn fill(&mut self, slot: usize, encoded: &[u8]) {
+        self.index[slot].1 = self.bytes.len() as u64;
+        self.bytes.extend_from_slice(encoded);
+    }
+
     /// Sorts the index for lookup. A way id inserted more than once keeps its
     /// last facts, as the map's `insert` did.
     fn seal(&mut self) {
+        debug_assert!(self.index.iter().all(|(_, offset)| *offset != u64::MAX));
         self.index.sort_by_key(|(way_id, _)| *way_id);
         let mut sealed = Vec::<(i64, u64)>::with_capacity(self.index.len());
         for entry in self.index.drain(..) {
@@ -498,39 +547,64 @@ struct CollectedRoadInputs {
     way_facts: EncodedWayFacts,
 }
 
-impl<'a> OsmRoadNetworkCollector<'a> {
-    /// Takes the barrier nodes among the index's tagged nodes; pass 2 node
-    /// batches add to them.
-    pub(crate) fn new(prepared: &'a PreparedIngestIndex) -> Self {
+impl OsmRoadNetworkCollector {
+    /// Appends the last way batch, and returns the distinct node IDs of the
+    /// routable ways, sorted: the nodes to locate.
+    fn take_node_ids(&mut self) -> Result<Vec<i64>, String> {
+        let last = std::mem::take(&mut self.collected);
+        self.append(last)?;
+        let inputs = self.builder.inputs_mut();
+        let total = inputs.iter().map(|input| input.node_chain.len()).sum();
+        let mut node_ids = Vec::with_capacity(total);
+        for input in inputs.iter() {
+            node_ids.extend_from_slice(&input.node_chain);
+        }
+        node_ids.par_sort_unstable();
+        node_ids.dedup();
+        node_ids.shrink_to_fit();
+        Ok(node_ids)
+    }
+
+    /// Gives every routable way the geometry of its located nodes and drops
+    /// the ways with fewer than two, as pass 2 used to when it looked each
+    /// node up as it went; takes the barrier and traffic-control nodes.
+    fn place(mut self, located: LocatedNodes) -> Result<UnfinishedRoadInputs, String> {
         let mut barrier_node_tags = HashMap::new();
         let mut traffic_controls = Vec::new();
-        for node in &prepared.tagged_nodes {
+        for node in &located.tagged_nodes {
             if let Some(tags) = barrier_node_tags_from_tags(&node.tags) {
                 barrier_node_tags.insert(node.node_id, tags);
             }
             traffic_controls.extend(traffic_control_point(node));
         }
-        Self {
-            node_store: &prepared.node_store,
-            builder: SharedLineNetworkBuilder::default(),
-            turn_restrictions: Vec::new(),
-            route_memberships: Vec::new(),
-            barrier_node_tags,
-            traffic_controls,
-            way_facts: EncodedWayFacts::default(),
+        let locations = &located.locations;
+        let inputs = self.builder.inputs_mut();
+        inputs
+            .par_iter_mut()
+            .for_each(|input| place_line(locations, input));
+        for (position, mut ferry) in self.ferries {
+            let input = &inputs[position];
+            let length_m = input
+                .geometry
+                .windows(2)
+                .map(|pair| haversine_m(pair[0], pair[1]))
+                .sum::<f64>();
+            if length_m > 0.0 {
+                ferry.facts.maxspeed = Some(format!("{:.1}", length_m / ferry.duration_s * 3.6));
+            }
+            let encoded = encode_way_facts(input.feature_id, &ferry.facts)?;
+            self.way_facts.fill(ferry.slot, &encoded);
         }
-    }
-
-    /// The collected inputs, no longer borrowing the ingest index.
-    fn release_index(self) -> UnfinishedRoadInputs {
-        UnfinishedRoadInputs {
+        self.builder
+            .retain_inputs(|input| input.geometry.len() >= 2);
+        Ok(UnfinishedRoadInputs {
             builder: self.builder,
             turn_restrictions: self.turn_restrictions,
             route_memberships: self.route_memberships,
-            barrier_node_tags: self.barrier_node_tags,
-            traffic_controls: self.traffic_controls,
+            barrier_node_tags,
+            traffic_controls,
             way_facts: self.way_facts,
-        }
+        })
     }
 }
 
@@ -566,7 +640,7 @@ impl UnfinishedRoadInputs {
     }
 }
 
-impl Pass2Sink for OsmRoadNetworkCollector<'_> {
+impl Pass2Sink for OsmRoadNetworkCollector {
     fn on_relation_batch(&mut self, batch: RelationBatch) -> Result<(), String> {
         for relation in &batch.relations {
             self.turn_restrictions
@@ -578,34 +652,51 @@ impl Pass2Sink for OsmRoadNetworkCollector<'_> {
     }
 
     /// Pass 2 hands batches to this sink on one thread while its decode workers
-    /// wait on it, so the per-way work (node lookups, fact parsing and
-    /// encoding, attribute building) runs across the batch in parallel. Only
-    /// the order-dependent appends stay sequential, in the batch's order.
+    /// wait on it, so the per-way work (fact parsing and encoding, attribute
+    /// building) runs across the batch in parallel. Only the order-dependent
+    /// appends stay sequential, in the batch's order.
     fn on_way_batch(&mut self, batch: WayBatch) -> Result<(), String> {
-        let node_store = self.node_store;
-        let collected = batch
-            .ways
-            .par_iter()
-            .map(|way| collect_way(node_store, way))
-            .collect::<Vec<_>>();
+        // The batch before this one is appended while this one is collected
+        // across the pool, so the appends don't hold the decode workers up.
+        let previous = std::mem::take(&mut self.collected);
+        let (collected, appended) = rayon::join(
+            || {
+                batch
+                    .ways
+                    .into_par_iter()
+                    .map(collect_way)
+                    .collect::<Vec<_>>()
+            },
+            || self.append(previous),
+        );
+        self.collected = collected;
+        appended
+    }
+
+    /// Never called: pass 2 skips the node blobs, and [`locate_nodes`] keeps
+    /// the barrier and traffic-control nodes.
+    fn on_node_batch(&mut self, _batch: NodeBatch) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl OsmRoadNetworkCollector {
+    /// Appends one batch's ways, in order: their facts, and their lines to
+    /// the builder.
+    fn append(&mut self, collected: Vec<Result<CollectedWay, String>>) -> Result<(), String> {
         for way in collected {
             let way = way?;
             if let Some(facts) = way.encoded_facts {
                 self.way_facts.insert_encoded(way.way_id, &facts);
             }
-            if let Some(input) = way.input {
+            if let Some(UnplacedWay { input, ferry }) = way.unplaced {
+                if let Some(mut ferry) = ferry {
+                    ferry.slot = self.way_facts.reserve(input.feature_id);
+                    self.ferries.push((self.pushed, ferry));
+                }
                 self.builder.push_input(input);
+                self.pushed += 1;
             }
-        }
-        Ok(())
-    }
-
-    fn on_node_batch(&mut self, batch: NodeBatch) -> Result<(), String> {
-        for node in &batch.nodes {
-            if let Some(tags) = barrier_node_tags_from_tags(&node.tags) {
-                self.barrier_node_tags.insert(node.node_id, tags);
-            }
-            self.traffic_controls.extend(traffic_control_point(node));
         }
         Ok(())
     }
@@ -614,83 +705,91 @@ impl Pass2Sink for OsmRoadNetworkCollector<'_> {
 /// One way's pass-2 products, built independently of every other way.
 struct CollectedWay {
     way_id: i64,
-    /// Bincode-encoded [`RoadWayFacts`], for every highway way.
+    /// Bincode-encoded [`RoadWayFacts`], for every highway way but a routable
+    /// ferry with a `duration`, whose facts wait in [`UnplacedWay::ferry`].
     encoded_facts: Option<Vec<u8>>,
-    /// The routable line, when the way is one and has at least two located
-    /// nodes.
-    input: Option<SharedLineInput>,
+    /// The routable line, when the way is one, still to be located.
+    unplaced: Option<UnplacedWay>,
 }
 
-fn collect_way(
-    node_store: &NodeLocationStore,
-    way: &osm_pbf_ingest::NormalizedWay,
-) -> Result<CollectedWay, String> {
-    let mut facts = (way.tags.contains_key("highway") || is_ferry_line(&way.tags))
+fn collect_way(way: osm_pbf_ingest::NormalizedWay) -> Result<CollectedWay, String> {
+    let facts = (way.tags.contains_key("highway") || is_ferry_line(&way.tags))
         .then(|| road_way_facts_from_tags(way.way_id, &way.tags));
     let encode = |facts: Option<RoadWayFacts>| {
         facts
-            .map(|facts| {
-                codec::to_vec(&facts).map_err(|error| {
-                    format!("Failed to encode way facts for way {}: {error}", way.way_id)
-                })
-            })
+            .map(|facts| encode_way_facts(way.way_id, &facts))
             .transpose()
     };
     if !is_routable_line(&way.tags, way.is_closed) {
         return Ok(CollectedWay {
             way_id: way.way_id,
             encoded_facts: encode(facts)?,
-            input: None,
+            unplaced: None,
         });
-    }
-
-    let mut geometry = Vec::with_capacity(way.node_ids.len());
-    let mut node_chain = Vec::with_capacity(way.node_ids.len());
-    for node_id in &way.node_ids {
-        if let Some((lat, lng)) = node_store.get(*node_id) {
-            geometry.push((lat, lng));
-            node_chain.push(*node_id);
-        }
     }
     // A ferry's `duration` becomes its speed over the whole crossing, carried
     // as the way's maxspeed: vehicle costing reads the edge speed from there.
-    if let Some(facts) = facts.as_mut()
-        && facts.is_ferry
-        && let Some(duration_s) = way.tags.get("duration").and_then(osm_duration_s)
-    {
-        let length_m = geometry
-            .windows(2)
-            .map(|pair| haversine_m(pair[0], pair[1]))
-            .sum::<f64>();
-        if length_m > 0.0 {
-            facts.maxspeed = Some(format!("{:.1}", length_m / duration_s * 3.6));
-        }
-    }
-    let mut collected = CollectedWay {
-        way_id: way.way_id,
-        encoded_facts: encode(facts)?,
-        input: None,
+    // The length comes from the located nodes, so these facts wait for them.
+    let ferry_duration_s = facts
+        .as_ref()
+        .filter(|facts| facts.is_ferry)
+        .and_then(|_| way.tags.get("duration").and_then(osm_duration_s));
+    let (encoded_facts, ferry) = match (facts, ferry_duration_s) {
+        (Some(facts), Some(duration_s)) => (
+            None,
+            Some(Box::new(PendingFerry {
+                facts,
+                duration_s,
+                slot: usize::MAX,
+            })),
+        ),
+        (facts, _) => (encode(facts)?, None),
     };
-    if geometry.len() < 2 {
-        return Ok(collected);
-    }
-
     let road_class = road_class(&way.tags);
     let attrs = routing_topology_attrs(&way.tags, road_class);
-    collected.input = Some(SharedLineInput {
-        feature_id: way.way_id,
-        layer: SharedLineLayer::Roads,
-        geometry,
-        node_chain,
-        source_lineage_ids: vec![way.way_id],
-        attrs,
-        compile_inputs: Arc::from([]),
-        min_zoom: road_min_zoom(road_class),
-        max_zoom: 14,
-        sort_order: road_sort_order(road_class),
-        routing: Some(road_routing_attrs(&way.tags, road_class)),
-    });
-    Ok(collected)
+    let routing = road_routing_attrs(&way.tags, road_class);
+    Ok(CollectedWay {
+        way_id: way.way_id,
+        encoded_facts,
+        unplaced: Some(UnplacedWay {
+            input: SharedLineInput {
+                feature_id: way.way_id,
+                layer: SharedLineLayer::Roads,
+                geometry: Vec::new(),
+                node_chain: way.node_ids,
+                source_lineage_ids: vec![way.way_id],
+                attrs,
+                compile_inputs: Arc::from([]),
+                min_zoom: road_min_zoom(road_class),
+                max_zoom: 14,
+                sort_order: road_sort_order(road_class),
+                routing: Some(routing),
+            },
+            ferry,
+        }),
+    })
+}
+
+fn encode_way_facts(way_id: i64, facts: &RoadWayFacts) -> Result<Vec<u8>, String> {
+    codec::to_vec(facts)
+        .map_err(|error| format!("Failed to encode way facts for way {way_id}: {error}"))
+}
+
+/// Keeps the located nodes of a line, in order, with their positions as its
+/// geometry; a node the file does not hold is dropped from the line.
+fn place_line(locations: &NodeLocations, input: &mut SharedLineInput) {
+    let mut cursor = locations.cursor();
+    let mut geometry = Vec::with_capacity(input.node_chain.len());
+    input
+        .node_chain
+        .retain(|node_id| match cursor.get(*node_id) {
+            Some(position) => {
+                geometry.push(position);
+                true
+            }
+            None => false,
+        });
+    input.geometry = geometry;
 }
 
 fn build_road_graph(
@@ -1087,7 +1186,7 @@ fn is_barrier_node(tags: &(impl PbfTagLookup + ?Sized)) -> bool {
     barrier_tag(tags).is_some()
 }
 
-/// The nodes pass 1 keeps: barriers and traffic controls.
+/// The nodes the ingest keeps: barriers and traffic controls.
 fn is_kept_node(tags: &(impl PbfTagLookup + ?Sized)) -> bool {
     is_barrier_node(tags) || traffic_control_from_tags(tags).is_some()
 }

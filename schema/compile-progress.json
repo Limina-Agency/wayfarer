@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "message": {
-      "description": "Diagnostic text in English, such as the objects read so far in the\ningest (\"Indexed 1200 node locations and 3 relations\"). An app shows its\nown text per stage.",
+      "description": "Diagnostic text in English, such as the objects read so far in the\ningest (\"Located 1200 of 1250 nodes in 4000 scanned\"). An app shows its\nown text per stage.",
       "type": [
         "string",
         "null"
@@ -39,14 +39,14 @@
       "description": "The stages of a compile, in the order they run. The serialized names\n(`as_str`) are stable ids an app can key its own text on.",
       "oneOf": [
         {
-          "description": "Ingest pass 1: node locations, relations and tagged nodes.",
-          "type": "string",
-          "const": "index_nodes"
-        },
-        {
-          "description": "Ingest pass 2: road ways and turn-restriction relations.",
+          "description": "The ingest's first pass: road ways and their relations (turn\nrestrictions, road routes), from the way and relation blobs.",
           "type": "string",
           "const": "collect_roads"
+        },
+        {
+          "description": "The ingest's second pass: the locations of the road ways' nodes, and\nthe barrier and traffic-control nodes, from the node blobs. It runs\nafter [`CollectRoads`](Self::CollectRoads); its id keeps the name it\nhad when it ran first and indexed every node.",
+          "type": "string",
+          "const": "index_nodes"
         },
         {
           "description": "The road graph: topology, restrictions, enrichment and repair.",

@@ -41,10 +41,11 @@ pub struct CompileRequest {
     /// the compile fails with access denied and leaves it intact, so compile
     /// to a new path and switch the engine over.
     pub output: PathBuf,
-    /// Where the compile keeps scratch files (the node store of large
-    /// extracts). The compile works in a fresh directory of its own inside it
-    /// and removes that directory when it ends, whatever the outcome; nothing
-    /// else in `scratch_dir` is touched. Default: the directory of `output`.
+    /// Where the compile keeps scratch files, if it needs any (today it
+    /// writes none: node locations are kept in memory). The compile works in
+    /// a fresh directory of its own inside it and removes that directory when
+    /// it ends, whatever the outcome; nothing else in `scratch_dir` is
+    /// touched. Default: the directory of `output`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch_dir: Option<PathBuf>,
     /// The package's graph id. Default: the input's file name without
@@ -192,7 +193,7 @@ pub struct CompileProgress {
     /// usual share of the time).
     pub overall: f64,
     /// Diagnostic text in English, such as the objects read so far in the
-    /// ingest ("Indexed 1200 node locations and 3 relations"). An app shows its
+    /// ingest ("Located 1200 of 1250 nodes in 4000 scanned"). An app shows its
     /// own text per stage.
     pub message: Option<String>,
 }
@@ -201,7 +202,7 @@ impl CompileProgress {
     /// The report before the compile's first.
     pub fn starting() -> Self {
         Self {
-            stage: CompileStage::IndexNodes,
+            stage: CompileStage::CollectRoads,
             stage_fraction: None,
             overall: 0.0,
             message: None,
