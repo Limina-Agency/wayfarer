@@ -95,6 +95,52 @@
         "ssvg_connector"
       ]
     },
+    "RouteLane": {
+      "description": "One lane of the road approaching a maneuver's junction.",
+      "type": "object",
+      "properties": {
+        "indications": {
+          "description": "The lane's marked directions, in tag order; `none` for an unmarked\nlane. Marks the engine does not know are left out.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteLaneIndication"
+          }
+        },
+        "valid": {
+          "description": "Whether the lane serves the maneuver.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "indications",
+        "valid"
+      ]
+    },
+    "RouteLaneIndication": {
+      "description": "A direction marked on a lane (an OSM `turn:lanes` value).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "through",
+            "slight_left",
+            "left",
+            "sharp_left",
+            "slight_right",
+            "right",
+            "sharp_right",
+            "reverse",
+            "merge_to_left",
+            "merge_to_right"
+          ]
+        },
+        {
+          "description": "No marking (`none` or an empty value): usually straight on.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
     "RouteManeuver": {
       "type": "object",
       "properties": {
@@ -177,6 +223,13 @@
           "default": null,
           "maximum": 255,
           "minimum": 0
+        },
+        "lanes": {
+          "description": "The lanes of the road approaching the maneuver's junction, left to\nright, from that road's `turn:lanes` tags; empty when it has none or\nthe maneuver is not at a junction.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteLane"
+          }
         },
         "legIndex": {
           "description": "The leg of a multi-leg route this maneuver belongs to.",

@@ -11,7 +11,7 @@ use wayfarer::{
     MobilityProfile, RouteEdgeAvoidanceRange, RouteEdgeCostMultiplierRange, RouteEdgeRange,
     RouteEndpointOptions, RouteError, RouteGuidanceQualityFlag, RouteIsochroneContour,
     RouteIsochroneMetric, RouteIsochroneRequest, RouteManeuverKind, RouteMatrixCellStatus,
-    RouteMatrixRequest, RouteOverlayGeometryKind, RouteShapeQualityFlag, RouteStatus,
+    RouteMatrixRequest, RouteOverlayGeometryKind, RouteRequest, RouteShapeQualityFlag, RouteStatus,
     RoutingEngine,
 };
 use wayfarer::{RoutingPackage, RoutingPackageError};
@@ -447,6 +447,52 @@ fn graph_access_exposes_dense_raw_indexes_for_search_labels() {
         .map(|record| record.edge.edge_id)
         .collect::<Vec<_>>();
     assert_eq!(incoming_edge_ids, vec![1, 4]);
+}
+
+#[test]
+fn waypoint_maneuver_covers_the_stretch_to_the_next_maneuver() {
+    let graph = graph_from_ways(
+        "waypoint-maneuver-distances",
+        vec![
+            way(1, vec![(52.0, 21.0), (52.0, 21.002)], RoadType::Primary),
+            way(2, vec![(52.0, 21.002), (52.002, 21.002)], RoadType::Primary),
+        ],
+    );
+    let route = engine(&graph)
+        .route(RouteRequest::through(
+            [
+                GeoPoint::new(52.0, 21.0002),
+                GeoPoint::new(52.0, 21.001),
+                GeoPoint::new(52.0015, 21.002),
+            ],
+            MobilityProfile::Wheeled,
+        ))
+        .unwrap();
+
+    let kinds = route
+        .maneuvers
+        .iter()
+        .map(|maneuver| maneuver.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            RouteManeuverKind::Start,
+            RouteManeuverKind::Waypoint,
+            RouteManeuverKind::Turn,
+            RouteManeuverKind::Destination,
+        ]
+    );
+    // Each maneuver runs to the next one, so together they cover the route.
+    let waypoint = &route.maneuvers[1];
+    let turn = &route.maneuvers[2];
+    assert!(waypoint.distance_m > 60.0, "{}", waypoint.distance_m);
+    assert!(waypoint.duration_s > 0.0);
+    assert_eq!(waypoint.end_shape_index, turn.begin_shape_index);
+    let distance_m = route.maneuvers.iter().map(|m| m.distance_m).sum::<f64>();
+    let duration_s = route.maneuvers.iter().map(|m| m.duration_s).sum::<f64>();
+    assert!((distance_m - route.distance_m).abs() < 1e-6, "{distance_m}");
+    assert!((duration_s - route.duration_s).abs() < 1e-6, "{duration_s}");
 }
 
 #[test]
@@ -2830,12 +2876,17 @@ fn guidance_includes_turn_lane_hints_from_road_facts() {
             ),
         ],
     );
+    // `turn:lanes` describes the lanes at the end of the way approaching the
+    // junction; the entered way's own describe its far end.
+    let mut approach = road_way_facts(1, RoadType::Primary);
+    approach.turn_lanes_forward = Some("left|through|right".to_string());
+    approach.lane_connectivity_available = true;
     let mut facts = road_way_facts(2, RoadType::Secondary);
     facts.name = Some("Lane Ramp".to_string());
     facts.lanes = Some("3".to_string());
-    facts.turn_lanes_forward = Some("left|through|right".to_string());
+    facts.turn_lanes_forward = Some("through|right".to_string());
     facts.lane_connectivity_available = true;
-    graph.set_way_facts(vec![facts]);
+    graph.set_way_facts(vec![approach, facts]);
     graph.refresh_shared_edge_metadata();
 
     let result = engine(&graph)
@@ -2881,6 +2932,10 @@ fn guidance_includes_turn_lane_hints_from_road_facts() {
             .get("lane_connectivity_available")
             .map(String::as_str),
         Some("true")
+    );
+    assert_eq!(
+        turn.lanes.iter().map(|lane| lane.valid).collect::<Vec<_>>(),
+        [true, false, false]
     );
 }
 

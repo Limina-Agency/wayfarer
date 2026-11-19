@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use crate::types::{
     GeoPoint, RouteDynamicEndpointKind, RouteDynamicVirtualEdgeKind, RouteEdgeRange,
-    RouteGuidanceQualityFlag, RouteLeg, RouteManeuver, RouteManeuverKind, RouteShapeDynamicOverlay,
-    RouteShapeDynamicOverlayKind, RouteShapeQualityFlag, RouteShapeSegment,
+    RouteGuidanceQualityFlag, RouteLane, RouteLaneIndication, RouteLeg, RouteManeuver,
+    RouteManeuverKind, RouteShapeDynamicOverlay, RouteShapeDynamicOverlayKind,
+    RouteShapeQualityFlag, RouteShapeSegment,
 };
 
 const TURN_THRESHOLD_DEG: f64 = 30.0;
@@ -34,6 +35,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
         instruction("Start on", first_edge.and_then(|edge| edge.name.as_deref())),
         "route.start",
         first_edge,
+        None,
         &leg.geometry,
         0,
         shapes.range(0).1.max(1),
@@ -58,6 +60,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
                 ),
                 "route.hazard",
                 Some(edge),
+                None,
                 &leg.geometry,
                 begin_shape_index,
                 end_shape_index,
@@ -184,6 +187,9 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
                 instruction_key(kind)
             },
             Some(edge),
+            // `turn:lanes` describes the lanes at the end of the way that
+            // approaches the junction.
+            Some(&leg.edges[index - 1]),
             &leg.geometry,
             begin_shape_index,
             end_shape_index,
@@ -263,6 +269,7 @@ pub(crate) fn build_maneuvers(leg: &RouteLeg) -> Vec<RouteManeuver> {
         "Arrive at destination".to_string(),
         "route.destination",
         leg.edges.last(),
+        None,
         &leg.geometry,
         last_shape_index,
         last_shape_index,
@@ -474,6 +481,7 @@ fn dynamic_overlay_maneuver(
         road_name: None,
         turn_angle_deg: None,
         quality_flags: vec![RouteGuidanceQualityFlag::SsvgConnector],
+        lanes: Vec::new(),
         leg_index: None,
     }
 }
@@ -603,11 +611,15 @@ fn connector_name(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
         .filter(|name| !name.trim().is_empty())
 }
 
+/// A maneuver onto `edge`. `approach_edge` is the edge that reaches the
+/// maneuver's junction, whose lanes the maneuver describes; `None` for one
+/// that is not at a junction.
 fn maneuver(
     kind: RouteManeuverKind,
     instruction: String,
     instruction_key: &str,
     edge: Option<&crate::types::RouteEdgeAttribution>,
+    approach_edge: Option<&crate::types::RouteEdgeAttribution>,
     geometry: &[GeoPoint],
     begin_shape_index: usize,
     end_shape_index: usize,
@@ -628,9 +640,9 @@ fn maneuver(
     if let Some(lane_count) = edge.and_then(|edge| edge.lane_count) {
         instruction_parameters.insert("lane_count".to_string(), lane_count.to_string());
     }
-    if let Some(edge) = edge {
-        append_lane_guidance_parameters(&mut instruction_parameters, edge, kind, turn_angle_deg);
-    }
+    let lanes = approach_edge.map_or_else(Vec::new, |approach| {
+        append_lane_guidance_parameters(&mut instruction_parameters, approach, kind, turn_angle_deg)
+    });
     if let Some(exit_number) = roundabout_exit_number {
         instruction_parameters.insert(
             "roundabout_exit_number".to_string(),
@@ -712,6 +724,7 @@ fn maneuver(
         road_name,
         turn_angle_deg,
         quality_flags,
+        lanes,
         leg_index: None,
     }
 }
@@ -840,15 +853,17 @@ fn guidance_reason(
     }
 }
 
+/// Adds the lane facts of `edge`, the edge approaching a maneuver's junction,
+/// to the maneuver's parameters, and returns its lanes.
 fn append_lane_guidance_parameters(
     parameters: &mut BTreeMap<String, String>,
     edge: &crate::types::RouteEdgeAttribution,
     kind: RouteManeuverKind,
     turn_angle_deg: Option<i16>,
-) {
+) -> Vec<RouteLane> {
     let Some(turn_lanes) = selected_turn_lanes(edge).filter(|value| !value.trim().is_empty())
     else {
-        return;
+        return Vec::new();
     };
     parameters.insert("turn_lanes".to_string(), turn_lanes.clone());
     if let Some(forward) = edge.turn_lanes_forward.as_deref() {
@@ -864,7 +879,15 @@ fn append_lane_guidance_parameters(
         );
     }
 
-    if let Some(hint) = lane_guidance_hint(&turn_lanes, kind, turn_angle_deg) {
+    let target = maneuver_lane_target(kind, turn_angle_deg);
+    let lanes = turn_lanes
+        .split('|')
+        .map(|lane| RouteLane {
+            indications: lane_indications(lane),
+            valid: target.is_some_and(|target| lane_matches_target(lane, target)),
+        })
+        .collect();
+    if let Some(hint) = target.and_then(|target| lane_guidance_hint(&turn_lanes, target)) {
         parameters.insert("lane_guidance".to_string(), hint.label);
         parameters.insert("lane_guidance_target".to_string(), hint.target);
         parameters.insert(
@@ -880,18 +903,26 @@ fn append_lane_guidance_parameters(
             hint.count.to_string(),
         );
     }
+    lanes
 }
 
+/// The `turn:lanes` value for the direction the route travels `edge` in. The
+/// unsuffixed tag is the forward one on a two-way road, and the lanes of the
+/// only direction on a oneway (an edge without an opposing edge).
 fn selected_turn_lanes(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
     match edge.traversal_direction {
         wayfarer_package::TraversalDirection::Forward => edge
             .turn_lanes_forward
             .clone()
             .or_else(|| edge.turn_lanes.clone()),
-        wayfarer_package::TraversalDirection::Backward => edge
-            .turn_lanes_backward
-            .clone()
-            .or_else(|| edge.turn_lanes.clone()),
+        wayfarer_package::TraversalDirection::Backward => {
+            edge.turn_lanes_backward.clone().or_else(|| {
+                edge.opposing_edge_id
+                    .is_none()
+                    .then(|| edge.turn_lanes.clone())
+                    .flatten()
+            })
+        }
     }
 }
 
@@ -902,12 +933,7 @@ struct LaneGuidanceHint {
     lane_indexes: Vec<usize>,
 }
 
-fn lane_guidance_hint(
-    turn_lanes: &str,
-    kind: RouteManeuverKind,
-    turn_angle_deg: Option<i16>,
-) -> Option<LaneGuidanceHint> {
-    let target = maneuver_lane_target(kind, turn_angle_deg)?;
+fn lane_guidance_hint(turn_lanes: &str, target: LaneTarget) -> Option<LaneGuidanceHint> {
     let lane_indexes = turn_lanes
         .split('|')
         .enumerate()
@@ -963,16 +989,47 @@ fn maneuver_lane_target(
     }
 }
 
+/// Whether a lane (one `turn:lanes` value) serves the target. An unmarked
+/// lane (`none` or empty) goes straight on.
 fn lane_matches_target(lane: &str, target: LaneTarget) -> bool {
     lane.split(';').any(|token| {
         let token = token.trim();
         match target {
-            LaneTarget::Left => matches!(token, "left" | "slight_left"),
-            LaneTarget::Right => matches!(token, "right" | "slight_right"),
-            LaneTarget::Through => matches!(token, "through" | "merge_to_left" | "merge_to_right"),
+            LaneTarget::Left => matches!(token, "left" | "slight_left" | "sharp_left"),
+            LaneTarget::Right => matches!(token, "right" | "slight_right" | "sharp_right"),
+            LaneTarget::Through => matches!(
+                token,
+                "through" | "merge_to_left" | "merge_to_right" | "none" | ""
+            ),
             LaneTarget::Reverse => matches!(token, "reverse" | "uturn"),
         }
     })
+}
+
+/// The directions marked on a lane (one `turn:lanes` value), unknown marks
+/// left out.
+fn lane_indications(lane: &str) -> Vec<RouteLaneIndication> {
+    let mut indications = Vec::new();
+    for token in lane.split(';') {
+        let indication = match token.trim() {
+            "" | "none" => RouteLaneIndication::None,
+            "through" => RouteLaneIndication::Through,
+            "slight_left" => RouteLaneIndication::SlightLeft,
+            "left" => RouteLaneIndication::Left,
+            "sharp_left" => RouteLaneIndication::SharpLeft,
+            "slight_right" => RouteLaneIndication::SlightRight,
+            "right" => RouteLaneIndication::Right,
+            "sharp_right" => RouteLaneIndication::SharpRight,
+            "reverse" | "uturn" => RouteLaneIndication::Reverse,
+            "merge_to_left" => RouteLaneIndication::MergeToLeft,
+            "merge_to_right" => RouteLaneIndication::MergeToRight,
+            _ => continue,
+        };
+        if !indications.contains(&indication) {
+            indications.push(indication);
+        }
+    }
+    indications
 }
 
 /// The instruction entering a roundabout on `edge`: the exit to take and the
@@ -1305,14 +1362,18 @@ mod tests {
 
     #[test]
     fn turn_instruction_uses_destination_sign_text() {
+        // The lanes are those of the road approaching the turn: the entered
+        // road's own `turn:lanes` describe its far end.
+        let mut approach_edge = edge(1, "Opolska");
+        approach_edge.turn_lanes_forward = Some("left|through|right".to_string());
+        approach_edge.lane_connectivity_available = true;
         let mut signed_edge = edge(2, "Ramp");
         signed_edge.destination = Some("Krakow".to_string());
         signed_edge.destination_ref = Some("A4".to_string());
         signed_edge.destination_street = Some("Zakopianka".to_string());
         signed_edge.junction_ref = Some("7A".to_string());
         signed_edge.lane_count = Some(2);
-        signed_edge.turn_lanes_forward = Some("left|through|right".to_string());
-        signed_edge.lane_connectivity_available = true;
+        signed_edge.turn_lanes_forward = Some("through|right".to_string());
         let leg = RouteLeg {
             distance_m: 200.0,
             duration_s: 24.0,
@@ -1321,7 +1382,7 @@ mod tests {
                 GeoPoint::new(50.0, 20.001),
                 GeoPoint::new(50.001, 20.001),
             ],
-            edges: vec![edge(1, "Opolska"), signed_edge],
+            edges: vec![approach_edge, signed_edge],
             shape_segments: vec![
                 RouteShapeSegment {
                     edge_id: 1,
@@ -1350,6 +1411,31 @@ mod tests {
             .find(|maneuver| maneuver.kind == RouteManeuverKind::Turn)
             .expect("turn maneuver");
 
+        // Maneuvers that are not at a junction carry no lanes.
+        for endpoint in maneuvers
+            .iter()
+            .filter(|maneuver| maneuver.kind != RouteManeuverKind::Turn)
+        {
+            assert!(endpoint.lanes.is_empty());
+            assert!(!endpoint.instruction_parameters.contains_key("turn_lanes"));
+        }
+        assert_eq!(
+            turn.lanes,
+            vec![
+                RouteLane {
+                    indications: vec![RouteLaneIndication::Left],
+                    valid: true,
+                },
+                RouteLane {
+                    indications: vec![RouteLaneIndication::Through],
+                    valid: false,
+                },
+                RouteLane {
+                    indications: vec![RouteLaneIndication::Right],
+                    valid: false,
+                },
+            ]
+        );
         assert!(turn.instruction.contains("toward Krakow"));
         assert_eq!(turn.sign_text.as_deref(), Some("Krakow"));
         assert_eq!(turn.branch_text.as_deref(), Some("A4"));
@@ -1459,6 +1545,119 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+    }
+
+    #[test]
+    fn unsuffixed_turn_lanes_are_forward_on_two_way_roads() {
+        let mut two_way = edge(2, "Two-way");
+        two_way.traversal_direction = TraversalDirection::Backward;
+        two_way.opposing_edge_id = Some(3);
+        two_way.turn_lanes = Some("left|through".to_string());
+        let mut parameters = BTreeMap::new();
+        let lanes = append_lane_guidance_parameters(
+            &mut parameters,
+            &two_way,
+            RouteManeuverKind::Turn,
+            Some(-90),
+        );
+        assert!(lanes.is_empty());
+        assert!(parameters.is_empty());
+
+        // Travelled forward, the tag applies.
+        two_way.traversal_direction = TraversalDirection::Forward;
+        let lanes = append_lane_guidance_parameters(
+            &mut parameters,
+            &two_way,
+            RouteManeuverKind::Turn,
+            Some(-90),
+        );
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(
+            parameters.get("lane_guidance").map(String::as_str),
+            Some("use_left_lane")
+        );
+
+        // A oneway travelled backward (`oneway=-1`) has only these lanes.
+        let mut reverse_oneway = edge(4, "Reverse oneway");
+        reverse_oneway.traversal_direction = TraversalDirection::Backward;
+        reverse_oneway.turn_lanes = Some("left|through".to_string());
+        let mut parameters = BTreeMap::new();
+        let lanes = append_lane_guidance_parameters(
+            &mut parameters,
+            &reverse_oneway,
+            RouteManeuverKind::Turn,
+            Some(-90),
+        );
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(
+            parameters.get("turn_lanes").map(String::as_str),
+            Some("left|through")
+        );
+    }
+
+    #[test]
+    fn unmarked_and_sharp_lanes_are_matched() {
+        let mut approach = edge(1, "Approach");
+        approach.turn_lanes_forward = Some("sharp_left|none||slight_right;sharp_right".to_string());
+
+        let mut parameters = BTreeMap::new();
+        let lanes = append_lane_guidance_parameters(
+            &mut parameters,
+            &approach,
+            RouteManeuverKind::Continue,
+            Some(0),
+        );
+        assert_eq!(
+            parameters
+                .get("lane_guidance_lane_indexes")
+                .map(String::as_str),
+            Some("2,3")
+        );
+        assert_eq!(
+            lanes,
+            vec![
+                RouteLane {
+                    indications: vec![RouteLaneIndication::SharpLeft],
+                    valid: false,
+                },
+                RouteLane {
+                    indications: vec![RouteLaneIndication::None],
+                    valid: true,
+                },
+                RouteLane {
+                    indications: vec![RouteLaneIndication::None],
+                    valid: true,
+                },
+                RouteLane {
+                    indications: vec![
+                        RouteLaneIndication::SlightRight,
+                        RouteLaneIndication::SharpRight
+                    ],
+                    valid: false,
+                },
+            ]
+        );
+
+        for (angle, indexes) in [(-150, None), (-120, Some("1")), (120, Some("4"))] {
+            let kind = if angle == -150 {
+                RouteManeuverKind::UTurn
+            } else {
+                RouteManeuverKind::Turn
+            };
+            let mut parameters = BTreeMap::new();
+            let lanes =
+                append_lane_guidance_parameters(&mut parameters, &approach, kind, Some(angle));
+            assert_eq!(
+                parameters
+                    .get("lane_guidance_lane_indexes")
+                    .map(String::as_str),
+                indexes
+            );
+            assert_eq!(
+                lanes.iter().filter(|lane| lane.valid).count(),
+                usize::from(indexes.is_some())
+            );
+        }
     }
 
     #[test]
