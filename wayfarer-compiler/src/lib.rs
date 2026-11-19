@@ -53,17 +53,17 @@ use wayfarer_package::{codec, math};
 use wayfarer_road_graph::{
     DirectionalAccess, EnhanceOptions, NodeBarrierTags, ROAD_GRAPH_SNAPSHOT_VERSION,
     RelationMemberRefType, RoadGraph, RoadGraphBuilder, RoadGraphPackageManifest,
-    RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadRouteMembership,
-    RoadTurnRestriction, RoadType, RoadWayFacts, RoutableWay, TagInterner, TrafficControl,
-    TrafficControlDirection, TrafficControlPoint, enhance_road_graph_with,
-    evaluate_road_graph_quality, resolve_turn_restrictions_with_report,
-    vehicle_access_is_destination_only,
+    RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadTurnRestriction, RoadType,
+    RoadWayFacts, RoutableWay, TagInterner, TrafficControl, TrafficControlDirection,
+    TrafficControlPoint, enhance_road_graph_with, evaluate_road_graph_quality,
+    resolve_turn_restrictions_with_report, vehicle_access_is_destination_only,
 };
 
 mod api;
 mod compile_job;
 mod job;
 mod profiling;
+mod route_memberships;
 
 pub use api::{
     CompileError, CompileProgress, CompileRequest, CompileResult, MemoryProfile, compile,
@@ -74,6 +74,7 @@ pub use wayfarer_package::CancelToken;
 
 use job::{Job, ProgressFn};
 use profiling::Phase;
+use route_memberships::CollectedRouteMemberships;
 
 /// The road-graph half of a compile, as `api` resolves it from a
 /// [`CompileRequest`].
@@ -454,7 +455,7 @@ pub(crate) struct OsmRoadNetworkCollector {
     /// known, with the position of their line in `builder`.
     ferries: Vec<(usize, Box<PendingFerry>)>,
     turn_restrictions: Vec<RoadTurnRestriction>,
-    route_memberships: Vec<RoadRouteMembership>,
+    route_memberships: CollectedRouteMemberships,
     way_facts: EncodedWayFacts,
 }
 
@@ -541,7 +542,7 @@ impl EncodedWayFacts {
 struct CollectedRoadInputs {
     network: SharedLineNetwork,
     turn_restrictions: Vec<RoadTurnRestriction>,
-    route_memberships: Vec<RoadRouteMembership>,
+    route_memberships: CollectedRouteMemberships,
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
     traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
@@ -612,7 +613,7 @@ impl OsmRoadNetworkCollector {
 struct UnfinishedRoadInputs {
     builder: SharedLineNetworkBuilder,
     turn_restrictions: Vec<RoadTurnRestriction>,
-    route_memberships: Vec<RoadRouteMembership>,
+    route_memberships: CollectedRouteMemberships,
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
     traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
@@ -645,8 +646,7 @@ impl Pass2Sink for OsmRoadNetworkCollector {
         for relation in &batch.relations {
             self.turn_restrictions
                 .extend(turn_restrictions_from_relation(relation));
-            self.route_memberships
-                .extend(route_memberships_from_relation(relation));
+            self.route_memberships.push_relation(relation);
         }
         Ok(())
     }
@@ -865,10 +865,9 @@ fn build_road_graph(
     // Not read again.
     drop(way_facts);
     report_finalize_checkpoint(job, "after_apply_way_facts", rows_written)?;
-    road_graph.set_route_memberships(filtered_route_memberships(
-        route_memberships,
-        &graph_way_ids,
-    ));
+    // Only road routes' memberships reach the graph; all of them count.
+    let (route_membership_count, road_route_memberships) = route_memberships.finish(&graph_way_ids);
+    road_graph.set_route_memberships(road_route_memberships);
     report_finalize_checkpoint(job, "after_load_route_memberships", rows_written)?;
     road_graph.set_turn_restrictions(filtered_turn_restrictions(
         turn_restrictions,
@@ -878,7 +877,6 @@ fn build_road_graph(
     report_finalize_checkpoint(job, "after_load_turn_restrictions", rows_written)?;
     road_graph.refresh_route_membership_metadata();
     let raw_turn_restriction_count = road_graph.turn_restrictions.len();
-    let route_membership_count = road_graph.route_memberships.len();
     report_finalize_checkpoint(job, "after_refresh_shared_edge_metadata", rows_written)?;
     drop(phase);
     let phase = Phase::start("resolve_turn_restrictions");
@@ -1010,23 +1008,6 @@ fn graph_way_ids(graph: &RoadGraph) -> Vec<i64> {
     way_ids
 }
 
-fn filtered_route_memberships(
-    memberships: Vec<RoadRouteMembership>,
-    graph_way_ids: &[i64],
-) -> Vec<RoadRouteMembership> {
-    let mut memberships = memberships
-        .into_iter()
-        .filter(|membership| graph_way_ids.binary_search(&membership.way_id).is_ok())
-        .collect::<Vec<_>>();
-    memberships.sort_by(|left, right| {
-        left.way_id
-            .cmp(&right.way_id)
-            .then(left.relation_id.cmp(&right.relation_id))
-            .then(left.member_role.cmp(&right.member_role))
-    });
-    memberships
-}
-
 fn filtered_turn_restrictions(
     restrictions: Vec<RoadTurnRestriction>,
     graph_way_ids: &[i64],
@@ -1146,34 +1127,6 @@ fn turn_restrictions_from_relation(relation: &NormalizedRelation) -> Vec<RoadTur
         }
     }
     restrictions
-}
-
-fn route_memberships_from_relation(relation: &NormalizedRelation) -> Vec<RoadRouteMembership> {
-    if relation.tags.get("type") != Some("route") {
-        return Vec::new();
-    }
-    let Some(route) = relation
-        .tags
-        .get("route")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Vec::new();
-    };
-    relation
-        .members
-        .iter()
-        .filter(|member| member.member_type == RelationMemberType::Way)
-        .map(|member| RoadRouteMembership {
-            relation_id: relation.relation_id,
-            way_id: member.member_id,
-            route: route.to_string(),
-            network: relation.tags.get("network").map(ToString::to_string),
-            ref_name: relation.tags.get("ref").map(ToString::to_string),
-            relation_name: relation.tags.get("name").map(ToString::to_string),
-            member_role: (!member.role.is_empty()).then(|| member.role.clone()),
-        })
-        .collect()
 }
 
 fn barrier_tag(tags: &(impl PbfTagLookup + ?Sized)) -> Option<&str> {
