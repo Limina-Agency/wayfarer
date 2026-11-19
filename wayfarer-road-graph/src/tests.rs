@@ -776,7 +776,9 @@ fn enhancement_reports_valhalla_style_topology_quality_warnings() {
         .iter()
         .position(|info| info.shared_edge_info_id == missing_geometry_shared_id)
         .unwrap();
-    *graph.shared_edge_infos.geometry_mut(missing_geometry_index) = vec![(51.0, 19.01)];
+    graph
+        .shared_edge_infos
+        .set_geometry(missing_geometry_index, &[(51.0, 19.01)]);
 
     let report = enhance_road_graph(&mut graph);
 

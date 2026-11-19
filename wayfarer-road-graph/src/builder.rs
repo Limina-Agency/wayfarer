@@ -311,10 +311,13 @@ impl RoadGraphBuilder {
             .values()
             .filter(|counts| counts.points > 1)
             .count();
+        let mut point_estimate = 0usize;
         for way in self.ways.iter().flatten() {
             let last = way.points.len().saturating_sub(1);
             if way.points.len() >= 2 {
                 segment_estimate += 1;
+                // The first segment's points; each further one adds its own.
+                point_estimate += way.points.len() - 1;
             }
             for (index, &(lat, lng)) in way.points.iter().enumerate() {
                 let counts = coord_counts
@@ -350,6 +353,11 @@ impl RoadGraphBuilder {
         // Plazas add a few more; the slack keeps them from forcing a doubling.
         let shared_info_estimate = segment_estimate + segment_estimate / 64 + 64;
         graph.shared_edge_infos.reserve_exact(shared_info_estimate);
+        // A way's segments share their end points: each segment has one more
+        // point than it adds to the way (plazas: two per spoke).
+        graph.shared_edge_infos.reserve_points_exact(
+            point_estimate + segment_estimate + 2 * (shared_info_estimate - segment_estimate),
+        );
         graph.graph.reserve_exact_edges(2 * shared_info_estimate);
         // Grown by doubling, the node vector ended up to half unused.
         graph
@@ -567,7 +575,7 @@ impl RoadGraphBuilder {
                 graph.shared_edge_infos.push_with_class(
                     shared_edge_info_id,
                     shared_info_template.osm_way_id,
-                    current_segment_points.clone(),
+                    &current_segment_points,
                     template_class,
                 );
                 let info_index = graph.shared_edge_infos.len() - 1;

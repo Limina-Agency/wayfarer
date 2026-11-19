@@ -848,7 +848,11 @@ fn matching_shortcut_successor(
 
 /// The source lineage of `edge`: its shared info's (none when the info is
 /// missing).
-fn edge_lineage(graph: &RoadGraph, info_index_by_id: &SharedInfoIndex, edge: &RoadEdge) -> Vec<i64> {
+fn edge_lineage(
+    graph: &RoadGraph,
+    info_index_by_id: &SharedInfoIndex,
+    edge: &RoadEdge,
+) -> Vec<i64> {
     shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id)
         .map(|info| info.source_lineage_ids.to_vec())
         .unwrap_or_default()

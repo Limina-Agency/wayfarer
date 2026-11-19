@@ -12,14 +12,16 @@ use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
 /// One shared info as the graph stores it: what is its own, and its
-/// attribute class.
+/// attribute class. Its geometry is a range of the [`SharedEdgeInfos`]'
+/// point pool (read it from [`SharedInfoRef::geometry`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SharedEdge {
     pub shared_edge_info_id: u64,
     pub osm_way_id: i64,
-    pub geometry: Vec<(f64, f64)>,
     /// Index into the classes of the [`SharedEdgeInfos`] that holds it.
     pub class: u32,
+    /// The end of its points in the pool (the start is the previous info's).
+    geometry_end: u64,
 }
 
 /// A shared info read from [`SharedEdgeInfos`]: the segment's own fields, and
@@ -112,6 +114,9 @@ impl SharedInfoClasses {
 #[derive(Debug, Clone, Default)]
 pub struct SharedEdgeInfos {
     edges: Vec<SharedEdge>,
+    /// Every info's points, in info order: one allocation instead of one per
+    /// info.
+    points: Vec<(f64, f64)>,
     classes: SharedInfoClasses,
     /// `(index, lineage)` of the infos whose lineage is not `[osm_way_id]`,
     /// by index: the rare exceptions, instead of a lineage per edge.
@@ -135,6 +140,40 @@ impl SharedEdgeInfos {
 
     pub fn reserve_exact(&mut self, additional: usize) {
         self.edges.reserve_exact(additional);
+    }
+
+    /// Reserves room for `additional` more geometry points.
+    pub fn reserve_points_exact(&mut self, additional: usize) {
+        self.points.reserve_exact(additional);
+    }
+
+    /// The geometry points of every info, in info order.
+    pub fn point_count(&self) -> usize {
+        self.points.len()
+    }
+
+    fn geometry_range(&self, index: usize) -> std::ops::Range<usize> {
+        let start = match index {
+            0 => 0,
+            _ => self.edges[index - 1].geometry_end as usize,
+        };
+        start..self.edges[index].geometry_end as usize
+    }
+
+    fn push_edge(
+        &mut self,
+        shared_edge_info_id: u64,
+        osm_way_id: i64,
+        geometry: &[(f64, f64)],
+        class: u32,
+    ) {
+        self.points.extend_from_slice(geometry);
+        self.edges.push(SharedEdge {
+            shared_edge_info_id,
+            osm_way_id,
+            class,
+            geometry_end: self.points.len() as u64,
+        });
     }
 
     /// The number of distinct attribute sets.
@@ -174,7 +213,7 @@ impl SharedEdgeInfos {
         SharedInfoRef {
             shared_edge_info_id: edge.shared_edge_info_id,
             osm_way_id: edge.osm_way_id,
-            geometry: &edge.geometry,
+            geometry: &self.points[self.geometry_range(index)],
             source_lineage_ids: sparse_get(&self.lineage, index)
                 .map_or(std::slice::from_ref(&edge.osm_way_id), |lineage| lineage),
             coverage_id: sparse_get(&self.coverage, index),
@@ -203,12 +242,7 @@ impl SharedEdgeInfos {
         let osm_way_id = info.osm_way_id;
         let geometry = std::mem::take(&mut info.geometry);
         let class = self.classes.intern(info);
-        self.edges.push(SharedEdge {
-            shared_edge_info_id,
-            osm_way_id,
-            geometry,
-            class,
-        });
+        self.push_edge(shared_edge_info_id, osm_way_id, &geometry, class);
     }
 
     /// Appends a segment of an attribute class already added with
@@ -217,16 +251,11 @@ impl SharedEdgeInfos {
         &mut self,
         shared_edge_info_id: u64,
         osm_way_id: i64,
-        geometry: Vec<(f64, f64)>,
+        geometry: &[(f64, f64)],
         class: u32,
     ) {
         assert!((class as usize) < self.classes.len(), "unknown class");
-        self.edges.push(SharedEdge {
-            shared_edge_info_id,
-            osm_way_id,
-            geometry,
-            class,
-        });
+        self.push_edge(shared_edge_info_id, osm_way_id, geometry, class);
     }
 
     /// The class of `attrs`, added if new (see [`SharedInfoClasses::intern`]).
@@ -234,9 +263,15 @@ impl SharedEdgeInfos {
         self.classes.intern(attrs)
     }
 
-    /// The geometry of the info at `index`.
-    pub fn geometry_mut(&mut self, index: usize) -> &mut Vec<(f64, f64)> {
-        &mut self.edges[index].geometry
+    /// Replaces the geometry of the info at `index` (moves the later infos'
+    /// points when the length changes).
+    pub fn set_geometry(&mut self, index: usize, geometry: &[(f64, f64)]) {
+        let range = self.geometry_range(index);
+        let delta = geometry.len() as i64 - range.len() as i64;
+        self.points.splice(range, geometry.iter().copied());
+        for edge in &mut self.edges[index..] {
+            edge.geometry_end = (edge.geometry_end as i64 + delta) as u64;
+        }
     }
 
     /// Gives the info at `index` a class already added with [`Self::intern`].
@@ -338,10 +373,7 @@ fn sparse_get<T>(entries: &[(u32, T)], index: usize) -> Option<&T> {
 /// appending past the last index is the common case.
 fn sparse_set<T>(entries: &mut Vec<(u32, T)>, index: usize, value: Option<T>) {
     let key = u32::try_from(index).expect("fewer than 2^32 shared infos");
-    match (
-        entries.binary_search_by_key(&key, |(at, _)| *at),
-        value,
-    ) {
+    match (entries.binary_search_by_key(&key, |(at, _)| *at), value) {
         (Ok(at), Some(value)) => entries[at].1 = value,
         (Ok(at), None) => {
             entries.remove(at);
