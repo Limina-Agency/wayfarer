@@ -282,6 +282,7 @@ fn compile_with_job(
         Some(&graph_manifest),
         &request.route_archive_path,
         &PackageBuildOptions::default(),
+        Some(&request.graph.temp_dir),
         job,
     )
     .map_err(|error| {
