@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     # scripts/check.sh: the same checks run locally on Linux or macOS.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # Installs the toolchain and components rust-toolchain.toml pins.
@@ -19,7 +19,7 @@ jobs:
   deny:
     # RustSec advisories, licenses (deny.toml, in step with about.toml),
     # banned crates and sources.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -43,7 +43,7 @@ jobs:
     # The oldest Rust the crates claim (`rust-version` in Cargo.toml) must
     # still build them; CI and releases build with the newer toolchain
     # rust-toolchain.toml pins.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install the rust-version toolchain
@@ -97,12 +97,23 @@ jobs:
   i686:
     # A 32-bit target: packages are the same bytes on every platform, and a
     # 32-bit engine must open them (usize is 32 bits there).
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     env:
       TARGET: i686-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      # GitHub-hosted runners fetch from Ubuntu's mirrors, which sometimes
+      # answer 503 for a few minutes: retry rather than fail the job.
+      - name: Install gcc-multilib
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=5 update &&
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends gcc-multilib &&
+              exit 0
+            echo "apt failed (attempt $attempt); retrying in 60 s"
+            sleep 60
+          done
+          exit 1
       - run: rustup toolchain install && rustup target add "$TARGET"
       - uses: Swatinem/rust-cache@v2
         with:
