@@ -442,7 +442,9 @@ pub(crate) struct OsmRoadNetworkCollector<'a> {
 /// Between collection and enrichment the bytes wait in a scratch file
 /// ([`spill`](EncodedWayFacts::spill)): nothing reads them while the line
 /// network and the graph are built, the compile's highest steps before the
-/// package build.
+/// package build. Enrichment then reads them from the file, mapped
+/// ([`restore`](EncodedWayFacts::restore)): its pages are the file's, which
+/// the system can drop and read again under pressure, not the heap's.
 #[derive(Default)]
 struct EncodedWayFacts {
     /// `(way id, byte offset)`, sorted by way id once collection ends.
@@ -450,6 +452,8 @@ struct EncodedWayFacts {
     bytes: Vec<u8>,
     /// Where the bytes are while spilled.
     spilled: Option<PathBuf>,
+    /// The spilled file once restored, and its path, removed on drop.
+    mapped: Option<(memmap2::Mmap, PathBuf)>,
 }
 
 impl EncodedWayFacts {
@@ -486,15 +490,36 @@ impl EncodedWayFacts {
         Ok(())
     }
 
-    /// Reads spilled bytes back and removes their file.
+    /// Maps the spilled file for reading; it is removed when the facts drop.
     fn restore(&mut self) -> Result<(), String> {
         let Some(path) = self.spilled.take() else {
             return Ok(());
         };
-        self.bytes = std::fs::read(&path)
-            .and_then(|bytes| std::fs::remove_file(&path).map(|()| bytes))
-            .map_err(|error| format!("Failed to read spilled way facts {path:?}: {error}"))?;
+        let map = std::fs::File::open(&path)
+            .and_then(|file| {
+                if file.metadata()?.len() == 0 {
+                    // Nothing to map (and an empty mapping is refused).
+                    return Ok(None);
+                }
+                // SAFETY: the file is this compile's own scratch file, written
+                // by `spill` and not changed or truncated while mapped.
+                unsafe { memmap2::Mmap::map(&file) }.map(Some)
+            })
+            .map_err(|error| format!("Failed to map spilled way facts {path:?}: {error}"))?;
+        match map {
+            Some(map) => self.mapped = Some((map, path)),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
         Ok(())
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.mapped {
+            Some((map, _)) => map,
+            None => &self.bytes,
+        }
     }
 
     fn get(&self, way_id: i64) -> Result<Option<RoadWayFacts>, String> {
@@ -503,9 +528,20 @@ impl EncodedWayFacts {
             return Ok(None);
         };
         let offset = self.index[position].1 as usize;
-        codec::take_from_slice(&self.bytes[offset..])
+        codec::take_from_slice(&self.bytes()[offset..])
             .map(|(facts, _)| Some(facts))
             .map_err(|error| format!("Failed to decode way facts for way {way_id}: {error}"))
+    }
+}
+
+impl Drop for EncodedWayFacts {
+    fn drop(&mut self) {
+        if let Some((map, path)) = self.mapped.take() {
+            // Unmapped first: a mapped file cannot be removed on Windows. The
+            // scratch directory goes at the end of the compile regardless.
+            drop(map);
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
