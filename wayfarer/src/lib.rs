@@ -76,6 +76,11 @@ mod queries;
 #[cfg(feature = "reference")]
 #[doc(hidden)]
 pub mod reference;
+// Prototype of a search across regions (feature `experimental-regions`): not
+// a supported API, changes without notice.
+#[cfg(feature = "experimental-regions")]
+#[doc(hidden)]
+pub mod regions;
 mod route_leg;
 pub mod sar;
 mod search;

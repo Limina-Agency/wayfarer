@@ -71,3 +71,7 @@ wayfarer-road-graph = { workspace = true, features = ["snapshot"] }
 wayfarer = { path = ".", features = ["reference", "debug-env"] }
 petgraph = { workspace = true }
 tempfile = "3"
+
+[[example]]
+name = "seam_parity"
+required-features = ["experimental-regions"]
