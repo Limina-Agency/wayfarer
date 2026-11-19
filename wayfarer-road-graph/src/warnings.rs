@@ -180,7 +180,7 @@ pub(crate) fn add_edge_quality_warnings(
                     ),
                     edge_id: Some(edge.edge_id),
                     component_id: edge.component_id,
-                    source_lineage_ids: edge.source_lineage_ids.clone(),
+                    source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
             );
@@ -199,7 +199,7 @@ pub(crate) fn add_edge_quality_warnings(
                     ),
                     edge_id: Some(edge.edge_id),
                     component_id: edge.component_id,
-                    source_lineage_ids: edge.source_lineage_ids.clone(),
+                    source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
             );
@@ -314,7 +314,7 @@ pub(crate) fn add_rich_road_fact_coverage_warnings(
                     ),
                     edge_id: Some(edge.edge_id),
                     component_id: edge.component_id,
-                    source_lineage_ids: edge.source_lineage_ids.clone(),
+                    source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
             );
@@ -481,7 +481,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         ),
                         edge_id: Some(edge.edge_id),
                         component_id: edge.component_id,
-                        source_lineage_ids: edge.source_lineage_ids.clone(),
+                        source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
                 );
@@ -502,7 +502,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         ),
                         edge_id: Some(edge.edge_id),
                         component_id: edge.component_id,
-                        source_lineage_ids: edge.source_lineage_ids.clone(),
+                        source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
                 );
@@ -523,7 +523,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         ),
                         edge_id: Some(edge.edge_id),
                         component_id: edge.component_id,
-                        source_lineage_ids: edge.source_lineage_ids.clone(),
+                        source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
                 );
@@ -543,7 +543,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         ),
                         edge_id: Some(edge.edge_id),
                         component_id: edge.component_id,
-                        source_lineage_ids: edge.source_lineage_ids.clone(),
+                        source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
                 );
@@ -564,7 +564,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         ),
                         edge_id: Some(edge.edge_id),
                         component_id: edge.component_id,
-                        source_lineage_ids: edge.source_lineage_ids.clone(),
+                        source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
                 );
@@ -585,7 +585,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         ),
                         edge_id: Some(edge.edge_id),
                         component_id: edge.component_id,
-                        source_lineage_ids: edge.source_lineage_ids.clone(),
+                        source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
                 );
@@ -643,7 +643,7 @@ pub(crate) fn add_topology_integrity_warnings(
                     ),
                     edge_id: Some(edge.edge_id),
                     component_id: edge.component_id,
-                    source_lineage_ids: edge.source_lineage_ids.clone(),
+                    source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
             );
@@ -673,7 +673,7 @@ pub(crate) fn add_dead_end_quality_warnings(
         let mut source_lineage_ids = BTreeSet::new();
         for edge_ref in graph.graph.edges(node_index) {
             let edge = edge_ref.weight();
-            source_lineage_ids.extend(edge.source_lineage_ids.iter().copied());
+            source_lineage_ids.extend(edge_lineage(graph, info_index_by_id, edge));
             if shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id).is_some_and(
                 |info| !info.attrs.is_service_like && info.attrs.road_type != RoadType::Path,
             ) {
@@ -682,7 +682,7 @@ pub(crate) fn add_dead_end_quality_warnings(
         }
         for edge_ref in graph.graph.edges_directed(node_index, Direction::Incoming) {
             let edge = edge_ref.weight();
-            source_lineage_ids.extend(edge.source_lineage_ids.iter().copied());
+            source_lineage_ids.extend(edge_lineage(graph, info_index_by_id, edge));
             if shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id).is_some_and(
                 |info| !info.attrs.is_service_like && info.attrs.road_type != RoadType::Path,
             ) {
@@ -844,6 +844,18 @@ fn matching_shortcut_successor(
         }
     }
     candidate
+}
+
+/// The source lineage of `edge`: its shared info's (none when the info is
+/// missing).
+fn edge_lineage(
+    graph: &RoadGraph,
+    info_index_by_id: &SharedInfoIndex,
+    edge: &RoadEdge,
+) -> Vec<i64> {
+    shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id)
+        .map(|info| info.source_lineage_ids.to_vec())
+        .unwrap_or_default()
 }
 
 pub(crate) fn push_quality_example(

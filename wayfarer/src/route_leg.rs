@@ -1400,8 +1400,6 @@ mod tests {
             is_link: false,
             is_destination_only: false,
             access_restricted: false,
-            source_lineage_ids: Vec::new(),
-            coverage_id: None,
             area: None,
             area_highway: None,
             conditional_restrictions: Vec::new(),
