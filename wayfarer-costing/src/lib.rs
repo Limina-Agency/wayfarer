@@ -791,15 +791,17 @@ impl<'a> CostModel<'a> {
         }
         // An opened edge is usable whatever its legal access says.
         let opened = overrides.edge_opened(record.edge_id);
-        if !opened
-            && !overrides.ignores_conditional_access()
-            && active_conditional_access_block(
+        let mut flags = record.flags;
+        if !opened && !overrides.ignores_conditional_access() {
+            match active_conditional_access(
                 record.conditional_restrictions,
                 self.costing_options(),
                 self.profile_policy,
-            )
-        {
-            return EdgeCostDecision::NotAccessible;
+            ) {
+                ConditionalAccess::Closed => return EdgeCostDecision::NotAccessible,
+                ConditionalAccess::DestinationOnly => flags.0 |= EdgeCostFlags::DESTINATION_ONLY,
+                ConditionalAccess::Unchanged => {}
+            }
         }
         // A SAR relaxation opens an edge the profile may not legally use, at
         // its cost with legal access times the relaxation's factor.
@@ -813,7 +815,6 @@ impl<'a> CostModel<'a> {
                 None => return EdgeCostDecision::NotAccessible,
             }
         }
-        let flags = record.flags;
         if record.has_ford() && !self.costing_options().allow_ford {
             return EdgeCostDecision::NotAccessible;
         }
@@ -1447,23 +1448,48 @@ pub fn positive_speed(speed: Option<f64>) -> Option<f64> {
     speed.filter(|value| value.is_finite() && *value > 0.0)
 }
 
+/// What the active `*:conditional` access tags do to an edge for a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConditionalAccess {
+    /// No active tag binds the profile, or none limits it.
+    Unchanged,
+    /// Open only to reach somewhere on it (`destination`, `private`, …), as
+    /// a way with that static access is (see `EdgeCostFlags::DESTINATION_ONLY`).
+    DestinationOnly,
+    /// Closed (`no`, or `private` to everyone but motor vehicles).
+    Closed,
+}
+
+/// The strongest effect of the `*:conditional` access tags active at the
+/// options' evaluation time on `profile`; [`ConditionalAccess::Unchanged`]
+/// without an evaluation time.
+pub fn active_conditional_access(
+    conditional_restrictions: &[String],
+    options: &RouteCostingOptions,
+    profile: ProfilePolicy,
+) -> ConditionalAccess {
+    let Some(timestamp_ms) = options.conditional_restriction_eval_at_ms else {
+        return ConditionalAccess::Unchanged;
+    };
+    conditional_restrictions
+        .iter()
+        .flat_map(|restriction| parse_conditional_restrictions(restriction))
+        .filter(|parsed| conditional_key_blocks_profile(&parsed.key, profile))
+        .filter(|parsed| parsed_condition_active(parsed.condition.as_deref(), timestamp_ms))
+        .map(|parsed| parsed.access_effect(profile))
+        .max()
+        .unwrap_or(ConditionalAccess::Unchanged)
+}
+
+/// Whether an active `*:conditional` tag closes the edge to `profile` (see
+/// [`active_conditional_access`]).
 pub fn active_conditional_access_block(
     conditional_restrictions: &[String],
     options: &RouteCostingOptions,
     profile: ProfilePolicy,
 ) -> bool {
-    let Some(timestamp_ms) = options.conditional_restriction_eval_at_ms else {
-        return false;
-    };
-    conditional_restrictions.iter().any(|restriction| {
-        parse_conditional_restrictions(restriction)
-            .into_iter()
-            .any(|parsed| {
-                parsed.value_is_no()
-                    && parsed_condition_active(parsed.condition.as_deref(), timestamp_ms)
-                    && conditional_key_blocks_profile(&parsed.key, profile)
-            })
-    })
+    active_conditional_access(conditional_restrictions, options, profile)
+        == ConditionalAccess::Closed
 }
 
 /// The first `*:conditional` tag whose closure (`no` at the options'
@@ -1482,9 +1508,9 @@ pub fn active_conditional_access_closure<'r>(
             parse_conditional_restrictions(restriction)
                 .into_iter()
                 .any(|parsed| {
-                    parsed.value_is_no()
+                    conditional_key_blocks_profile(&parsed.key, profile)
+                        && parsed.access_effect(profile) == ConditionalAccess::Closed
                         && parsed_condition_active(parsed.condition.as_deref(), timestamp_ms)
-                        && conditional_key_blocks_profile(&parsed.key, profile)
                 })
         })
         .map(String::as_str)
@@ -1514,19 +1540,31 @@ pub struct ParsedConditionalRestriction {
 }
 
 impl ParsedConditionalRestriction {
-    fn value_is_no(&self) -> bool {
-        matches!(
-            self.value.as_str(),
-            "no" | "private" | "destination" | "customers" | "delivery"
-        )
+    /// What the value does to `profile` while active, as the same static
+    /// access value does: `no` (and `military`, `agricultural`, `forestry`)
+    /// closes; `private` and `customers` leave motor
+    /// vehicles a destination-only way and close it to everyone else;
+    /// `destination`, `delivery` and `permit` make it destination-only for
+    /// vehicles.
+    fn access_effect(&self, profile: ProfilePolicy) -> ConditionalAccess {
+        match self.value.as_str() {
+            "no" | "military" | "agricultural" | "forestry" => ConditionalAccess::Closed,
+            "private" | "customers" if profile.is_vehicle_like() => {
+                ConditionalAccess::DestinationOnly
+            }
+            "private" | "customers" => ConditionalAccess::Closed,
+            "destination" | "delivery" | "permit" if profile.is_vehicle_like() => {
+                ConditionalAccess::DestinationOnly
+            }
+            _ => ConditionalAccess::Unchanged,
+        }
     }
 }
 
 pub fn parse_conditional_restrictions(value: &str) -> Vec<ParsedConditionalRestriction> {
     let mut restrictions = Vec::new();
     let mut inherited_key: Option<String> = None;
-    for clause in value
-        .split(';')
+    for clause in split_outside_parentheses(value, ';')
         .map(str::trim)
         .filter(|clause| !clause.is_empty())
     {
@@ -1540,6 +1578,20 @@ pub fn parse_conditional_restrictions(value: &str) -> Vec<ParsedConditionalRestr
         }
     }
     restrictions
+}
+
+/// `value` split at each `separator` outside parentheses: a condition in
+/// parentheses may hold `;` itself (`no @ (Mo-Fr 07:00-09:00; Sa 08:00-12:00)`).
+fn split_outside_parentheses(value: &str, separator: char) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    value.split(move |ch: char| {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        ch == separator && depth == 0
+    })
 }
 
 pub fn parse_conditional_restriction(value: &str) -> Option<ParsedConditionalRestriction> {
@@ -1592,12 +1644,14 @@ pub fn split_conditional_clause(value: &str) -> (&str, Option<&str>) {
         })
 }
 
+/// Whether a conditional access key binds `profile`. The profiles are cars
+/// (and other motor vehicles) and walkers: `bicycle`, `hgv`, `goods`, `bus`
+/// and `psv` bind none of them.
 pub fn conditional_key_blocks_profile(key: &str, profile: ProfilePolicy) -> bool {
     match key {
         "access" => true,
-        "vehicle" | "motor_vehicle" | "motorcar" | "hgv" | "bus" => profile.is_vehicle_like(),
+        "vehicle" | "motor_vehicle" | "motorcar" => profile.is_vehicle_like(),
         "foot" | "pedestrian" => profile.is_pedestrian_like(),
-        "bicycle" => profile.is_pedestrian_like(),
         _ => false,
     }
 }
@@ -1631,7 +1685,18 @@ pub fn parsed_condition_active(condition: Option<&str>, timestamp_ms: i64) -> bo
         .any(|part| condition_part_active(part, datetime))
 }
 
+/// Whether one `;`-separated part of a condition holds at `datetime`. Each
+/// `AND` term must hold; a term with no date, weekday or time (a vehicle
+/// property such as `weight>7.5`, or `wet`) never holds, as the request has
+/// no vehicle that could meet it.
 pub fn condition_part_active(part: &str, datetime: chrono::DateTime<chrono::Utc>) -> bool {
+    let words = part.split_whitespace().collect::<Vec<_>>();
+    words
+        .split(|word| *word == "AND")
+        .all(|term| condition_term_active(&term.join(" "), datetime))
+}
+
+fn condition_term_active(part: &str, datetime: chrono::DateTime<chrono::Utc>) -> bool {
     let date_active = date_range_active(part, datetime.date_naive());
     let weekday_active = weekday_condition_active(part, datetime.weekday());
     let time_active = time_condition_active(part, datetime.hour() * 60 + datetime.minute());
@@ -1787,7 +1852,8 @@ pub fn parse_time_minutes(value: &str) -> Option<u32> {
         .split_once(':')?;
     let hour = hour.parse::<u32>().ok()?;
     let minute = minute.parse::<u32>().ok()?;
-    if hour < 24 && minute < 60 {
+    // `24:00` is the end of the day (`22:00-24:00`).
+    if (hour < 24 && minute < 60) || (hour, minute) == (24, 0) {
         Some(hour * 60 + minute)
     } else {
         None
@@ -2254,5 +2320,232 @@ impl Default for RouteCostBreakdown {
             turn_penalty: 0.0,
             total_cost: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAR: ProfilePolicy = ProfilePolicy::Wheeled(WheeledPolicy);
+    const WALKER: ProfilePolicy = ProfilePolicy::OnFoot(OnFootPolicy);
+
+    /// Options evaluating conditionals on 2026-11-`day` (the 18th is a
+    /// Wednesday, the 21st a Saturday) at `hour`:`minute` UTC.
+    fn at(day: u32, hour: u32, minute: u32) -> RouteCostingOptions {
+        let time = chrono::NaiveDate::from_ymd_opt(2026, 11, day)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap()
+            .and_utc();
+        RouteCostingOptions {
+            conditional_restriction_eval_at_ms: Some(time.timestamp_millis()),
+            ..RouteCostingOptions::default()
+        }
+    }
+
+    fn access(
+        tag: &str,
+        options: &RouteCostingOptions,
+        profile: ProfilePolicy,
+    ) -> ConditionalAccess {
+        active_conditional_access(&[tag.to_string()], options, profile)
+    }
+
+    #[test]
+    fn conditional_keys_bind_only_the_profiles_they_name() {
+        let options = at(18, 8, 0);
+        let always = "@ (Mo-Su 00:00-24:00)";
+        for (key, car, walker) in [
+            (
+                "access",
+                ConditionalAccess::Closed,
+                ConditionalAccess::Closed,
+            ),
+            (
+                "vehicle",
+                ConditionalAccess::Closed,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "motor_vehicle",
+                ConditionalAccess::Closed,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "motorcar",
+                ConditionalAccess::Closed,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "foot",
+                ConditionalAccess::Unchanged,
+                ConditionalAccess::Closed,
+            ),
+            (
+                "bicycle",
+                ConditionalAccess::Unchanged,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "hgv",
+                ConditionalAccess::Unchanged,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "goods",
+                ConditionalAccess::Unchanged,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "bus",
+                ConditionalAccess::Unchanged,
+                ConditionalAccess::Unchanged,
+            ),
+            (
+                "psv",
+                ConditionalAccess::Unchanged,
+                ConditionalAccess::Unchanged,
+            ),
+        ] {
+            let tag = format!("{key}:conditional=no {always}");
+            assert_eq!(access(&tag, &options, CAR), car, "{tag} for cars");
+            assert_eq!(access(&tag, &options, WALKER), walker, "{tag} for walkers");
+        }
+    }
+
+    #[test]
+    fn destination_and_private_limit_vehicles_to_destination_traffic() {
+        let weekend = "motor_vehicle:conditional=destination @ (Sa,Su)";
+        assert_eq!(
+            access(weekend, &at(21, 12, 0), CAR),
+            ConditionalAccess::DestinationOnly
+        );
+        assert_eq!(
+            access(weekend, &at(18, 12, 0), CAR),
+            ConditionalAccess::Unchanged
+        );
+        assert_eq!(
+            access(weekend, &at(21, 12, 0), WALKER),
+            ConditionalAccess::Unchanged
+        );
+        // As static `access=private`: motor vehicles may reach somewhere on
+        // the way, everyone else is kept out.
+        let private = "access:conditional=private @ (Mo-Fr 06:00-18:00)";
+        assert_eq!(
+            access(private, &at(18, 8, 0), CAR),
+            ConditionalAccess::DestinationOnly
+        );
+        assert_eq!(
+            access(private, &at(18, 8, 0), WALKER),
+            ConditionalAccess::Closed
+        );
+        let delivery = "access:conditional=delivery @ (Mo-Fr 06:00-18:00)";
+        assert_eq!(
+            access(delivery, &at(18, 8, 0), CAR),
+            ConditionalAccess::DestinationOnly
+        );
+        assert_eq!(
+            access(delivery, &at(18, 8, 0), WALKER),
+            ConditionalAccess::Unchanged
+        );
+        // Neither counts as a closure for the SAR `conditional` relaxation.
+        assert_eq!(
+            active_conditional_access_closure(
+                &[weekend.to_string()],
+                &at(21, 12, 0),
+                MobilityProfile::Wheeled
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_strongest_active_clause_wins() {
+        let tag = "access:conditional=destination @ (Mo-Fr); no @ (Mo-Fr 07:00-09:00)";
+        assert_eq!(access(tag, &at(18, 8, 0), CAR), ConditionalAccess::Closed);
+        assert_eq!(
+            access(tag, &at(18, 12, 0), CAR),
+            ConditionalAccess::DestinationOnly
+        );
+        assert_eq!(
+            access(tag, &at(21, 8, 0), CAR),
+            ConditionalAccess::Unchanged
+        );
+    }
+
+    #[test]
+    fn semicolons_inside_parentheses_separate_condition_parts_not_clauses() {
+        let tag = "access:conditional=no @ (Mo-Fr 07:00-09:00; Sa 10:00-12:00); destination @ (Su)";
+        let parsed = parse_conditional_restrictions(tag);
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|parsed| (
+                    parsed.key.as_str(),
+                    parsed.value.as_str(),
+                    parsed.condition.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("access", "no", Some("Mo-Fr 07:00-09:00; Sa 10:00-12:00")),
+                ("access", "destination", Some("Su")),
+            ]
+        );
+        assert_eq!(access(tag, &at(18, 8, 0), CAR), ConditionalAccess::Closed);
+        assert_eq!(access(tag, &at(21, 11, 0), CAR), ConditionalAccess::Closed);
+        assert_eq!(
+            access(tag, &at(21, 13, 0), CAR),
+            ConditionalAccess::Unchanged
+        );
+        assert_eq!(
+            access(tag, &at(22, 13, 0), CAR),
+            ConditionalAccess::DestinationOnly
+        );
+    }
+
+    #[test]
+    fn every_and_term_must_hold() {
+        // No request vehicle weighs over 7.5 t, so the closure never binds.
+        let heavy = "motor_vehicle:conditional=no @ (weight>7.5 AND Mo-Fr 06:00-22:00)";
+        assert_eq!(
+            access(heavy, &at(18, 8, 0), CAR),
+            ConditionalAccess::Unchanged
+        );
+        let timed = "motor_vehicle:conditional=no @ (Mo-Fr AND 06:00-22:00)";
+        assert_eq!(access(timed, &at(18, 8, 0), CAR), ConditionalAccess::Closed);
+        assert_eq!(
+            access(timed, &at(18, 23, 0), CAR),
+            ConditionalAccess::Unchanged
+        );
+        assert_eq!(
+            access(timed, &at(21, 8, 0), CAR),
+            ConditionalAccess::Unchanged
+        );
+    }
+
+    #[test]
+    fn midnight_may_be_written_as_24_00() {
+        assert_eq!(parse_time_minutes("24:00"), Some(1440));
+        assert_eq!(parse_time_minutes("24:30"), None);
+        assert_eq!(parse_time_minutes("25:00"), None);
+        let late = "access:conditional=no @ (22:00-24:00)";
+        assert_eq!(
+            access(late, &at(18, 23, 30), CAR),
+            ConditionalAccess::Closed
+        );
+        assert_eq!(
+            access(late, &at(18, 21, 30), CAR),
+            ConditionalAccess::Unchanged
+        );
+    }
+
+    #[test]
+    fn no_evaluation_time_changes_nothing() {
+        let tag = "access:conditional=no @ (Mo-Su 00:00-24:00)";
+        assert_eq!(
+            access(tag, &RouteCostingOptions::default(), CAR),
+            ConditionalAccess::Unchanged
+        );
     }
 }
