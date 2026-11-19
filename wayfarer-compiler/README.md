@@ -121,6 +121,11 @@ Apple-silicon Mac with 10 cores, 2026-11-17):
 | Małopolskie (194 MiB PBF, 1.07M nodes, 2.56M edges) | `Standard` | 4 | 1,746 MiB | `3e28f62f…`, 272,076,864 B |
 | Małopolskie | `Low` | 4 | 1,717 MiB | identical |
 
+The packages in the table are format 1, as 0.1.0 wrote them. Format 2 (0.2.0)
+stores a CCH node order instead of landmark distances: Monaco's package is
+`2c86fe9f…`, 665,408 B (`fixtures/monaco-info.json`) and Małopolskie's
+176 MiB.
+
 At Monaco's size both profiles keep the node store in RAM and the peak is
 mostly the binary, its threads and buffers; the profiles differ in batch and
 queue sizes. On a region the peak is the road graph's data, not buffers, so
@@ -134,7 +139,7 @@ resident.
 Version 0.x: the library API may change between minor releases; the
 `wayfarer` command line is the stable way to run a build.
 
-- The package layout is versioned (`ROUTING_PACKAGE_FORMAT_VERSION`, 1 today);
+- The package layout is versioned (`ROUTING_PACKAGE_FORMAT_VERSION`, 2 today);
   see the routing package format crate for which formats an engine opens.
 - Packages record the costing model they were baked with
   (`COSTING_MODEL_VERSION`, 1 today). An engine opens packages of its own

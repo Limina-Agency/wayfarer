@@ -5,7 +5,35 @@ engine, service and C ABI crates) and `wayfarer-compiler-v*` (the compiler, the
 `wayfarer` binary and their crates). Each entry names the package format, the
 costing model and the C ABI version a release reads or writes.
 
-## Unreleased
+## 0.2.0 (2026-11-19)
+
+Both lines. Package format 2 (reads 2 only), costing model 1, C ABI version 1.
+
+### Migrating from 0.1
+
+- **Recompile every package.** Format 1 packages fail to open with
+  `Outdated`; compile the extract again with a 0.2 compiler. Dataset hashes
+  change, so overlay sets bound to a 0.1 package fall back to their geometry.
+- **Removed Rust items:** `PackageCounts::landmark_count`,
+  `profile_landmark_capacity`, `DEFAULT_LANDMARK_COUNT`,
+  `PackageBuildOptions::landmark_count`, the landmark and SAR metric fields
+  of `PackageBuildReport`, and the `PotentialStats` fields `stored_order`,
+  `degree2_eliminated` and `top_separator`. The compile stage `landmarks` is
+  `cch_order` (`CompileStage::CchOrder`, `PackageBuildReport::cch_order_ms`,
+  JSON `cchOrderMs`); `wayfarer info` drops `landmarkCount`.
+- **Debug switches:** `WAYFARER_POTENTIAL=auto|alt|cch` is
+  `WAYFARER_POTENTIALS=on|off` (`internals::set_potentials` replaces
+  `internals::set_potential`); `WAYFARER_MATRIX_MODE=buckets` is gone, and
+  `WAYFARER_MATRIX_MODE`, `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS` and
+  `WAYFARER_CCH_ROW_TARGETS` need the `debug-env` feature.
+- **Alternatives change.** Alternatives on packages with potentials come from
+  via edges, so the alternatives returned differ from 0.1's (the best route
+  does not). Vehicle matrices of 51 to 100 targets differ in the last bits of
+  their costs, distances and durations.
+- The JSON request and result shapes and the C ABI are otherwise unchanged;
+  `wayfarer_open_w` and `wayfarer_verify_w` are new on Windows.
+
+### Changes
 
 - **Package format 2: CCH potentials instead of landmarks.** The compiler
   stores the node order of CCH potentials (new section `CchRank`, computed
@@ -76,6 +104,21 @@ costing model and the C ABI version a release reads or writes.
   table. Cells take the same paths and statuses as before; matrices of 51
   to 100 targets, now rows, differ from pairwise in the last bits of their
   costs, distances and durations only.
+
+- **Packages open on 32-bit targets.** Every package was rejected as
+  invalid there: a `u32::MAX` key in `ComponentSizes` compared equal to the
+  "any key" bound. Header counts, offsets and lengths are now converted
+  with `usize::try_from` instead of truncated.
+- **More hostile packages are rejected instead of panicking** (found by the
+  `package` fuzz target with debug assertions): header counts whose section
+  sizes overflow, an edge id base near `u64::MAX`, a request grid whose cell
+  count overflows, headings of 360 degrees or more, and piece chains that
+  mark a junction. Opening Malopolskie checks the chains in about 3 ms.
+  `fuzz/README.md` says to fuzz with `--debug-assertions`.
+- **CI on Windows and i686** (workspace tests, the Monaco package compared
+  with `fixtures/monaco-info.json` byte for byte, and a route), the Monaco
+  determinism test runs by default again, and CI checks rustdoc warnings
+  and dependencies (`cargo deny`: advisories, licenses, sources).
 
 ## 0.1.3 (2026-11-17)
 
