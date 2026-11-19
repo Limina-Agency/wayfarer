@@ -1,7 +1,7 @@
 # Wayfarer roadmap to 1.0
 
 Status: proposal, written against 0.1.3 (2026-11-17). It is meant to be argued
-with: every milestone lists what it delivers, why, and what has to be decided
+with: every release lists what it delivers, why, and what has to be decided
 first. Open questions are collected at the end.
 
 ## 1. What 1.0 means
@@ -23,7 +23,7 @@ first. Open questions are collected at the end.
 
 Breaking changes are cheap now and expensive after 1.0, so the plan front-loads
 the API redesign and leaves feature work that is additive for later
-milestones.
+releases.
 
 ## 2. Where Wayfarer stands (0.1.3)
 
@@ -118,7 +118,7 @@ These are where Wayfarer can lead rather than catch up:
 |---|---|---|---|
 | Rust API | 9 crates, all 0.x, wide re-exports | A named set of public crates (proposal below); the rest internal | semver; `cargo-semver-checks` in CI |
 | JSON wire format | Follows the engine crate; no version field | `apiVersion` in requests/results; schemas published per version | Additive only: new optional fields, new enum values (clients must tolerate unknowns) |
-| C ABI | ABI 1 | ABI 2, designed once at 0.3 | Additive only: new functions, never changed signatures |
+| C ABI | ABI 1 | ABI 2, designed once in 0.18 | Additive only: new functions, never changed signatures |
 | Package format | Format 1, reads N-1 for one release | Format frozen at 1.0 | Every 1.x engine reads every package a 1.x compiler wrote |
 | Costing model | Model 1; older models re-costed | Versioned separately | A model change never needs a new engine to open old packages |
 | Determinism | Same bytes on every platform | Same | Same |
@@ -280,7 +280,7 @@ Priorities: **P0** required for 1.0, **P1** strongly wanted for 1.0,
     nodes, run ALT on the core. Less work, smaller win.
   - *Multi-level partitions (MLD-style)*: also fits dynamic metrics and
     makes country scale possible.
-  Run a spike on Małopolskie with each before choosing (milestone 0.4). The
+  Run a spike on Małopolskie with each before choosing (release 0.8). The
   exactness guarantee and the `reference` oracle stay.
 - **Package size.** Landmarks are 34%. A hierarchy may replace most landmark
   rows; otherwise make landmark count a compile option.
@@ -359,87 +359,223 @@ Priorities: **P0** required for 1.0, **P1** strongly wanted for 1.0,
 - `#![deny(missing_docs)]` on public crates.
 - A security support policy for 1.x (fixes for the latest 1.x minor).
 
-## 7. Milestones
+## 7. Release plan
 
-Durations are rough and assume the current pace; they are meant to set order,
-not dates.
+### 7.1 How releases are numbered
 
-### 0.2 — Ground truth (short)
+We have room for many releases before 1.0 (0.2 up to 0.99), so each release is
+small and has one theme. The numbers are grouped into series of ten; a series
+is a phase, and each release inside it is one shippable step.
 
-Low-risk work that makes later breaking changes safe.
+- **One theme per release.** A release does one thing well and says so in the
+  changelog. Small releases are easier to gate (`benchmarks/gates/`), review
+  and roll back.
+- **In cargo, every 0.x minor is a breaking release** (`0.12` → `0.13`), and
+  patches (`0.12.1`) are fixes only. So a release that only adds things is
+  still a minor bump; that's fine, it just signals nothing broke.
+- **Breaking changes get a release of their own** with a migration note in
+  the changelog. Where we can, deprecate in one release and remove in the
+  next, so hosts always have one release to move.
+- **Package format and costing model bumps are rare and announced**: at most
+  one format bump per series, and the engine keeps reading the previous
+  format (section 4).
+- **Gaps in numbering are fine.** If a series needs fewer releases, the next
+  series still starts at its round number, so the version tells you the phase
+  at a glance. If a series needs more than ten, it spills into the next
+  number range and the later series shift.
 
-- Fix the documentation drift (5.8).
-- CI on macOS and Windows; MSRV job; nightly Małopolskie gate and fuzzing.
-- `cargo-semver-checks`, schema diff and header diff jobs (informational
-  until 1.0).
-- Decide the public crate set and the release-line question (open questions 1
-  and 5).
-- Seed the issue tracker with this roadmap's items, one issue each, labelled by
-  milestone and priority.
-- Encoded polyline output (additive, cheap).
+The series:
 
-### 0.3 — API redesign (breaking)
+| Series | Phase | Breaks the API? |
+|---|---|---|
+| 0.2 – 0.9 | Foundations: CI, docs, tooling, spikes, cheap wins | Rarely |
+| 0.10 – 0.19 | API redesign | Yes, one area per release |
+| 0.20 – 0.29 | Speed | Package format 2 |
+| 0.30 – 0.39 | Terrain and time | Additive mostly |
+| 0.40 – 0.49 | Field analysis features | Additive |
+| 0.50 – 0.59 | Guidance | Additive |
+| 0.60 – 0.69 | Scale and data | Package format 3 if needed |
+| 0.70 – 0.79 | Platforms and bindings | No |
+| 0.80 – 0.89 | Hardening and docs | Last breaking changes |
+| 0.90 – 0.99 | Release candidates, API frozen | No |
+| 1.0 | Stable | — |
 
-The one big breaking release.
+Durations are left out on purpose: they depend on who works on it (open
+question 10). Order matters more than dates.
 
-- Module layout, prefix removal, `#[non_exhaustive]`, builders (5.1).
-- Unified overlay model (5.2) and stable edge references (5.4).
-- Profile base + parameters, one time object (5.2).
-- Lean results with `include`, consistent fallibility (5.3).
-- One error vocabulary (5.5).
-- JSON wire `apiVersion` 1; serde aliases removed; one unknown-field rule.
-- C ABI 2 (5.6); compile request unified (5.7).
-- Internal crates hidden; `wayfarer-service` folded or trimmed.
-- Migration guide from 0.1.
+### 7.2 0.2 – 0.9: Foundations
 
-Dependency: the overlay model must be designed with the 0.4 speed-up in mind
-(how an overlay patch is searched over a hierarchy). Do the 0.4 spike before
-freezing the overlay semantics.
+Low-risk work that makes the breaking releases safe, plus the spike the API
+redesign depends on.
 
-### 0.4 — Speed
+- **0.2 — Docs truth.** Fix the documentation drift (5.8). Seed the issue
+  tracker with this roadmap, one issue per item, labelled by release and
+  priority.
+- **0.3 — CI matrix.** macOS and Windows jobs, an MSRV job, iOS and Android
+  cross-build checks.
+- **0.4 — Compatibility tooling.** `cargo-semver-checks`, a schema diff and a
+  C header diff on every PR (informational until 0.90, enforced after).
+- **0.5 — Scheduled gates.** Nightly Małopolskie gate and time-boxed fuzzing
+  with a kept corpus; latency p50/p95 recorded per run.
+- **0.6 — Geometry encodings.** Encoded polyline (precision 6) and GeoJSON
+  output options. Additive and cheap, and makes FFI results much smaller.
+- **0.7 — Quality regions.** A dense city and a mountainous rural region join
+  Małopolskie in the Valhalla comparison and the regression gates.
+- **0.8 — Speed-up spike.** CCH, core-ALT and partitions prototyped on
+  Małopolskie behind a feature flag; a written decision with numbers (latency,
+  package size, compile time, how overlays are searched). Nothing ships to
+  users from it yet.
+- **0.9 — Decisions recorded.** Public crate set, release lines, package
+  compatibility window, audience (open questions 1, 4, 5, 6) written into this
+  document and the READMEs. Deprecation warnings added for everything the
+  0.10 series will remove.
 
-- Speed-up spike (CCH vs core-ALT vs partitions), then implementation.
-- p95 target met on Małopolskie (proposal: under 30 ms single thread),
-  package not larger than today.
-- Many-to-many on the new structure.
-- Package format 2 (keeps reading format 1 per the policy).
+### 7.3 0.10 – 0.19: API redesign
 
-### 0.5 — Terrain and time
+One area per release, each with a migration note. The order puts the
+foundations (modules, errors) first and the parts that depend on the speed-up
+decision (overlays) after 0.8's spike.
 
-- Elevation ingest, costing and profiles.
-- Departure and arrive-by, time-evaluated restrictions and overlay windows.
-- Bicycle and truck presets.
+- **0.10 — Modules and names.** Module layout, `Route*` prefixes dropped,
+  small prelude, `#[non_exhaustive]` on results and enums, legacy names
+  removed (5.1). Old paths kept as deprecated re-exports for one release.
+- **0.11 — Internal crates.** `internals` moved behind a feature;
+  `wayfarer-road-graph`, `wayfarer-line-network` and `wayfarer-costing`
+  hidden or merged; `wayfarer-service` folded or trimmed (per 0.9's decision).
+- **0.12 — Errors.** One error vocabulary with stable codes across Rust, JSON
+  and C; consistent `Result` for request-level failures (5.5, 5.3).
+- **0.13 — Wire format rules.** `apiVersion` 1 on requests and results; serde
+  aliases removed; one unknown-field rule for every request (5.2).
+- **0.14 — Stable edge references.** OSM-based edge refs and the resolver,
+  compact ids as the fast path (5.4). Overlay sets gain exact rebinding.
+- **0.15 — Unified overlays.** One overlay model (target + effect + filter +
+  window) replacing the edge-level knobs, `RouteDynamicOverlay` and
+  per-leg overlays (5.2).
+- **0.16 — Profiles.** Profile base plus typed parameters; existing profiles
+  become presets; `RouteCostingOptions` folded in; one time object (5.2).
+- **0.17 — Lean results.** Core result plus `include` for detail; diagnostics
+  under one unstable key (5.3).
+- **0.18 — C ABI 2.** Merged `*_with_cancel` calls, open options, header
+  frozen for review (5.6).
+- **0.19 — Compiler surface.** One compile request format, compiler options
+  (baked profiles, landmark count, clip polygon), and the full migration guide
+  from 0.1 to 0.19 (5.7).
 
-### 0.6 — Field features
+### 7.4 0.20 – 0.29: Speed
 
-- Trip optimization, nearest-k, isochrone polygons, multi-origin and reverse
-  isochrones.
-- Localized guidance, lanes and signs.
-- Clip polygon and multi-extract compile.
+- **0.20 — Package format 2.** Layout for the chosen speed-up; the engine
+  still reads format 1.
+- **0.21 — Hierarchy build.** Compiler builds the hierarchy (or partitions)
+  deterministically; compile time and memory gated.
+- **0.22 — Point-to-point on the hierarchy.** Exactness checked against the
+  `reference` oracle; p95 target met on Małopolskie (proposal: under 30 ms
+  single thread).
+- **0.23 — Overlays on the hierarchy.** Per-request overlays and SAR
+  relaxations keep their semantics and stay exact.
+- **0.24 — Alternatives** on the new search.
+- **0.25 — Many-to-many** with buckets on the hierarchy; 1000×1000 measured.
+- **0.26 — Isochrones and map matching** moved to the new structure where it
+  helps.
+- **0.27 — Package size.** Landmark rows trimmed or made optional; package not
+  larger than 0.1's.
+- **0.28 — Latency budget enforced** in CI (p50 and p95 gates).
+- **0.29 — Format 1 reading kept or dropped** per the compatibility decision.
 
-### 0.7 — Scale and platforms
+### 7.5 0.30 – 0.39: Terrain and time
 
-- Country-scale measurements and fixes.
-- iOS/Android artifacts; Swift, Kotlin and Python bindings.
-- Quality comparison on three regions.
+- **0.30 — DEM ingest.** SRTM / Copernicus GLO-30 at compile time,
+  deterministic, per-edge climb and descent stored.
+- **0.31 — Elevation costing on foot.** Tobler-style speeds for `OnFoot` and
+  `Legged`; elevation profile in results.
+- **0.32 — Vehicle grade costing.**
+- **0.33 — Bicycle preset** (access is already read by the compiler).
+- **0.34 — Truck preset.** Dimensions and weights costed (`maxheight`,
+  `maxweight` are already parsed).
+- **0.35 — Depart-at done properly.** Conditional restrictions and overlay
+  windows evaluated along the route, not once per request.
+- **0.36 — Arrive-by.**
+- **0.37 – 0.39 — Reserve** for follow-ups found in the field.
 
-### 0.9 — Release candidate
+### 7.6 0.40 – 0.49: Field analysis features
 
-- API freeze: only fixes and additive changes from here.
-- Remove every deprecation.
-- Docs: a guide (concepts, compile, route, overlays, SAR, embedding), API
-  reference complete, examples per binding.
-- Package format and costing model frozen for 1.x.
-- Soak: fuzzing, gates and a field trial with a real team.
+- **0.40 — Isochrone polygons** as GeoJSON.
+- **0.41 — Multi-origin isochrones** (team coverage).
+- **0.42 — Reverse isochrones** (arrive-at).
+- **0.43 — Nearest-k** targets by travel time.
+- **0.44 — Trip optimization (small N, exact).**
+- **0.45 — Trip optimization (heuristic, larger N).**
+- **0.46 — Map matching attributes** per sample.
+- **0.47 — Traffic and speed-file input** as bulk speed overlays.
+- **0.48 – 0.49 — Reserve.**
 
-### 1.0
+### 7.7 0.50 – 0.59: Guidance
 
-- Stability contract (section 4) published in the README and enforced in CI.
+- **0.50 — Localization layer.** Catalogs keyed by `instruction_key` and
+  parameters; English moved into a catalog; host-supplied catalogs.
+- **0.51 — First languages** (proposal: Polish, German, French, Spanish,
+  Ukrainian).
+- **0.52 — Lanes** from `turn:lanes`.
+- **0.53 — Signs and exits** from `destination*` tags.
+- **0.54 — Voice timing** (pre-transition and alert distances).
+- **0.55 — Units and rounding per locale.**
+- **0.56 – 0.59 — Reserve.**
 
-### After 1.0 (candidates)
+### 7.8 0.60 – 0.69: Scale and data
 
-Cross-country movement, traffic input, multiple packages per engine,
-incremental updates, field data input, WASM, an optional HTTP server.
+- **0.60 — Country-scale measurement.** Poland compiled and routed; numbers
+  published like the Małopolskie ones.
+- **0.61 – 0.62 — Compiler memory and time fixes** found by 0.60 (external
+  sorting where needed).
+- **0.63 — Clip polygon compile** from a larger extract.
+- **0.64 — Multi-extract compile** (cross-border regions in one package).
+- **0.65 — Open time and memory at country scale**, mobile memory profile
+  checked.
+- **0.66 – 0.69 — Reserve** (package format 3 only if scale demands it).
+
+### 7.9 0.70 – 0.79: Platforms and bindings
+
+- **0.70 — Release artifacts** for macOS, an XCFramework and an AAR.
+- **0.71 — Swift binding.**
+- **0.72 — Kotlin binding.**
+- **0.73 — Python binding.**
+- **0.74 — TypeScript types** from the schemas; WASM build as an experiment.
+- **0.75 — Examples per binding**, tested in CI.
+- **0.76 – 0.79 — Reserve.**
+
+### 7.10 0.80 – 0.89: Hardening and docs
+
+The last window for breaking changes.
+
+- **0.80 — API review.** Every public item read once more; last renames and
+  removals, all deprecations gone by 0.89.
+- **0.81 — `#![deny(missing_docs)]`** on public crates; API reference
+  complete.
+- **0.82 — Guide.** Concepts, compile, route, overlays, SAR, embedding.
+- **0.83 — Tracing spans** with stable names.
+- **0.84 — Security policy for 1.x**, fuzzing coverage review.
+- **0.85 — Field trial** with a real team; fixes ship as 0.85.x.
+- **0.86 – 0.89 — Reserve** for what the trial finds.
+
+### 7.11 0.90 – 0.99: Release candidates
+
+API, wire format, C ABI, package format and costing model frozen. Only fixes
+and additive changes. Semver, schema and header checks become blocking.
+
+- **0.90** first candidate; further candidates as needed, each with a soak
+  period of gates, fuzzing and field use.
+- Any candidate that needs a breaking change goes back to the 0.8x rules for
+  that one change, and the soak restarts.
+
+### 7.12 1.0
+
+The stability contract (section 4) published in the README and enforced in
+CI.
+
+### 7.13 After 1.0 (candidates)
+
+Cross-country movement, multiple packages per engine, incremental updates,
+field data input, WASM as a supported target, an optional HTTP server. These
+are additive and can land as 1.x minors.
 
 ## 8. Non-goals for 1.0
 
@@ -472,5 +608,5 @@ incremental updates, field data input, WASM, an optional HTTP server.
 9. **`wayfarer-line-network` render fields** (`min_zoom`, `max_zoom`,
    `sort_order`) serve a vector basemap compiler. Does that compiler stay a
    user of this crate, or does the crate become routing-only?
-10. **Team and timeline.** The milestone order holds either way; dates depend
+10. **Team and timeline.** The release order holds either way; dates depend
     on who works on it.
