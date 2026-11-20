@@ -463,7 +463,8 @@ pub fn enhance_road_graph_with(
     // distinct pair. The pairs are numbered by first use, then the finished
     // attributes go to a new table sized for them, interned in that order, so
     // it comes out compact (numbered by first use) and the old table is not
-    // grown past a doubling before it is dropped.
+    // grown past a doubling before it is dropped. A class's last pair takes
+    // its old attributes rather than a copy, so the sets are not held twice.
     let mut pair_slots = FxHashMap::<(u32, Option<u8>), u32>::default();
     let mut pairs = Vec::<(u32, Option<RoadHierarchyTier>)>::new();
     let mut classes_of = Vec::with_capacity(graph.shared_edge_infos.len());
@@ -480,15 +481,34 @@ pub fn enhance_road_graph_with(
     }
     drop(pair_slots);
     drop(shared_hierarchy_updates);
+    let mut pairs_left = vec![0u32; graph.shared_edge_infos.class_count()];
+    for &(class, _) in &pairs {
+        pairs_left[class as usize] += 1;
+    }
+    let mut old = graph
+        .shared_edge_infos
+        .take_classes()
+        .into_boxes()
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
     let mut finished = SharedInfoClasses::with_capacity(pairs.len());
     let class_of_slot = pairs
         .into_iter()
         .map(|(class, tier_update)| {
-            let mut attrs = graph.shared_edge_infos.classes().get(class).clone();
+            let class = class as usize;
+            pairs_left[class] -= 1;
+            let mut attrs = if pairs_left[class] == 0 {
+                old[class].take().expect("a class's last pair")
+            } else {
+                old[class].clone().expect("a class not yet taken")
+            };
             finish_shared_info_attrs(&mut attrs, tier_update);
-            finished.intern(attrs)
+            finished.intern_boxed(attrs)
         })
         .collect::<Vec<u32>>();
+    drop(old);
+    drop(pairs_left);
     for class in &mut classes_of {
         *class = class_of_slot[*class as usize];
     }

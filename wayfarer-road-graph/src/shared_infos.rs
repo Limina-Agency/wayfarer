@@ -122,9 +122,15 @@ impl PartialEq<[(f64, f64)]> for InfoGeometry<'_> {
 }
 
 /// Distinct attribute sets, numbered in the order they were first added.
+///
+/// Each set is boxed: a table that is rebuilt (merged, finished, compacted)
+/// moves its sets' boxes instead of copying the sets (616 bytes each, and
+/// millions of them on a country) into a second table beside the first.
 #[derive(Debug, Clone, Default)]
 pub struct SharedInfoClasses {
-    classes: Vec<SharedEdgeInfo>,
+    // Boxed on purpose, see above.
+    #[allow(clippy::vec_box)]
+    classes: Vec<Box<SharedEdgeInfo>>,
     /// Class content hash to the newest class with that hash; `next` chains
     /// the older ones (`u32::MAX` ends a chain).
     by_hash: FxHashMap<u64, u32>,
@@ -153,7 +159,25 @@ impl SharedInfoClasses {
         }
     }
 
-    pub(crate) fn into_vec(self) -> Vec<SharedEdgeInfo> {
+    /// Rebuilds the hash chains for the classes in their current order, as
+    /// interning them in that order would (the classes are distinct).
+    fn reindex(&mut self) {
+        self.by_hash.clear();
+        self.next.clear();
+        for (class, attrs) in self.classes.iter().enumerate() {
+            let head = self
+                .by_hash
+                .insert(class_hash(attrs), class as u32)
+                .unwrap_or(u32::MAX);
+            self.next.push(head);
+        }
+        self.by_hash.shrink_to_fit();
+        self.next.shrink_to_fit();
+    }
+
+    /// The classes' attribute sets, by number.
+    #[allow(clippy::vec_box)]
+    pub(crate) fn into_boxes(self) -> Vec<Box<SharedEdgeInfo>> {
         self.classes
     }
 
@@ -162,14 +186,37 @@ impl SharedInfoClasses {
     pub fn intern(&mut self, mut attrs: SharedEdgeInfo) -> u32 {
         strip_segment_fields(&mut attrs);
         let hash = class_hash(&attrs);
-        let mut at = self.by_hash.get(&hash).copied().unwrap_or(u32::MAX);
-        let head = at;
+        match self.find(hash, &attrs) {
+            Ok(class) => class,
+            Err(head) => self.push(hash, head, Box::new(attrs)),
+        }
+    }
+
+    /// [`Self::intern`] for attributes already boxed: a new class keeps the
+    /// box.
+    pub(crate) fn intern_boxed(&mut self, mut attrs: Box<SharedEdgeInfo>) -> u32 {
+        strip_segment_fields(&mut attrs);
+        let hash = class_hash(&attrs);
+        match self.find(hash, &attrs) {
+            Ok(class) => class,
+            Err(head) => self.push(hash, head, attrs),
+        }
+    }
+
+    /// The class equal to `attrs`, or else the head of its hash's chain.
+    fn find(&self, hash: u64, attrs: &SharedEdgeInfo) -> Result<u32, u32> {
+        let head = self.by_hash.get(&hash).copied().unwrap_or(u32::MAX);
+        let mut at = head;
         while at != u32::MAX {
-            if class_eq(&self.classes[at as usize], &attrs) {
-                return at;
+            if class_eq(&self.classes[at as usize], attrs) {
+                return Ok(at);
             }
             at = self.next[at as usize];
         }
+        Err(head)
+    }
+
+    fn push(&mut self, hash: u64, head: u32, attrs: Box<SharedEdgeInfo>) -> u32 {
         let class = u32::try_from(self.classes.len()).expect("fewer than 2^32 classes");
         self.classes.push(attrs);
         self.next.push(head);
@@ -403,6 +450,12 @@ impl SharedEdgeInfos {
         self.edges[index].class = self.classes.intern(attrs);
     }
 
+    /// Takes the classes out, to be replaced with [`Self::replace_classes`];
+    /// until then the infos' classes are not there.
+    pub(crate) fn take_classes(&mut self) -> SharedInfoClasses {
+        std::mem::take(&mut self.classes)
+    }
+
     /// Gives info `i` class `classes_of[i]` of `classes`, which replace the
     /// old classes.
     pub(crate) fn replace_classes(&mut self, classes: SharedInfoClasses, classes_of: Vec<u32>) {
@@ -431,24 +484,33 @@ impl SharedEdgeInfos {
         {
             return;
         }
-        // The used classes move to an exactly sized table, in their new order.
-        let mut by_new = vec![0u32; used as usize];
-        for (old_class, &new) in renumbered.iter().enumerate() {
-            if new != u32::MAX {
-                by_new[new as usize] = old_class as u32;
-            }
-        }
-        let mut old = std::mem::take(&mut self.classes.classes);
-        let mut classes = SharedInfoClasses::with_capacity(by_new.len());
-        for old_class in by_new {
-            let interned = classes.intern(std::mem::take(&mut old[old_class as usize]));
-            debug_assert_eq!(interned as usize, classes.len() - 1);
-        }
-        drop(old);
         for edge in &mut self.edges {
             edge.class = renumbered[edge.class as usize];
         }
-        self.classes = classes;
+        // The classes move to their new places within the table, which is then
+        // cut to the used ones: a second table, built while the first was still
+        // held, was the class table's size again (3M classes of 616 bytes on
+        // Germany). The unused classes go after the used ones.
+        let classes = &mut self.classes.classes;
+        let mut place = renumbered;
+        let mut next_unused = used;
+        for slot in &mut place {
+            if *slot == u32::MAX {
+                *slot = next_unused;
+                next_unused += 1;
+            }
+        }
+        // Each swap puts one class in its final place.
+        for at in 0..classes.len() {
+            while place[at] as usize != at {
+                let to = place[at] as usize;
+                classes.swap(at, to);
+                place.swap(at, to);
+            }
+        }
+        classes.truncate(used as usize);
+        classes.shrink_to_fit();
+        self.classes.reindex();
     }
 
     /// Every info whole, in order (for snapshots and tests).
@@ -859,6 +921,41 @@ mod class_tests {
         expected[0].name = Some(Arc::from("b"));
         expected[1].name = Some(Arc::from("b"));
         assert_eq!(shared.to_vec(), expected);
+    }
+
+    #[test]
+    fn compact_numbers_classes_by_first_use_and_still_interns() {
+        let infos = vec![
+            info(1, 10, "a"),
+            info(2, 11, "b"),
+            info(3, 12, "c"),
+            info(4, 13, "d"),
+        ];
+        let mut shared = SharedEdgeInfos::from(infos.clone());
+        // Classes a, b, c, d; the infos come to use d, c, d, a.
+        let (a, c, d) = (shared.at(0).class, shared.at(2).class, shared.at(3).class);
+        shared.set_class(0, d);
+        shared.set_class(1, c);
+        shared.set_class(2, d);
+        shared.set_class(3, a);
+        shared.compact();
+        assert_eq!(shared.class_count(), 3);
+        let names = (0..4)
+            .map(|index| (shared.at(index).class, shared.at(index).attrs.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                (0, Some(Arc::from("d"))),
+                (1, Some(Arc::from("c"))),
+                (0, Some(Arc::from("d"))),
+                (2, Some(Arc::from("a"))),
+            ]
+        );
+        // The rebuilt chains find each kept class, and a dropped one is new.
+        assert_eq!(shared.intern(info(9, 20, "a")), 2);
+        assert_eq!(shared.intern(info(9, 20, "d")), 0);
+        assert_eq!(shared.intern(info(9, 20, "b")), 3);
     }
 
     #[test]
