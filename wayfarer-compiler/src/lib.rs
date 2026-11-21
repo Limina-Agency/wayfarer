@@ -53,9 +53,9 @@ use wayfarer_package::{codec, math};
 use wayfarer_road_graph::{
     DirectionalAccess, EnhanceOptions, NodeBarrierTags, ROAD_GRAPH_SNAPSHOT_VERSION,
     RelationMemberRefType, RoadGraph, RoadGraphBuilder, RoadGraphPackageManifest,
-    RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadRouteMembership,
-    RoadTurnRestriction, RoadType, RoadWayFacts, RoutableWay, SharedInfoIndex, TagInterner,
-    TrafficControl, TrafficControlDirection, TrafficControlPoint, enhance_road_graph_with,
+    RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadTurnRestriction, RoadType,
+    RoadWayFacts, RoutableWay, SharedInfoIndex, TagInterner, TrafficControl,
+    TrafficControlDirection, TrafficControlPoint, enhance_road_graph_with,
     evaluate_road_graph_quality, resolve_turn_restrictions_with_report,
     vehicle_access_is_destination_only,
 };
@@ -64,6 +64,7 @@ mod api;
 mod compile_job;
 mod job;
 mod profiling;
+mod route_memberships;
 
 pub use api::{
     CompileError, CompileProgress, CompileRequest, CompileResult, MemoryProfile, compile,
@@ -74,6 +75,7 @@ pub use wayfarer_package::CancelToken;
 
 use job::{Job, ProgressFn};
 use profiling::Phase;
+use route_memberships::CollectedRouteMemberships;
 
 /// The road-graph half of a compile, as `api` resolves it from a
 /// [`CompileRequest`].
@@ -457,7 +459,7 @@ pub(crate) struct OsmRoadNetworkCollector {
     /// known, with the position of their line in `builder`.
     ferries: Vec<(usize, Box<PendingFerry>)>,
     turn_restrictions: Vec<RoadTurnRestriction>,
-    route_memberships: Vec<RoadRouteMembership>,
+    route_memberships: CollectedRouteMemberships,
     way_facts: EncodedWayFacts,
 }
 
@@ -610,7 +612,7 @@ impl Drop for EncodedWayFacts {
 struct CollectedRoadInputs {
     network: SharedLineNetwork,
     turn_restrictions: Vec<RoadTurnRestriction>,
-    route_memberships: Vec<RoadRouteMembership>,
+    route_memberships: CollectedRouteMemberships,
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
     traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
@@ -681,7 +683,7 @@ impl OsmRoadNetworkCollector {
 struct UnfinishedRoadInputs {
     builder: SharedLineNetworkBuilder,
     turn_restrictions: Vec<RoadTurnRestriction>,
-    route_memberships: Vec<RoadRouteMembership>,
+    route_memberships: CollectedRouteMemberships,
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
     traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
@@ -716,8 +718,7 @@ impl Pass2Sink for OsmRoadNetworkCollector {
         for relation in &batch.relations {
             self.turn_restrictions
                 .extend(turn_restrictions_from_relation(relation));
-            self.route_memberships
-                .extend(route_memberships_from_relation(relation));
+            self.route_memberships.push_relation(relation);
         }
         Ok(())
     }
@@ -961,9 +962,10 @@ fn build_road_graph(
     let phase = Phase::start("graph_source_enrichment");
     // The graph's ways are those before the facts apply; they filter the
     // memberships and restrictions first, so their list is gone before the
-    // facts' classes are built.
+    // facts' classes are built. Only road routes' memberships reach the
+    // graph; all of them count.
     let graph_way_ids = graph_way_ids(&road_graph);
-    let route_memberships = filtered_route_memberships(route_memberships, &graph_way_ids);
+    let (route_membership_count, route_memberships) = route_memberships.finish(&graph_way_ids);
     let turn_restrictions = filtered_turn_restrictions(turn_restrictions, &graph_way_ids);
     drop(graph_way_ids);
     way_facts.restore().map_err(CompileError::Failed)?;
@@ -977,7 +979,6 @@ fn build_road_graph(
     report_finalize_checkpoint(job, "after_load_turn_restrictions", rows_written)?;
     road_graph.refresh_route_membership_metadata();
     let raw_turn_restriction_count = road_graph.turn_restrictions.len();
-    let route_membership_count = road_graph.route_memberships.len();
     report_finalize_checkpoint(job, "after_refresh_shared_edge_metadata", rows_written)?;
     drop(phase);
     let phase = Phase::start("resolve_turn_restrictions");
@@ -1120,23 +1121,6 @@ fn graph_way_ids(graph: &RoadGraph) -> Vec<i64> {
     way_ids
 }
 
-fn filtered_route_memberships(
-    memberships: Vec<RoadRouteMembership>,
-    graph_way_ids: &[i64],
-) -> Vec<RoadRouteMembership> {
-    let mut memberships = memberships
-        .into_iter()
-        .filter(|membership| graph_way_ids.binary_search(&membership.way_id).is_ok())
-        .collect::<Vec<_>>();
-    memberships.sort_by(|left, right| {
-        left.way_id
-            .cmp(&right.way_id)
-            .then(left.relation_id.cmp(&right.relation_id))
-            .then(left.member_role.cmp(&right.member_role))
-    });
-    memberships
-}
-
 fn filtered_turn_restrictions(
     restrictions: Vec<RoadTurnRestriction>,
     graph_way_ids: &[i64],
@@ -1256,34 +1240,6 @@ fn turn_restrictions_from_relation(relation: &NormalizedRelation) -> Vec<RoadTur
         }
     }
     restrictions
-}
-
-fn route_memberships_from_relation(relation: &NormalizedRelation) -> Vec<RoadRouteMembership> {
-    if relation.tags.get("type") != Some("route") {
-        return Vec::new();
-    }
-    let Some(route) = relation
-        .tags
-        .get("route")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Vec::new();
-    };
-    relation
-        .members
-        .iter()
-        .filter(|member| member.member_type == RelationMemberType::Way)
-        .map(|member| RoadRouteMembership {
-            relation_id: relation.relation_id,
-            way_id: member.member_id,
-            route: route.to_string(),
-            network: relation.tags.get("network").map(ToString::to_string),
-            ref_name: relation.tags.get("ref").map(ToString::to_string),
-            relation_name: relation.tags.get("name").map(ToString::to_string),
-            member_role: (!member.role.is_empty()).then(|| member.role.clone()),
-        })
-        .collect()
 }
 
 fn barrier_tag(tags: &(impl PbfTagLookup + ?Sized)) -> Option<&str> {
