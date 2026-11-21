@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::cancellation::RouteCancellation;
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
@@ -637,19 +638,22 @@ impl RoutingEngine {
             let prune = !test_mode::keep_unreachable_targets();
             #[cfg(not(test))]
             let prune = true;
-            let reaching = if prune
-                && patch.is_none()
-                && request.options.max_visited_edge_count.is_none()
-            {
-                target_edges
-                    .par_iter()
-                    .map(|edges| {
-                        reaching_edges(view, edges, |edge| query.edge_cost(view, edge).is_finite())
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                vec![None; target_count]
-            };
+            let reaching =
+                if prune && patch.is_none() && request.options.max_visited_edge_count.is_none() {
+                    target_edges
+                        .par_iter()
+                        .map(|edges| {
+                            reaching_edges(
+                                view,
+                                edges,
+                                |edge| query.edge_cost(view, edge).is_finite(),
+                                &request.options.cancellation,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![None; target_count]
+                };
             let may_reach = |source: usize, target: usize| {
                 reaching[target].as_ref().is_none_or(|reaching| {
                     source_edges[source]
@@ -1120,15 +1124,22 @@ const MATRIX_REACHING_EDGES_LIMIT: usize = 16_384;
 /// `target_edges` (which are included), or `None` when there are more than
 /// [`MATRIX_REACHING_EDGES_LIMIT`]. Turn restrictions and turn costs are
 /// ignored, so a search from an edge outside the set cannot reach the
-/// targets.
+/// targets. Also `None` once `cancellation` stops the request, checked as the
+/// search loops check it: the rows' searches then stop on their first visit.
 fn reaching_edges(
     graph: SearchGraph<'_>,
     target_edges: &[u32],
     usable: impl Fn(u32) -> bool,
+    cancellation: &RouteCancellation,
 ) -> Option<FxHashSet<u32>> {
     let mut reaching = target_edges.iter().copied().collect::<FxHashSet<_>>();
     let mut pending = target_edges.to_vec();
+    let mut visits = 0usize;
     while let Some(edge) = pending.pop() {
+        visits += 1;
+        if cancellation.interrupted_at(visits) {
+            return None;
+        }
         for (previous, _) in graph.in_edges(graph.edge_source(edge as usize) as usize) {
             if usable(previous) && reaching.insert(previous) {
                 if reaching.len() > MATRIX_REACHING_EDGES_LIMIT {
