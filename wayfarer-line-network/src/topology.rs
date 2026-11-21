@@ -1,6 +1,9 @@
 //! Topology: a layer's lines split at shared and snapped nodes into edges.
 
 use super::*;
+use std::mem::MaybeUninit;
+use std::ops::Range;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct PointKey {
@@ -27,20 +30,23 @@ pub(crate) enum BrunnelKind {
     Ferry,
 }
 
-/// A topology node's identity within one layer: its source node, or its
-/// E7 position under an interned [`SnapCompatKey`] (16 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum NodeKey {
-    Source(i64),
-    Snapped([i32; 2], u32),
-}
+/// Whether a point's source node, and its position under its line's snap
+/// key, occur more than once in the layer: [`REPEATED_SOURCE`] and
+/// [`REPEATED_SNAPPED`] bits.
+#[derive(Debug, Clone, Copy, Default)]
+struct PointRecurrence(u8);
 
-/// Whether a point's source node, or its position under the line's snap key,
-/// occurs more than once in the layer.
-#[derive(Debug, Clone, Copy)]
-struct PointRecurrence {
-    repeated_source: bool,
-    repeated_snapped: bool,
+const REPEATED_SOURCE: u8 = 1;
+const REPEATED_SNAPPED: u8 = 2;
+
+impl PointRecurrence {
+    fn repeated_source(self) -> bool {
+        self.0 & REPEATED_SOURCE != 0
+    }
+
+    fn repeated_snapped(self) -> bool {
+        self.0 & REPEATED_SNAPPED != 0
+    }
 }
 
 /// A line point: its E7 position and source node, 16 bytes (a layer has
@@ -98,25 +104,57 @@ pub(crate) struct RawLine {
     pub(crate) snap_compat: SnapCompatKey,
 }
 
-#[derive(Debug, Default)]
-struct LocalNodeRegistry {
-    /// Ids are assigned in first-seen order, so the map's own order is moot.
-    by_key: FxHashMap<NodeKey, u32>,
-    /// Each node's position and source node, by id.
-    metadata: Vec<RawPoint>,
+/// Lines go to the parallel passes over a layer in groups of this many, each
+/// group's items written to its own range of a vector sized once.
+pub(crate) const LINE_GROUP: usize = 1024;
+
+/// Lines whose edges are built at a time: each batch's raw lines are freed
+/// before the next, so the raw lines shrink as the edges grow.
+const EDGE_BATCH_LINES: usize = 16 * 1024;
+
+pub(crate) fn line_groups(line_count: usize) -> impl IndexedParallelIterator<Item = Range<usize>> {
+    (0..line_count.div_ceil(LINE_GROUP))
+        .into_par_iter()
+        .map(move |group| group * LINE_GROUP..((group + 1) * LINE_GROUP).min(line_count))
 }
 
-impl LocalNodeRegistry {
-    fn node_id_for(&mut self, key: NodeKey, point: PointKey, source_node_id: Option<i64>) -> u32 {
-        if let Some(id) = self.by_key.get(&key).copied() {
-            id
-        } else {
-            let id = self.metadata.len() as u32;
-            self.by_key.insert(key, id);
-            self.metadata.push(RawPoint::new(point, source_node_id));
-            id
-        }
+/// The items `items` yields for each group of `line_count` lines, group after
+/// group, collected in parallel into one vector allocated at its size:
+/// `group_lens` holds how many each group yields.
+pub(crate) fn collect_by_line_groups<T, I>(
+    line_count: usize,
+    group_lens: &[usize],
+    items: impl Fn(Range<usize>) -> I + Sync,
+) -> Vec<T>
+where
+    T: Send,
+    I: Iterator<Item = T>,
+{
+    let len = group_lens.iter().sum();
+    let mut out = Vec::with_capacity(len);
+    let mut pieces = Vec::with_capacity(group_lens.len());
+    let mut rest = &mut out.spare_capacity_mut()[..len];
+    for &group_len in group_lens {
+        let (piece, tail) = std::mem::take(&mut rest).split_at_mut(group_len);
+        pieces.push(piece);
+        rest = tail;
     }
+    // The pieces are written in parallel, so the vector's pages are first
+    // touched across the pool too.
+    line_groups(line_count)
+        .zip(pieces)
+        .for_each(|(lines, piece)| {
+            let mut written = 0;
+            for item in items(lines) {
+                piece[written].write(item);
+                written += 1;
+            }
+            assert_eq!(written, piece.len(), "a line group yields what it counted");
+        });
+    // SAFETY: each group wrote every slot of its piece (asserted above), and
+    // the pieces tile the first `len` slots.
+    unsafe { out.set_len(len) };
+    out
 }
 
 pub(crate) fn append_layer_network(
@@ -126,9 +164,16 @@ pub(crate) fn append_layer_network(
     render_products: bool,
 ) {
     let layer = inputs.first().map(|input| input.layer);
+    // Each input becomes its raw line on its own; the collect keeps them in
+    // input order. `filter_map` then drops the empty ones in place (`flatten`
+    // would copy them all into a new vector).
+    #[allow(clippy::filter_map_identity)]
     let mut raw_lines = inputs
+        .into_par_iter()
+        .map(raw_line_from_input)
+        .collect::<Vec<_>>()
         .into_iter()
-        .filter_map(raw_line_from_input)
+        .filter_map(|line| line)
         .collect::<Vec<_>>();
     if raw_lines.is_empty() {
         return;
@@ -145,70 +190,91 @@ pub(crate) fn append_layer_network(
         observer(&format!("{layer_name}_repaired"));
     }
 
-    // Snap-compatibility keys are interned per layer, so a snapped position is
-    // counted and identified by (point, small id) rather than by a cloned key
-    // carrying an optional string.
-    let line_snap_ids = {
-        let mut snap_ids = FxHashMap::<&SnapCompatKey, u32>::default();
-        raw_lines
-            .iter()
-            .map(|line| {
-                let next = snap_ids.len() as u32;
-                *snap_ids.entry(&line.snap_compat).or_insert(next)
-            })
-            .collect::<Vec<_>>()
-    };
-    let recurrence = point_recurrence(&raw_lines, &line_snap_ids);
+    let line_snap_ids = line_snap_ids(&raw_lines);
+    let point_offsets = point_offsets(&raw_lines);
+    let recurrence = point_recurrence(&raw_lines, &line_snap_ids, &point_offsets);
+    let anchors = LayerAnchors::new(&raw_lines, &recurrence, &point_offsets);
+    let (anchor_nodes, node_points) = number_anchor_nodes(
+        &raw_lines,
+        &line_snap_ids,
+        &recurrence,
+        &point_offsets,
+        &anchors,
+    );
+    drop(recurrence);
+    drop(point_offsets);
+    drop(line_snap_ids);
 
     // Edges go straight into the topology, which is sized once for them: a
-    // line splits at most at each of its anchors (see
-    // `append_topology_edges`). Built as local edges and then copied, every
-    // edge record (~230 bytes) existed twice at the layer's peak.
-    let mut point_offset = 0;
-    let edge_bound = raw_lines
-        .iter()
-        .map(|line| {
-            let line_recurrence = &recurrence[point_offset..point_offset + line.points.len()];
-            point_offset += line.points.len();
-            line_anchors(line_recurrence).count().saturating_sub(1)
-        })
-        .sum::<usize>();
-    network.topology.edges.reserve_exact(edge_bound);
+    // line has an edge between each two consecutive anchors.
     let appended_from = network.topology.edges.len();
-    let mut node_registry = LocalNodeRegistry::default();
+    let edge_count = anchors.points.len() - raw_lines.len();
     let node_offset = network.topology.nodes.len() as u32;
-    let mut point_offset = 0;
-    // Consumed: each line's points are freed once its edges exist.
-    for (raw_line, &snap_id) in raw_lines.into_iter().zip(&line_snap_ids) {
-        let line_recurrence = &recurrence[point_offset..point_offset + raw_line.points.len()];
-        point_offset += raw_line.points.len();
-        append_topology_edges(
-            raw_line,
-            snap_id,
-            line_recurrence,
-            &mut node_registry,
-            node_offset,
-            &mut network.topology.edges,
-        );
+    let edges = &mut network.topology.edges;
+    edges.reserve_exact(edge_count);
+    let slots = &mut edges.spare_capacity_mut()[..edge_count];
+    // The lines' edges are written into their places a batch of lines at a
+    // time, from the last batch back: each batch is split off the raw lines
+    // and consumed in parallel, so the raw lines shrink as the edges grow,
+    // and each line's last edge takes over its shared handles.
+    while !raw_lines.is_empty() {
+        let first_line = raw_lines.len().saturating_sub(EDGE_BATCH_LINES);
+        let batch = raw_lines.split_off(first_line);
+        if raw_lines.capacity() > 2 * raw_lines.len() + EDGE_BATCH_LINES {
+            raw_lines.shrink_to_fit();
+        }
+        // Where a line's edges start among the layer's.
+        let edge_offset = |line: usize| anchors.offsets[line] - line;
+        let mut rest = &mut slots[edge_offset(first_line)..edge_offset(first_line + batch.len())];
+        let mut pieces = Vec::with_capacity(batch.len());
+        for line in first_line..first_line + batch.len() {
+            let (piece, tail) =
+                std::mem::take(&mut rest).split_at_mut(edge_offset(line + 1) - edge_offset(line));
+            pieces.push(piece);
+            rest = tail;
+        }
+        batch
+            .into_par_iter()
+            .zip(pieces)
+            .enumerate()
+            .for_each(|(offset, (raw_line, piece))| {
+                let line = first_line + offset;
+                let anchor_range = anchors.offsets[line]..anchors.offsets[line + 1];
+                write_line_edges(
+                    raw_line,
+                    &anchors.points[anchor_range.clone()],
+                    &anchor_nodes[anchor_range],
+                    node_offset,
+                    // Edge ids run on from the topology's length, line by
+                    // line.
+                    (appended_from + edge_offset(line)) as u32,
+                    piece,
+                );
+            });
     }
+    // SAFETY: every line wrote each of its edges' slots (`write_line_edges`
+    // fills its piece), and the lines' pieces tile the first `edge_count`
+    // spare slots.
+    unsafe { edges.set_len(appended_from + edge_count) };
+    drop(raw_lines);
+    drop(anchors);
+    drop(anchor_nodes);
     observer(&format!("{layer_name}_topology_edges"));
     if network.topology.edges.len() == appended_from {
         return;
     }
-    drop(recurrence);
-    let LocalNodeRegistry { by_key, metadata } = node_registry;
-    drop(by_key);
-    network.topology.nodes.reserve_exact(metadata.len());
-
-    for (local_id, point) in metadata.iter().enumerate() {
-        let (key, source_node_id) = (point.key(), point.source_node_id());
-        network.topology.nodes.push(SharedTopologyNode {
-            id: node_offset + local_id as u32,
-            lat: from_fixed(key.lat),
-            lng: from_fixed(key.lng),
-            source_node_id,
-        });
-    }
+    network
+        .topology
+        .nodes
+        .par_extend(node_points.par_iter().enumerate().map(|(local_id, point)| {
+            SharedTopologyNode {
+                id: node_offset + local_id as u32,
+                lat: from_fixed(point.key().lat),
+                lng: from_fixed(point.key().lng),
+                source_node_id: point.source_node_id(),
+            }
+        }));
+    drop(node_points);
 
     // The render pass reads exactly the edges appended above, so it borrows
     // them back out of the topology instead of keeping a second copy.
@@ -272,6 +338,48 @@ fn raw_line_from_input(input: SharedLineInput) -> Option<RawLine> {
     })
 }
 
+/// Each line's snap-compatibility key as a small id, so a snapped position
+/// is counted and identified by (point, id) rather than by a cloned key
+/// carrying an optional string. The ids number the layer's distinct keys in
+/// their sorted order; only their equality matters.
+fn line_snap_ids(raw_lines: &[RawLine]) -> Vec<u32> {
+    let mut keys = raw_lines
+        .par_iter()
+        .fold(FxHashSet::<&SnapCompatKey>::default, |mut keys, line| {
+            keys.insert(&line.snap_compat);
+            keys
+        })
+        .reduce(FxHashSet::default, |mut keys, more| {
+            keys.extend(more);
+            keys
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    let ids = keys
+        .into_iter()
+        .enumerate()
+        .map(|(id, key)| (key, id as u32))
+        .collect::<FxHashMap<_, _>>();
+    raw_lines
+        .par_iter()
+        .map(|line| ids[&line.snap_compat])
+        .collect()
+}
+
+/// Where each line's points start in the layer's points, flattened in line
+/// order; one more entry than lines, the last the point count.
+fn point_offsets(raw_lines: &[RawLine]) -> Vec<u32> {
+    let mut offsets = Vec::with_capacity(raw_lines.len() + 1);
+    let mut total = 0usize;
+    offsets.push(0);
+    for line in raw_lines {
+        total += line.points.len();
+        offsets.push(u32::try_from(total).expect("a layer's points fit in u32"));
+    }
+    offsets
+}
+
 /// The points a line may split at: its ends, and the points whose source
 /// node or snapped position recurs in the layer.
 fn line_anchors(recurrence: &[PointRecurrence]) -> impl Iterator<Item = usize> + '_ {
@@ -280,77 +388,241 @@ fn line_anchors(recurrence: &[PointRecurrence]) -> impl Iterator<Item = usize> +
         .enumerate()
         .filter_map(move |(index, point)| {
             let is_endpoint = index == 0 || index + 1 == recurrence.len();
-            (is_endpoint || point.repeated_source || point.repeated_snapped).then_some(index)
+            (is_endpoint || point.repeated_source() || point.repeated_snapped()).then_some(index)
         })
 }
 
-/// Appends a line's edges to the topology `output`: one per stretch between
-/// consecutive anchors, numbered on from `output`'s length, with their nodes
-/// numbered on from `node_offset`.
-fn append_topology_edges(
-    raw_line: RawLine,
-    snap_id: u32,
-    recurrence: &[PointRecurrence],
-    node_registry: &mut LocalNodeRegistry,
-    node_offset: u32,
-    output: &mut Vec<SharedTopologyEdge>,
-) {
-    let anchors = line_anchors(recurrence).collect::<Vec<_>>();
-    if anchors.len() < 2 {
-        return;
-    }
+/// Every line's anchors ([`line_anchors`]), flattened in line order. A line
+/// has at least two (its ends), and an edge between each two consecutive
+/// ones.
+struct LayerAnchors {
+    /// Where each line's anchors start in `points`; one more entry than
+    /// lines, the last the anchor count.
+    offsets: Vec<usize>,
+    /// Each anchor's point index in its line.
+    points: Vec<u32>,
+}
 
-    for window in anchors.windows(2) {
-        let start_index = window[0];
-        let end_index = window[1];
-        if end_index <= start_index {
-            continue;
+impl LayerAnchors {
+    fn new(raw_lines: &[RawLine], recurrence: &[PointRecurrence], point_offsets: &[u32]) -> Self {
+        let line_recurrence = |line: usize| {
+            &recurrence[point_offsets[line] as usize..point_offsets[line + 1] as usize]
+        };
+        let mut offsets = (0..raw_lines.len())
+            .into_par_iter()
+            .map(|line| line_anchors(line_recurrence(line)).count())
+            .collect::<Vec<_>>();
+        let group_lens = line_groups(raw_lines.len())
+            .map(|lines| offsets[lines].iter().sum())
+            .collect::<Vec<usize>>();
+        let mut total = 0;
+        for offset in &mut offsets {
+            let count = *offset;
+            debug_assert!(count >= 2, "a raw line has two distinct ends");
+            *offset = total;
+            total += count;
         }
-
-        let segment_points = simplify_anchor_points(
-            raw_line.points[start_index..=end_index]
-                .iter()
-                .map(RawPoint::key)
-                .collect(),
-        );
-        if segment_points.len() < 2 {
-            continue;
-        }
-
-        let start_point = &raw_line.points[start_index];
-        let end_point = &raw_line.points[end_index];
-        let start_prefers_snapped = recurrence[start_index].repeated_snapped;
-        let end_prefers_snapped = recurrence[end_index].repeated_snapped;
-        let start_node = node_registry.node_id_for(
-            node_key_for_point(start_point, snap_id, start_prefers_snapped),
-            segment_points[0],
-            start_point.source_node_id(),
-        );
-        let end_node = node_registry.node_id_for(
-            node_key_for_point(end_point, snap_id, end_prefers_snapped),
-            *segment_points.last().unwrap_or(&segment_points[0]),
-            end_point.source_node_id(),
-        );
-
-        output.push(SharedTopologyEdge {
-            edge_id: output.len() as u32,
-            feature_id: raw_line.feature_id,
-            layer: raw_line.layer,
-            geometry: segment_points
-                .iter()
-                .map(|point| (from_fixed(point.lat), from_fixed(point.lng)))
-                .collect(),
-            attrs: raw_line.attrs.clone(),
-            compile_inputs: raw_line.compile_inputs.clone(),
-            min_zoom: raw_line.min_zoom,
-            max_zoom: raw_line.max_zoom,
-            sort_order: raw_line.sort_order,
-            start_node: start_node + node_offset,
-            end_node: end_node + node_offset,
-            source_lineage_ids: Arc::clone(&raw_line.source_lineage_ids),
-            routing: raw_line.routing.clone(),
+        offsets.push(total);
+        u32::try_from(total).expect("a layer's anchors fit in u32");
+        let points = collect_by_line_groups(raw_lines.len(), &group_lens, |lines| {
+            lines.flat_map(|line| line_anchors(line_recurrence(line)).map(|index| index as u32))
         });
+        Self { offsets, points }
     }
+}
+
+/// A topology node's identity within one layer, as one sortable value: its
+/// source node, or its E7 position under its line's snap id.
+fn node_key(point: &RawPoint, snap_id: u32, prefer_snapped: bool) -> (u64, u64) {
+    let snapped = || {
+        (
+            1 << 32 | u64::from(snap_id),
+            u64::from(point.lat as u32) << 32 | u64::from(point.lng as u32),
+        )
+    };
+    if prefer_snapped {
+        snapped()
+    } else {
+        point
+            .source_node_id()
+            .map_or_else(snapped, |node_id| (0, node_id as u64))
+    }
+}
+
+fn node_key_share((high, low): (u64, u64)) -> usize {
+    share_of(low ^ high.rotate_left(32))
+}
+
+/// Numbers the layer's topology nodes. Each anchor is a node, keyed by
+/// [`node_key`]; walking the anchors line by line and along each line, a key
+/// gets the next id the first time it comes. That is the order the edges
+/// meet their nodes (start, then end, edge by edge), as consecutive edges
+/// share their anchor. Found by sorting `(key, anchor)` one share of the
+/// keys at a time: each anchor links to its key's first anchor, and one
+/// pass in anchor order numbers the first ones and reads the rest from
+/// them.
+///
+/// Returns each anchor's node id, and each node's point by id (its first
+/// anchor's).
+fn number_anchor_nodes(
+    raw_lines: &[RawLine],
+    line_snap_ids: &[u32],
+    recurrence: &[PointRecurrence],
+    point_offsets: &[u32],
+    anchors: &LayerAnchors,
+) -> (Vec<u32>, Vec<RawPoint>) {
+    let line_keys = |line: usize| {
+        let (points, snap_id) = (&raw_lines[line].points, line_snap_ids[line]);
+        let recurrence = &recurrence[point_offsets[line] as usize..];
+        let first_anchor = anchors.offsets[line];
+        anchors.points[first_anchor..anchors.offsets[line + 1]]
+            .iter()
+            .enumerate()
+            .map(move |(offset, &index)| {
+                let key = node_key(
+                    &points[index as usize],
+                    snap_id,
+                    recurrence[index as usize].repeated_snapped(),
+                );
+                (key, (first_anchor + offset) as u32)
+            })
+    };
+    let share_lens = line_groups(raw_lines.len())
+        .map(|lines| {
+            let mut lens = [0usize; RECURRENCE_SHARES];
+            for (key, _) in lines.flat_map(line_keys) {
+                lens[node_key_share(key)] += 1;
+            }
+            lens
+        })
+        .collect::<Vec<_>>();
+    let first_anchor = (0..anchors.points.len())
+        .into_par_iter()
+        .map(|_| AtomicU32::new(0))
+        .collect::<Vec<_>>();
+    for share in 0..RECURRENCE_SHARES {
+        let group_lens = share_lens
+            .iter()
+            .map(|lens| lens[share])
+            .collect::<Vec<_>>();
+        let mut keyed = collect_by_line_groups(raw_lines.len(), &group_lens, |lines| {
+            lines
+                .flat_map(line_keys)
+                .filter(|&(key, _)| node_key_share(key) == share)
+        });
+        keyed.par_sort_unstable();
+        keyed
+            .par_chunk_by(|left, right| left.0 == right.0)
+            .for_each(|run| {
+                let first = run[0].1;
+                for &(_, anchor) in run {
+                    first_anchor[anchor as usize].store(first, Ordering::Relaxed);
+                }
+            });
+    }
+    let mut node_of_anchor = first_anchor
+        .into_iter()
+        .map(AtomicU32::into_inner)
+        .collect::<Vec<_>>();
+    let mut node_points = Vec::new();
+    for (line, raw_line) in raw_lines.iter().enumerate() {
+        let line_anchors = anchors.offsets[line]..anchors.offsets[line + 1];
+        for (anchor, &index) in line_anchors.clone().zip(&anchors.points[line_anchors]) {
+            let first = node_of_anchor[anchor] as usize;
+            // An anchor after its key's first reads the id the first got.
+            node_of_anchor[anchor] = if first == anchor {
+                node_points.push(raw_line.points[index as usize]);
+                (node_points.len() - 1) as u32
+            } else {
+                node_of_anchor[first]
+            };
+        }
+    }
+    (node_of_anchor, node_points)
+}
+
+/// Writes a line's edges into `out`, one per stretch between consecutive
+/// anchors (`anchors`, with their nodes `anchor_nodes`), numbered on from
+/// `first_edge_id`, with their nodes numbered on from `node_offset`. The
+/// line's last edge takes over its shared handles; the others clone them.
+fn write_line_edges(
+    raw_line: RawLine,
+    anchors: &[u32],
+    anchor_nodes: &[u32],
+    node_offset: u32,
+    first_edge_id: u32,
+    out: &mut [MaybeUninit<SharedTopologyEdge>],
+) {
+    let RawLine {
+        feature_id,
+        layer,
+        points,
+        attrs,
+        compile_inputs,
+        min_zoom,
+        max_zoom,
+        sort_order,
+        routing,
+        source_lineage_ids,
+        snap_compat: _,
+    } = raw_line;
+    assert_eq!(
+        out.len() + 1,
+        anchors.len(),
+        "a line has an edge per anchor pair"
+    );
+    let geometry = |offset: usize| {
+        let (start_index, end_index) = (anchors[offset] as usize, anchors[offset + 1] as usize);
+        debug_assert!(start_index < end_index);
+        let stretch = &points[start_index..=end_index];
+        let mut geometry = Vec::with_capacity(stretch.len());
+        simplified_indices(
+            stretch.len(),
+            |index| stretch[index].key(),
+            |index| {
+                let point = stretch[index].key();
+                geometry.push((from_fixed(point.lat), from_fixed(point.lng)));
+            },
+        );
+        geometry.shrink_to_fit();
+        geometry
+    };
+    let edge = |offset: usize,
+                attrs: Arc<[(String, String)]>,
+                compile_inputs: Arc<[(String, String)]>,
+                source_lineage_ids: Arc<[i64]>,
+                routing: Option<Arc<RoadRoutingAttrs>>| SharedTopologyEdge {
+        edge_id: first_edge_id + offset as u32,
+        feature_id,
+        layer,
+        geometry: geometry(offset),
+        attrs,
+        compile_inputs,
+        min_zoom,
+        max_zoom,
+        sort_order,
+        start_node: anchor_nodes[offset] + node_offset,
+        end_node: anchor_nodes[offset + 1] + node_offset,
+        source_lineage_ids,
+        routing,
+    };
+    let last = out.len() - 1;
+    for (offset, slot) in out[..last].iter_mut().enumerate() {
+        slot.write(edge(
+            offset,
+            Arc::clone(&attrs),
+            Arc::clone(&compile_inputs),
+            Arc::clone(&source_lineage_ids),
+            routing.clone(),
+        ));
+    }
+    out[last].write(edge(
+        last,
+        attrs,
+        compile_inputs,
+        source_lineage_ids,
+        routing,
+    ));
 }
 
 /// Whether each point's source node, and its position under its line's snap
@@ -358,75 +630,114 @@ fn append_topology_edges(
 /// by sorting `(key, point)` pairs, one key at a time and one share of the
 /// keys at a time ([`RECURRENCE_SHARES`]; equal keys fall in the same share):
 /// 16 bytes for a share's points, where hash maps of counts sized to the
-/// point count took ~20 times that for all of them together.
-fn point_recurrence(raw_lines: &[RawLine], line_snap_ids: &[u32]) -> Vec<PointRecurrence> {
-    let point_count = raw_lines
-        .iter()
-        .map(|line| line.points.len())
-        .sum::<usize>();
-    let point_index = |index: usize| u32::try_from(index).expect("a layer's points fit in u32");
-    let mut recurrence = vec![
-        PointRecurrence {
-            repeated_source: false,
-            repeated_snapped: false,
-        };
-        point_count
-    ];
-    let points = || raw_lines.iter().flat_map(|line| &line.points).enumerate();
-    let snapped_points = || {
-        raw_lines
+/// point count took ~20 times that for all of them together. Each share's
+/// pairs are gathered and their runs marked in parallel.
+fn point_recurrence(
+    raw_lines: &[RawLine],
+    line_snap_ids: &[u32],
+    point_offsets: &[u32],
+) -> Vec<PointRecurrence> {
+    let point_count = *point_offsets.last().unwrap_or(&0) as usize;
+    let flags = (0..point_count)
+        .into_par_iter()
+        .map(|_| AtomicU8::new(0))
+        .collect::<Vec<_>>();
+    let line_points = |line: usize| {
+        let base = point_offsets[line];
+        raw_lines[line]
+            .points
             .iter()
-            .zip(line_snap_ids)
-            .flat_map(|(line, &snap_id)| line.points.iter().map(move |point| (point, snap_id)))
             .enumerate()
+            .map(move |(index, point)| (point, base + index as u32))
+    };
+    let line_snapped = |line: usize| {
+        let snap_id = line_snap_ids[line];
+        line_points(line).map(move |(point, index)| (point, snap_id, index))
     };
 
-    let mut source_counts = [0usize; RECURRENCE_SHARES];
-    let mut snapped_counts = [0usize; RECURRENCE_SHARES];
-    for (_, (point, snap_id)) in snapped_points() {
-        if let Some(node_id) = point.source_node_id() {
-            source_counts[source_share(node_id)] += 1;
-        }
-        snapped_counts[snapped_share(point, snap_id)] += 1;
-    }
+    // Per line group, its points in each share: by source node, then by
+    // snapped position.
+    let share_lens = line_groups(raw_lines.len())
+        .map(|lines| {
+            let mut lens = [[0usize; RECURRENCE_SHARES]; 2];
+            for (point, snap_id, _) in lines.flat_map(line_snapped) {
+                if let Some(node_id) = point.source_node_id() {
+                    lens[0][source_share(node_id)] += 1;
+                }
+                lens[1][snapped_share(point, snap_id)] += 1;
+            }
+            lens
+        })
+        .collect::<Vec<_>>();
 
-    for (share, count) in source_counts.into_iter().enumerate() {
-        let mut by_source = Vec::with_capacity(count);
-        by_source.extend(points().filter_map(|(index, point)| {
-            point
-                .source_node_id()
-                .filter(|node_id| source_share(*node_id) == share)
-                .map(|node_id| (node_id, point_index(index)))
-        }));
+    for share in 0..RECURRENCE_SHARES {
+        let group_lens = share_lens
+            .iter()
+            .map(|lens| lens[0][share])
+            .collect::<Vec<_>>();
+        let mut by_source = collect_by_line_groups(raw_lines.len(), &group_lens, |lines| {
+            lines
+                .flat_map(line_points)
+                .filter_map(move |(point, index)| {
+                    point
+                        .source_node_id()
+                        .filter(|node_id| source_share(*node_id) == share)
+                        .map(|node_id| (node_id, index))
+                })
+        });
         by_source.par_sort_unstable();
-        for run in by_source.chunk_by(|left, right| left.0 == right.0) {
-            if run.len() > 1 {
-                for (_, index) in run {
-                    recurrence[*index as usize].repeated_source = true;
-                }
-            }
-        }
+        mark_repeated(
+            &by_source,
+            |entry| entry.0,
+            |entry| entry.1,
+            &flags,
+            REPEATED_SOURCE,
+        );
     }
 
-    for (share, count) in snapped_counts.into_iter().enumerate() {
-        let mut by_snapped = Vec::with_capacity(count);
-        by_snapped.extend(
-            snapped_points()
-                .filter(|&(_, (point, snap_id))| snapped_share(point, snap_id) == share)
-                .map(|(index, (point, snap_id))| {
-                    ([point.lat, point.lng], snap_id, point_index(index))
-                }),
-        );
+    for share in 0..RECURRENCE_SHARES {
+        let group_lens = share_lens
+            .iter()
+            .map(|lens| lens[1][share])
+            .collect::<Vec<_>>();
+        let mut by_snapped = collect_by_line_groups(raw_lines.len(), &group_lens, |lines| {
+            lines
+                .flat_map(line_snapped)
+                .filter(move |&(point, snap_id, _)| snapped_share(point, snap_id) == share)
+                .map(|(point, snap_id, index)| ([point.lat, point.lng], snap_id, index))
+        });
         by_snapped.par_sort_unstable();
-        for run in by_snapped.chunk_by(|left, right| (left.0, left.1) == (right.0, right.1)) {
-            if run.len() > 1 {
-                for (_, _, index) in run {
-                    recurrence[*index as usize].repeated_snapped = true;
-                }
-            }
-        }
+        mark_repeated(
+            &by_snapped,
+            |entry| (entry.0, entry.1),
+            |entry| entry.2,
+            &flags,
+            REPEATED_SNAPPED,
+        );
     }
-    recurrence
+    flags
+        .into_iter()
+        .map(|flag| PointRecurrence(flag.into_inner()))
+        .collect()
+}
+
+/// Sets `bit` on the points of every run of more than one equal key in
+/// `sorted`.
+fn mark_repeated<T: Sync, K: PartialEq>(
+    sorted: &[T],
+    key: impl Fn(&T) -> K + Sync,
+    point: impl Fn(&T) -> u32 + Sync,
+    flags: &[AtomicU8],
+    bit: u8,
+) {
+    sorted
+        .par_chunk_by(|left, right| key(left) == key(right))
+        .filter(|run| run.len() > 1)
+        .for_each(|run| {
+            for entry in run {
+                flags[point(entry) as usize].fetch_or(bit, Ordering::Relaxed);
+            }
+        });
 }
 
 /// The shares [`point_recurrence`] splits each key's points into: the top
@@ -451,17 +762,6 @@ fn snapped_share(point: &RawPoint, snap_id: u32) -> usize {
 pub(crate) fn e7(point: PointKey) -> [i32; 2] {
     let fit = |value: i64| i32::try_from(value).expect("line coordinates are E7 i32 values");
     [fit(point.lat), fit(point.lng)]
-}
-
-fn node_key_for_point(point: &RawPoint, snap_id: u32, prefer_snapped: bool) -> NodeKey {
-    if prefer_snapped {
-        NodeKey::Snapped([point.lat, point.lng], snap_id)
-    } else {
-        point
-            .source_node_id()
-            .map(NodeKey::Source)
-            .unwrap_or(NodeKey::Snapped([point.lat, point.lng], snap_id))
-    }
 }
 
 /// The plane a line lies in. `bridge=no`, `tunnel=no` and `ford=no` are the
