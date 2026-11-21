@@ -980,20 +980,15 @@ fn topology_only_finish_matches_full_finish_topology() {
 
 #[test]
 fn collinearity_is_checked_in_mercator_space() {
-    assert!(is_collinear(
-        PointKey {
-            lat: to_fixed(50.0),
-            lng: to_fixed(19.0),
-        },
-        PointKey {
-            lat: to_fixed(50.0),
-            lng: to_fixed(19.001),
-        },
-        PointKey {
-            lat: to_fixed(50.0),
-            lng: to_fixed(19.002),
-        },
-    ));
+    let point = |lng: f64| PointKey {
+        lat: to_fixed(50.0),
+        lng: to_fixed(lng),
+    };
+    // The middle point is on the line between its neighbours, so it goes.
+    assert_eq!(
+        simplify_anchor_points(vec![point(19.0), point(19.001), point(19.002)]),
+        vec![point(19.0), point(19.002)]
+    );
 }
 
 #[test]

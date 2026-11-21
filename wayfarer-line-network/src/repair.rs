@@ -38,14 +38,14 @@ fn from_e7(point: [i32; 2]) -> PointKey {
 type Cell = (i32, i32);
 
 /// A segment by its line and its index in the line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct SegmentRef {
     line: u32,
     segment: u32,
 }
 
 /// A segment in one grid cell: 16 bytes. Ordered by cell, then segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Occupancy {
     cell: Cell,
     segment: SegmentRef,
@@ -62,7 +62,7 @@ fn line_segments(line: &RawLine) -> impl Iterator<Item = (usize, PointKey, Point
         })
 }
 
-/// How many grid cells [`for_each_segment_grid_cell`] visits.
+/// How many grid cells [`segment_grid_cells`] yields.
 fn segment_cell_count(a: PointKey, b: PointKey) -> usize {
     let span = |low: i64, high: i64| (grid_cell(high) - grid_cell(low)) as usize + 1;
     span(a.lat.min(b.lat), a.lat.max(b.lat)) * span(a.lng.min(b.lng), a.lng.max(b.lng))
@@ -78,28 +78,31 @@ pub(crate) fn repair_road_crossings(raw_lines: &mut [RawLine], stats: &mut Share
     // segment. A segment is read back from its line when its cell is tested,
     // so no array of every segment is held next to the occupancies, and the
     // occupancies are counted first so their vector is allocated once.
-    let occupancy_count = raw_lines
-        .par_iter()
-        .map(|line| {
-            line_segments(line)
+    let line_occupancy = |line: usize| {
+        let segment_ref = move |segment_index: usize| SegmentRef {
+            line: line as u32,
+            segment: u32::try_from(segment_index).expect("a line's segment count fits in u32"),
+        };
+        line_segments(&raw_lines[line]).flat_map(move |(segment_index, a, b)| {
+            let segment = segment_ref(segment_index);
+            segment_grid_cells(a, b).map(move |cell| Occupancy { cell, segment })
+        })
+    };
+    let group_lens = line_groups(raw_lines.len())
+        .map(|lines| {
+            lines
+                .flat_map(|line| line_segments(&raw_lines[line]))
                 .map(|(_, a, b)| segment_cell_count(a, b))
                 .sum::<usize>()
         })
+        .collect::<Vec<_>>();
+    let mut occupancy = collect_by_line_groups(raw_lines.len(), &group_lens, |lines| {
+        lines.flat_map(line_occupancy)
+    });
+    let segment_count = raw_lines
+        .par_iter()
+        .map(|line| line_segments(line).count())
         .sum::<usize>();
-    let mut occupancy = Vec::<Occupancy>::with_capacity(occupancy_count);
-    let mut segment_count = 0usize;
-    for (line_index, line) in raw_lines.iter().enumerate() {
-        for (segment_index, a, b) in line_segments(line) {
-            segment_count += 1;
-            let segment = SegmentRef {
-                line: line_index as u32,
-                segment: u32::try_from(segment_index).expect("a line's segment count fits in u32"),
-            };
-            for_each_segment_grid_cell(a, b, |cell| {
-                occupancy.push(Occupancy { cell, segment });
-            });
-        }
-    }
     if segment_count < 2 {
         return;
     }
@@ -293,22 +296,16 @@ fn canonical_pair_cell(left: &RepairSegment, right: &RepairSegment) -> Cell {
 }
 
 /// Lowest cell of a segment's bounding box, i.e. the first cell
-/// [`for_each_segment_grid_cell`] visits.
+/// [`segment_grid_cells`] yields.
 fn segment_min_cell(a: PointKey, b: PointKey) -> Cell {
     (grid_cell(a.lat.min(b.lat)), grid_cell(a.lng.min(b.lng)))
 }
 
 /// Every grid cell of the segment's bounding box, lowest first.
-fn for_each_segment_grid_cell(a: PointKey, b: PointKey, mut visit: impl FnMut(Cell)) {
-    let min_lat = a.lat.min(b.lat);
-    let max_lat = a.lat.max(b.lat);
-    let min_lng = a.lng.min(b.lng);
-    let max_lng = a.lng.max(b.lng);
-    for lat_cell in grid_cell(min_lat)..=grid_cell(max_lat) {
-        for lng_cell in grid_cell(min_lng)..=grid_cell(max_lng) {
-            visit((lat_cell, lng_cell));
-        }
-    }
+fn segment_grid_cells(a: PointKey, b: PointKey) -> impl Iterator<Item = Cell> {
+    let lat_cells = grid_cell(a.lat.min(b.lat))..=grid_cell(a.lat.max(b.lat));
+    let lng_cells = grid_cell(a.lng.min(b.lng))..=grid_cell(a.lng.max(b.lng));
+    lat_cells.flat_map(move |lat_cell| lng_cells.clone().map(move |lng_cell| (lat_cell, lng_cell)))
 }
 
 /// An E7 coordinate's cell; it fits `i32` as the coordinate does.

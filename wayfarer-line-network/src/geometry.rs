@@ -12,24 +12,44 @@ pub(crate) fn simplify_anchor_points(points: Vec<PointKey>) -> Vec<PointKey> {
         return points;
     }
     let mut simplified = Vec::with_capacity(points.len());
-    simplified.push(points[0]);
-    for index in 1..(points.len() - 1) {
-        let prev = *simplified.last().unwrap_or(&points[index - 1]);
-        let current = points[index];
-        let next = points[index + 1];
-        if is_collinear(prev, current, next) {
-            continue;
-        }
-        simplified.push(current);
-    }
-    simplified.push(*points.last().unwrap_or(&points[0]));
+    simplified_indices(
+        points.len(),
+        |index| points[index],
+        |index| {
+            simplified.push(points[index]);
+        },
+    );
     simplified
 }
 
-pub(crate) fn is_collinear(left: PointKey, middle: PointKey, right: PointKey) -> bool {
-    let left = mercator_point_for_key(left);
-    let middle = mercator_point_for_key(middle);
-    let right = mercator_point_for_key(right);
+/// The points of a stretch that simplification keeps, by index, in order:
+/// its ends, and each inner point that is not collinear (in Mercator) with
+/// the last point kept and the next one. `point(index)` is the point at
+/// `index` of `count`; each point's Mercator position is computed once.
+pub(crate) fn simplified_indices(
+    count: usize,
+    point: impl Fn(usize) -> PointKey,
+    mut keep: impl FnMut(usize),
+) {
+    if count < 3 {
+        (0..count).for_each(keep);
+        return;
+    }
+    keep(0);
+    let mut prev = mercator_point_for_key(point(0));
+    let mut current = mercator_point_for_key(point(1));
+    for index in 1..(count - 1) {
+        let next = mercator_point_for_key(point(index + 1));
+        if !is_mercator_collinear(prev, current, next) {
+            keep(index);
+            prev = current;
+        }
+        current = next;
+    }
+    keep(count - 1);
+}
+
+fn is_mercator_collinear(left: MercatorPoint, middle: MercatorPoint, right: MercatorPoint) -> bool {
     let dx = right.x - left.x;
     let dy = right.y - left.y;
     let length = (dx * dx + dy * dy).sqrt();
