@@ -88,16 +88,26 @@ impl RoadGraphBuildReport {
         osm_mode_mask: ModeMask,
         mobility_mode_mask: ModeMask,
     ) {
+        self.record_access_masks(osm_mode_mask, mobility_mode_mask, 1);
+    }
+
+    /// Counts `count` directed edges with these mode masks.
+    pub(crate) fn record_access_masks(
+        &mut self,
+        osm_mode_mask: ModeMask,
+        mobility_mode_mask: ModeMask,
+        count: usize,
+    ) {
         if let Some(entry) = self.access_mask_distribution.iter_mut().find(|entry| {
             entry.osm_mode_mask == osm_mode_mask && entry.mobility_mode_mask == mobility_mode_mask
         }) {
-            entry.count += 1;
+            entry.count += count;
         } else {
             self.access_mask_distribution
                 .push(RoadGraphAccessMaskCount {
                     osm_mode_mask,
                     mobility_mode_mask,
-                    count: 1,
+                    count,
                 });
         }
         self.access_mask_distribution.sort_by_key(|entry| {

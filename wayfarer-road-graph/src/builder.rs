@@ -467,7 +467,8 @@ impl RoadGraphBuilder {
         let mut emitter = SegmentEmitter {
             templates: &templates,
             segment_templates: &segment_templates,
-            last_template: None,
+            template_classes: vec![u32::MAX; templates.len()],
+            access_masks: Vec::new(),
             plaza_accumulators: HashMap::new(),
         };
         let mut chunks = ways.into_iter().enumerate();
@@ -491,6 +492,10 @@ impl RoadGraphBuilder {
         drop(flags);
         drop(visit_nodes);
         drop(node_positions);
+        for (osm_mode_mask, mobility_mode_mask, count) in emitter.access_masks {
+            self.report
+                .record_access_masks(osm_mode_mask, mobility_mode_mask, count);
+        }
         let plaza_accumulators = emitter.plaza_accumulators;
 
         // The plazas look nodes up by position: only their own ring points'.
@@ -786,60 +791,156 @@ struct NodeNumbering {
     visit_nodes: Vec<u32>,
 }
 
+/// A visit: a way point that starts or ends a segment.
+struct Visit<'a> {
+    /// Its index among all way points.
+    point: usize,
+    way: &'a PendingWay,
+    /// Its index in its way.
+    at: usize,
+    source_node_id: Option<i64>,
+}
+
+/// A chunk's visits, in push order.
+fn chunk_visits<'a>(
+    ways: &'a [Vec<PendingWay>],
+    layout: &ChunkLayout,
+    flags: &'a [u8],
+    chunk: usize,
+) -> impl Iterator<Item = Visit<'a>> + 'a {
+    let mut start = layout.point_starts[chunk];
+    ways[chunk].iter().flat_map(move |way| {
+        let first = start;
+        start += way.points.len();
+        let mut sources = way.source_node_ids.iter().peekable();
+        (0..way.points.len())
+            .filter(move |&at| flags[first + at] & VISIT_POINT != 0)
+            .map(move |at| {
+                while sources
+                    .next_if(|&&(source_at, _)| (source_at as usize) < at)
+                    .is_some()
+                {}
+                let source_node_id = sources
+                    .next_if(|&&(source_at, _)| source_at as usize == at)
+                    .map(|&(_, node_id)| node_id);
+                Visit {
+                    point: first + at,
+                    way,
+                    at,
+                    source_node_id,
+                }
+            })
+    })
+}
+
+/// Marks a link that holds its visit's node id rather than a point.
+const LINKED_NODE: u64 = 1 << 63;
+
 /// Numbers the nodes in the order the ways first visit their coordinates
-/// (a way's start, then each segment's end), as one pass in push order: a
-/// visit linked to itself is a new node; any other reads its first visit's
-/// node, which comes earlier. A node takes the first source node id its
-/// visits have. `links` are [`point_flags`]'s.
+/// (a way's start, then each segment's end), as the serial loop did. A
+/// visit linked to itself ([`point_flags`]' `links`) is a node's first: the
+/// first visits are numbered in push order, chunk by chunk in parallel from
+/// each chunk's count, and every other visit reads its first visit's node. A
+/// node takes its first visit's position and the first source node id its
+/// visits have.
 fn number_nodes(
     ways: &[Vec<PendingWay>],
     layout: &ChunkLayout,
     flags: &[u8],
-    links: Vec<u64>,
+    mut links: Vec<u64>,
 ) -> NodeNumbering {
-    let visits = flags.par_chunks(64 * 1024).map(visit_count).sum::<usize>();
-    let mut nodes = Vec::<NodeSeed>::new();
-    let mut visit_nodes = Vec::with_capacity(visits);
-    // A visit's node by point, written over its link once it is known.
-    let mut node_of = links;
-    let mut index = 0usize;
-    for way in ways.iter().flatten() {
-        let mut sources = way.source_node_ids.iter().peekable();
-        for at in 0..way.points.len() {
-            let point = index + at;
-            if flags[point] & VISIT_POINT == 0 {
-                continue;
-            }
-            while sources
-                .next_if(|&&(source_at, _)| (source_at as usize) < at)
-                .is_some()
-            {}
-            let source_node_id = sources
-                .next_if(|&&(source_at, _)| source_at as usize == at)
-                .map(|&(_, node_id)| node_id);
-            let first = node_of[point] as usize;
-            let node = if first == point {
-                let (lat, lng) = way.points.point(at);
-                nodes.push(NodeSeed {
+    let is_first = |links: &[u64], visit: &Visit<'_>| links[visit.point] == visit.point as u64;
+    let counts = (0..ways.len())
+        .into_par_iter()
+        .map(|chunk| {
+            chunk_visits(ways, layout, flags, chunk).fold((0, 0), |(firsts, visits), visit| {
+                (firsts + usize::from(is_first(&links, &visit)), visits + 1)
+            })
+        })
+        .collect::<Vec<(usize, usize)>>();
+    let first_lens = counts.iter().map(|&(firsts, _)| firsts).collect::<Vec<_>>();
+    let visit_lens = counts.iter().map(|&(_, visits)| visits).collect::<Vec<_>>();
+    let mut nodes = collect_by_chunks(&first_lens, |chunk| {
+        chunk_visits(ways, layout, flags, chunk)
+            .filter(|visit| is_first(&links, visit))
+            .map(|visit| {
+                let (lat, lng) = visit.way.points.point(visit.at);
+                NodeSeed {
                     lat,
                     lng,
-                    source_node_id,
-                });
-                u32::try_from(nodes.len() - 1).expect("fewer than 2^32 graph nodes")
-            } else {
-                let node = node_of[first] as u32;
-                let seed = &mut nodes[node as usize];
-                if seed.source_node_id.is_none() {
-                    seed.source_node_id = source_node_id;
+                    source_node_id: visit.source_node_id,
                 }
-                node
-            };
-            node_of[point] = u64::from(node);
-            visit_nodes.push(node);
-        }
-        index += way.points.len();
+            })
+    });
+    u32::try_from(nodes.len()).expect("fewer than 2^32 graph nodes");
+
+    // Each first visit's link becomes its node id.
+    let mut chunk_links = Vec::with_capacity(ways.len());
+    let mut rest = links.as_mut_slice();
+    for chunk in 0..ways.len() {
+        let (piece, tail) =
+            std::mem::take(&mut rest).split_at_mut(layout.chunk_points(chunk).len());
+        chunk_links.push(piece);
+        rest = tail;
     }
-    debug_assert_eq!(index, layout.point_count);
+    let mut first_node = 0u64;
+    let chunk_first_nodes = first_lens
+        .iter()
+        .map(|&firsts| {
+            let start = first_node;
+            first_node += firsts as u64;
+            start
+        })
+        .collect::<Vec<_>>();
+    chunk_links
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(chunk, chunk_links)| {
+            let start = layout.point_starts[chunk];
+            let mut node = chunk_first_nodes[chunk];
+            for visit in chunk_visits(ways, layout, flags, chunk) {
+                let link = &mut chunk_links[visit.point - start];
+                if *link == visit.point as u64 {
+                    *link = node | LINKED_NODE;
+                    node += 1;
+                }
+            }
+        });
+    let node_of = |visit: &Visit<'_>| {
+        let link = links[visit.point];
+        let link = if link & LINKED_NODE != 0 {
+            link
+        } else {
+            links[link as usize]
+        };
+        (link & !LINKED_NODE) as u32
+    };
+    let visit_nodes = collect_by_chunks(&visit_lens, |chunk| {
+        chunk_visits(ways, layout, flags, chunk).map(|visit| node_of(&visit))
+    });
+
+    // A node whose first visit has no source node takes the first one a later
+    // visit has.
+    let mut late_sources = (0..ways.len())
+        .into_par_iter()
+        .flat_map_iter(|chunk| {
+            chunk_visits(ways, layout, flags, chunk).filter_map(|visit| {
+                let node = node_of(&visit);
+                let source_node_id = visit.source_node_id?;
+                nodes[node as usize].source_node_id.is_none().then_some((
+                    visit.point,
+                    node,
+                    source_node_id,
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    late_sources.par_sort_unstable();
+    for (_, node, source_node_id) in late_sources {
+        nodes[node as usize]
+            .source_node_id
+            .get_or_insert(source_node_id);
+    }
     NodeNumbering { nodes, visit_nodes }
 }
 
@@ -1133,13 +1234,30 @@ impl SegmentPlanner<'_> {
 struct SegmentEmitter<'a> {
     templates: &'a [Template],
     segment_templates: &'a [SegmentTemplate],
-    /// The last way's template and its shared-info class. Consecutive pushes
-    /// of one way share their template, so its class is interned once.
-    last_template: Option<(u32, u32)>,
+    /// Each template's shared-info class, once a segment of it has been
+    /// added ([`u32::MAX`] before): interned the first time, so the classes
+    /// are numbered in the order segments first use them.
+    template_classes: Vec<u32>,
+    /// How many directed edges have each (OSM, mobility) mode mask pair, in
+    /// the order the pairs come: added to the report at the end.
+    access_masks: Vec<(ModeMask, ModeMask, usize)>,
     plaza_accumulators: HashMap<i64, PlazaAccumulator>,
 }
 
 impl SegmentEmitter<'_> {
+    fn count_access_mask(&mut self, osm_mode_mask: ModeMask, mobility_mode_mask: ModeMask) {
+        match self
+            .access_masks
+            .iter_mut()
+            .find(|(osm, mobility, _)| (*osm, *mobility) == (osm_mode_mask, mobility_mode_mask))
+        {
+            Some((_, _, count)) => *count += 1,
+            None => self
+                .access_masks
+                .push((osm_mode_mask, mobility_mode_mask, 1)),
+        }
+    }
+
     fn emit(
         &mut self,
         chunk: &[PendingWay],
@@ -1187,14 +1305,11 @@ impl SegmentEmitter<'_> {
                 );
                 let shared_edge_info_id = *next_shared_edge_info_id;
                 *next_shared_edge_info_id += 1;
-                let template_class = match self.last_template {
-                    Some((index, class)) if index == pending.template => class,
-                    _ => {
-                        let class = graph.shared_edge_infos.intern(template.info.clone());
-                        self.last_template = Some((pending.template, class));
-                        class
-                    }
-                };
+                let template_class = &mut self.template_classes[pending.template as usize];
+                if *template_class == u32::MAX {
+                    *template_class = graph.shared_edge_infos.intern(template.info.clone());
+                }
+                let template_class = *template_class;
                 graph.shared_edge_infos.push_with_class(
                     shared_edge_info_id,
                     pending.osm_way_id,
@@ -1242,7 +1357,7 @@ impl SegmentEmitter<'_> {
                     if osm_forward_mode_mask == 0 {
                         report.sar_only_edge_count += 1;
                     } else {
-                        report.record_access_mask(osm_forward_mode_mask, mobility_mode_mask);
+                        self.count_access_mask(osm_forward_mode_mask, mobility_mode_mask);
                         if mobility_mode_mask == 0 {
                             report.zero_access_edge_count += 1;
                         }
@@ -1276,7 +1391,7 @@ impl SegmentEmitter<'_> {
                     if osm_reverse_mode_mask == 0 {
                         report.sar_only_edge_count += 1;
                     } else {
-                        report.record_access_mask(osm_reverse_mode_mask, mobility_mode_mask);
+                        self.count_access_mask(osm_reverse_mode_mask, mobility_mode_mask);
                         if mobility_mode_mask == 0 {
                             report.zero_access_edge_count += 1;
                         }
