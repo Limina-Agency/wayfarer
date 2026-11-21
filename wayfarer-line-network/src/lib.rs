@@ -7,6 +7,7 @@
 //!     DirectionalAccessModel, RoadRoutingAttrs, SharedLineInput, SharedLineLayer,
 //!     SharedLineNetworkBuilder,
 //! };
+//! use std::sync::Arc;
 //!
 //! fn road(feature_id: i64, geometry: Vec<(f64, f64)>, node_chain: Vec<i64>) -> SharedLineInput {
 //!     SharedLineInput {
@@ -20,7 +21,7 @@
 //!         min_zoom: 0,
 //!         max_zoom: 14,
 //!         sort_order: 0,
-//!         routing: Some(RoadRoutingAttrs {
+//!         routing: Some(Arc::new(RoadRoutingAttrs {
 //!             road_class: "residential".into(),
 //!             directional_access: DirectionalAccessModel::Both,
 //!             access: None,
@@ -30,7 +31,7 @@
 //!             has_ford: false,
 //!             has_tunnel: false,
 //!             access_restricted: false,
-//!         }),
+//!         })),
 //!     }
 //! }
 //!
@@ -54,7 +55,7 @@
 //! vector basemap compiler and are ignored by routing.
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;

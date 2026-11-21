@@ -116,22 +116,24 @@ impl RoadGraph {
         F: FnMut(i64) -> Result<Option<RoadWayFacts>, E>,
     {
         let country_code = self.country_code.clone();
-        let len = self.shared_edge_infos.len();
-        let run = way_facts_run(
+        let mut merged = MergedWayFacts::with_capacity(self.shared_edge_infos.len());
+        merged.push(way_facts_run(
             self.shared_edge_infos.edges(),
             self.shared_edge_infos.classes(),
             0,
             country_code.as_deref(),
             &mut load_fact,
-        )?;
-        self.finish_way_facts(vec![run], len, country_code.as_deref(), load_fact)
+        )?);
+        self.finish_way_facts(merged, country_code.as_deref(), load_fact)
     }
 
     /// [`Self::refresh_shared_edge_way_facts_with`] across threads, with the
     /// same result. The infos are split into runs that end at a way boundary,
     /// so each way's facts are still loaded once; each run collects its
     /// attribute classes, and the runs' classes are merged in run order, so
-    /// classes are numbered by first use whatever the thread count.
+    /// classes are numbered by first use whatever the thread count. Runs go a
+    /// batch of one per thread at a time, merged before the next batch, so
+    /// only one batch's run-local classes are held beside the merged ones.
     pub fn refresh_shared_edge_way_facts_par_with<F, E>(&mut self, load_fact: F) -> Result<(), E>
     where
         F: Fn(i64) -> Result<Option<RoadWayFacts>, E> + Sync,
@@ -151,48 +153,43 @@ impl RoadGraph {
             runs.push(offset..end);
             offset = end;
         }
-        let runs = runs
-            .into_par_iter()
-            .map(|range| {
-                let offset = range.start;
-                way_facts_run(
-                    &edges[range],
-                    classes,
-                    offset,
-                    country_code.as_deref(),
-                    &mut |way_id| load_fact(way_id),
-                )
-            })
-            .collect::<Result<Vec<_>, E>>()?;
-        let len = edges.len();
-        self.finish_way_facts(runs, len, country_code.as_deref(), load_fact)
+        let mut merged = MergedWayFacts::with_capacity(edges.len());
+        for batch in runs.chunks(rayon::current_num_threads().max(1)) {
+            let batch = batch
+                .par_iter()
+                .map(|range| {
+                    way_facts_run(
+                        &edges[range.clone()],
+                        classes,
+                        range.start,
+                        country_code.as_deref(),
+                        &mut |way_id| load_fact(way_id),
+                    )
+                })
+                .collect::<Result<Vec<_>, E>>()?;
+            for run in batch {
+                merged.push(run);
+            }
+        }
+        self.finish_way_facts(merged, country_code.as_deref(), load_fact)
     }
 
-    /// Merges the runs' classes in order, applies the lineage fallback to the
-    /// infos whose own way had no facts, and installs the new classes.
+    /// Applies the lineage fallback to the infos whose own way had no facts,
+    /// and installs the merged runs' classes.
     fn finish_way_facts<F, E>(
         &mut self,
-        runs: Vec<WayFactsRun>,
-        len: usize,
+        merged: MergedWayFacts,
         country_code: Option<&str>,
         mut load_fact: F,
     ) -> Result<(), E>
     where
         F: FnMut(i64) -> Result<Option<RoadWayFacts>, E>,
     {
-        let mut classes = SharedInfoClasses::default();
-        let mut classes_of = Vec::with_capacity(len);
-        let mut fallback = Vec::new();
-        for run in runs {
-            let global = run
-                .classes
-                .into_boxes()
-                .into_iter()
-                .map(|attrs| classes.intern_boxed(attrs))
-                .collect::<Vec<_>>();
-            classes_of.extend(run.classes_of.iter().map(|local| global[*local as usize]));
-            fallback.extend(run.without_own_facts);
-        }
+        let MergedWayFacts {
+            mut classes,
+            mut classes_of,
+            fallback,
+        } = merged;
         if !fallback.is_empty() {
             let mut interner = TagInterner::new();
             let wanted = fallback
@@ -527,6 +524,35 @@ struct WayFactsRun {
     classes: SharedInfoClasses,
     classes_of: Vec<u32>,
     without_own_facts: Vec<usize>,
+}
+
+/// Runs' classes merged in run order: each class is numbered by its first use.
+struct MergedWayFacts {
+    classes: SharedInfoClasses,
+    classes_of: Vec<u32>,
+    fallback: Vec<usize>,
+}
+
+impl MergedWayFacts {
+    fn with_capacity(len: usize) -> Self {
+        Self {
+            classes: SharedInfoClasses::default(),
+            classes_of: Vec::with_capacity(len),
+            fallback: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, run: WayFactsRun) {
+        let global = run
+            .classes
+            .into_boxes()
+            .into_iter()
+            .map(|attrs| self.classes.intern_boxed(attrs))
+            .collect::<Vec<_>>();
+        self.classes_of
+            .extend(run.classes_of.iter().map(|local| global[*local as usize]));
+        self.fallback.extend(run.without_own_facts);
+    }
 }
 
 /// Applies each way's facts to its infos in `edges` (which start at info

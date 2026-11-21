@@ -174,8 +174,11 @@ pub(crate) fn build_request_sections(
     // Node ids (u32 deltas when they fit) and roundabout exits.
     let node_ids = (0..node_count).map(|at| node(at).id).collect::<Vec<_>>();
     let (node_base, node_id_delta, node_id_wide) = match deltas(&node_ids) {
-        Some((base, deltas)) => (base as i64, deltas, Vec::new()),
-        None => (0, Vec::new(), node_ids.clone()),
+        Some((base, deltas)) => {
+            drop(node_ids);
+            (base as i64, deltas, Vec::new())
+        }
+        None => (0, Vec::new(), node_ids),
     };
     let roundabout_exits = (0..node_count)
         .filter(|at| node(*at).roundabout_exit_count != 0)
@@ -222,6 +225,8 @@ pub(crate) fn build_request_sections(
         .filter(|(_, component)| **component != default_component)
         .flat_map(|(node, component)| [node as u32, *component])
         .collect::<Vec<_>>();
+    drop(components);
+    drop(size_by_component);
     let mut component_sizes = component_sizes.into_iter().collect::<Vec<_>>();
     component_sizes.sort_unstable();
     let component_sizes = component_sizes
@@ -311,6 +316,7 @@ pub(crate) fn build_request_sections(
             entry_edges.push((edge as u32, shared));
         }
     }
+    drop(representative);
 
     // Grid over the shapes' extent.
     let (mut min_lat, mut min_lng, mut max_lat, mut max_lng) = (
@@ -357,6 +363,7 @@ pub(crate) fn build_request_sections(
             cells.into_iter().map(move |cell| (cell, *edge))
         })
         .collect::<Vec<_>>();
+    drop(entry_edges);
     pairs.par_sort_unstable();
     let cell_count = grid.rows * grid.cols;
     let mut cell_start = vec![0u32; cell_count + 1];
@@ -385,7 +392,7 @@ pub(crate) fn build_request_sections(
                 input.edge_flags,
                 edge,
             )
-            .map_or(NONE_U64, |opposing| input.edge_ids[opposing as usize])
+            .unwrap_or(NONE_U32)
         })
         .collect::<Vec<_>>();
     // (edges, values) where `actual` differs from the rule; an opposing edge
@@ -405,7 +412,11 @@ pub(crate) fn build_request_sections(
                         .unwrap_or(NONE_U32)
                 };
                 let actual = if value == NONE_U32 { NONE_U64 } else { actual };
-                (derived[edge as usize] != actual).then_some((edge, value))
+                let derived = match derived[edge as usize] {
+                    NONE_U32 => NONE_U64,
+                    opposing => input.edge_ids[opposing as usize],
+                };
+                (derived != actual).then_some((edge, value))
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -432,6 +443,10 @@ pub(crate) fn build_request_sections(
             mode_mask_exceptions.extend([edge as u32, road.mobility_mode_mask]);
         }
     }
+
+    // Last, once the other temporaries are gone: its searches hold a few
+    // words per node.
+    let reach_saturated = reach_saturated(input, SATURATION_CAP);
 
     let string_start = if table.string_start.is_empty() {
         vec![0]
@@ -496,7 +511,7 @@ pub(crate) fn build_request_sections(
         leg_opposing_edge,
         leg_opposing_value,
         roundabout_exits,
-        reach_saturated: reach_saturated(input, SATURATION_CAP),
+        reach_saturated,
         mode_mask_exceptions,
         tier_exceptions,
         conditional_shared,

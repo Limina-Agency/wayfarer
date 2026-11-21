@@ -42,7 +42,9 @@ pub(crate) fn cluster_warnings(
         cluster_count: 0,
         examples: Vec::new(),
     };
-    let mut candidates = Vec::new();
+    // `(node index, lat, lng)`, in node order: a candidate's position is its
+    // number below.
+    let mut candidates = Vec::<(u32, i32, i32)>::new();
     for node_index in graph.graph.node_indices() {
         let node = &graph.graph[node_index];
         if matches!(kind, ClusterWarningKind::UnsnappedEndpoints)
@@ -50,7 +52,11 @@ pub(crate) fn cluster_warnings(
         {
             continue;
         }
-        candidates.push((node_index.index(), to_fixed(node.lat), to_fixed(node.lng)));
+        candidates.push((
+            node_index.index() as u32,
+            to_fixed(node.lat),
+            to_fixed(node.lng),
+        ));
     }
     if candidates.len() < 2 {
         // The former code returned before recording a count, leaving it 0.
@@ -58,78 +64,105 @@ pub(crate) fn cluster_warnings(
     }
 
     let cell_size = radius_fixed.max(1);
-    let cell_of = |lat_fixed: i32, lng_fixed: i32| {
+    let cell_of = |candidate: u32| {
+        let (_, lat_fixed, lng_fixed) = candidates[candidate as usize];
         (
             lat_fixed.div_euclid(cell_size),
             lng_fixed.div_euclid(cell_size),
         )
     };
-    // Candidates sorted by cell, so each cell's members are one contiguous
-    // run in candidate order: what a map of per-cell vectors held, without a
-    // vector per cell. The map only locates each run.
-    let mut by_cell = candidates
-        .iter()
-        .enumerate()
-        .map(|(candidate_index, &(_, lat_fixed, lng_fixed))| {
-            (cell_of(lat_fixed, lng_fixed), candidate_index)
-        })
-        .collect::<Vec<_>>();
-    by_cell.sort_unstable();
-    let mut cell_runs = FxHashMap::<(i32, i32), (usize, usize)>::default();
-    let mut run_start = 0;
-    for run in by_cell.chunk_by(|left, right| left.0 == right.0) {
-        cell_runs.insert(run[0].0, (run_start, run_start + run.len()));
-        run_start += run.len();
-    }
-
-    let mut dsu = DisjointSet::new(candidates.len());
-    for (candidate_index, &(_, lat_fixed, lng_fixed)) in candidates.iter().enumerate() {
-        let cell = cell_of(lat_fixed, lng_fixed);
-        for d_lat in -1..=1 {
-            for d_lng in -1..=1 {
-                let Some(&(start, end)) = cell_runs.get(&(cell.0 + d_lat, cell.1 + d_lng)) else {
+    // Candidates by cell (and number within a cell), so the cells a candidate
+    // compares with are found by sweeping: a cell's row neighbours are
+    // contiguous, and as the sweep moves on, so does the start of each
+    // neighbouring row's range. No map of the cells (nearly one per node at
+    // this radius) is needed.
+    let mut by_cell = (0..candidates.len() as u32).collect::<Vec<_>>();
+    by_cell.sort_unstable_by_key(|&candidate| (cell_of(candidate), candidate));
+    // The pairs within the radius, as `(candidate, row offset, column offset,
+    // other)`, sorted into the order the former per-candidate scan joined
+    // them (rows, then columns, then members in number order), so the joins,
+    // and the roots the clusters are reported by, are the same.
+    let mut pairs = Vec::<(u32, i8, i8, u32)>::new();
+    let mut row_starts = [0usize; 3];
+    for &candidate in &by_cell {
+        let (row, column) = cell_of(candidate);
+        let (_, lat_fixed, lng_fixed) = candidates[candidate as usize];
+        for (d_lat, row_start) in (-1i32..=1).zip(&mut row_starts) {
+            let from = (row + d_lat, column - 1);
+            let to = (row + d_lat, column + 1);
+            while *row_start < by_cell.len() && cell_of(by_cell[*row_start]) < from {
+                *row_start += 1;
+            }
+            for &other in &by_cell[*row_start..] {
+                let other_cell = cell_of(other);
+                if other_cell > to {
+                    break;
+                }
+                if other <= candidate {
                     continue;
-                };
-                for &(_, other_index) in &by_cell[start..end] {
-                    if other_index <= candidate_index {
-                        continue;
-                    }
-                    let (_, other_lat, other_lng) = candidates[other_index];
-                    let d_lat = lat_fixed - other_lat;
-                    let d_lng = lng_fixed - other_lng;
-                    if d_lat == 0 && d_lng == 0 {
-                        continue;
-                    }
-                    if d_lat.saturating_mul(d_lat) + d_lng.saturating_mul(d_lng)
-                        <= radius_fixed.saturating_mul(radius_fixed)
-                    {
-                        dsu.union(candidate_index, other_index);
-                    }
+                }
+                let (_, other_lat, other_lng) = candidates[other as usize];
+                let d_lat_fixed = lat_fixed - other_lat;
+                let d_lng_fixed = lng_fixed - other_lng;
+                if d_lat_fixed == 0 && d_lng_fixed == 0 {
+                    continue;
+                }
+                if d_lat_fixed.saturating_mul(d_lat_fixed) + d_lng_fixed.saturating_mul(d_lng_fixed)
+                    <= radius_fixed.saturating_mul(radius_fixed)
+                {
+                    pairs.push((candidate, d_lat as i8, (other_cell.1 - column) as i8, other));
                 }
             }
         }
     }
+    drop(by_cell);
+    pairs.sort_unstable();
+
+    // Only paired candidates can share a cluster. They are renumbered in
+    // order, which keeps every join, rank and root as it was over all
+    // candidates; a cluster's root and lowest member map back in order too.
+    let mut members = pairs
+        .iter()
+        .flat_map(|&(candidate, _, _, other)| [candidate, other])
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    members.dedup();
+    let member_of = |candidate: u32| {
+        members
+            .binary_search(&candidate)
+            .expect("a paired candidate")
+    };
+    let mut dsu = DisjointSet::new(members.len());
+    for &(candidate, _, _, other) in &pairs {
+        dsu.union(member_of(candidate), member_of(other));
+    }
+    drop(pairs);
 
     // Cluster sizes and lowest members per root, read in root order: what a
     // map of member lists keyed by root yielded, without a list per node.
-    let mut cluster_size = vec![0u32; candidates.len()];
-    let mut cluster_first = vec![0usize; candidates.len()];
-    for index in 0..candidates.len() {
+    let mut cluster_size = vec![0u32; members.len()];
+    let mut cluster_first = vec![0usize; members.len()];
+    for index in 0..members.len() {
         let root = dsu.find(index);
         if cluster_size[root] == 0 {
             cluster_first[root] = index;
         }
         cluster_size[root] += 1;
     }
-    let clusters = (0..candidates.len())
+    let clusters = (0..members.len())
         .filter(|&root| cluster_size[root] > 1)
-        .map(|root| (cluster_first[root], cluster_size[root] as usize))
+        .map(|root| {
+            (
+                members[cluster_first[root]] as usize,
+                cluster_size[root] as usize,
+            )
+        })
         .collect::<Vec<_>>();
     warnings.cluster_count = clusters.len();
 
     for (first_member, member_count) in clusters.into_iter().take(4) {
         let (node_graph_index, lat_fixed, lng_fixed) = candidates[first_member];
-        let node = &graph.graph[NodeIndex::new(node_graph_index)];
+        let node = &graph.graph[NodeIndex::new(node_graph_index as usize)];
         let (example_kind, label) = match kind {
             ClusterWarningKind::NearDuplicateNodes => (
                 RoadGraphQualityExampleKind::NearDuplicateNodeCluster,

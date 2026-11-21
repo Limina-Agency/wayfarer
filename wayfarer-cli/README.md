@@ -38,8 +38,9 @@ JSON (`CompileResult`: the package's path, `byteLen`, `datasetHash`,
   directory).
 - `--low-memory`: smaller ingest batches and queues, for memory-constrained
   machines; slower. The package's bytes are the same.
-- `--threads N`: the compile's threads (default: all cores less two for the
-  ingest's decode workers). The package's bytes are the same for any count.
+- `--threads N`: the compile's threads and the ingest's decode workers
+  (default: all cores, at most two decode workers with `--low-memory`). The
+  package's bytes are the same for any count.
 - `--request FILE` (or `-` for stdin): the compile as `CompileRequest` JSON
   instead of paths and flags, the same JSON the C ABI takes:
 

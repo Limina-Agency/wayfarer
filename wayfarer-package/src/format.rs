@@ -2689,12 +2689,31 @@ impl<T: Pod> SectionBytes for Vec<T> {
     }
 }
 
+/// Where a section's bytes are until the package is written.
+enum SectionData {
+    /// The typed vector, moved in.
+    Memory(Box<dyn SectionBytes + Send + Sync>),
+    /// Written to the writer's spill file at `offset` when it was put, and
+    /// hashed then.
+    Spilled {
+        offset: u64,
+        len: usize,
+        hash: [u8; 32],
+    },
+}
+
 /// Lays sections out at aligned offsets. Sections keep their typed vectors
 /// (moved in, not copied) until they are hashed and streamed to the
-/// destination.
+/// destination, or, for a writer made with [`PackageWriter::spilling`], go
+/// to a spill file as they are put, so a build holds only the sections it
+/// still reads.
 pub struct PackageWriter {
     header: Vec<u8>,
-    sections: Vec<Option<Box<dyn SectionBytes + Send + Sync>>>,
+    sections: Vec<Option<SectionData>>,
+    /// The spill file and its length so far.
+    spill: Option<(File, u64)>,
+    /// The first failed spill write, reported by [`Self::write_to`].
+    spill_error: Option<std::io::Error>,
     /// Section hashes and the final header, computed once by `seal`.
     sealed: OnceLock<(Vec<u8>, Vec<u8>)>,
 }
@@ -2706,6 +2725,44 @@ impl PackageWriter {
         profile_columns: [u8; PROFILE_SLOTS],
         heuristic_cost_per_m: [f64; PROFILE_SLOTS],
     ) -> Self {
+        let mut writer = Self::with_spill(None);
+        writer.set_header(counts, layout, profile_columns, heuristic_cost_per_m);
+        writer
+    }
+
+    /// A writer that writes each section to `spill` (an empty file, readable
+    /// and writable) as it is put, and copies them from there in table order
+    /// when the package is written. Call [`Self::set_header`] before
+    /// sealing or writing it.
+    pub fn spilling(spill: File) -> Self {
+        Self::with_spill(Some(spill))
+    }
+
+    /// A writer that keeps its sections in memory, before its header is
+    /// known: call [`Self::set_header`] before sealing or writing it.
+    pub fn in_memory() -> Self {
+        Self::with_spill(None)
+    }
+
+    fn with_spill(spill: Option<File>) -> Self {
+        Self {
+            header: Vec::new(),
+            sections: (0..SECTION_COUNT).map(|_| None).collect(),
+            spill: spill.map(|file| (file, 0)),
+            spill_error: None,
+            sealed: OnceLock::new(),
+        }
+    }
+
+    /// Sets the header, and puts the [`RESERVED_ZERO_SECTIONS`] its counts
+    /// size. [`Self::new`] does this.
+    pub fn set_header(
+        &mut self,
+        counts: PackageCounts,
+        layout: PackageLayout,
+        profile_columns: [u8; PROFILE_SLOTS],
+        heuristic_cost_per_m: [f64; PROFILE_SLOTS],
+    ) {
         let mut header = vec![0u8; HEADER_FIXED_BYTES];
         header[0..8].copy_from_slice(MAGIC);
         header[HEADER_VERSION..HEADER_VERSION + 4]
@@ -2740,19 +2797,14 @@ impl PackageWriter {
             let at = HEADER_HEURISTIC + slot * 8;
             header[at..at + 8].copy_from_slice(&value.to_le_bytes());
         }
-        let mut writer = Self {
-            header,
-            sections: (0..SECTION_COUNT).map(|_| None).collect(),
-            sealed: OnceLock::new(),
-        };
+        self.header = header;
         let words = counts.column_count * counts.node_count.div_ceil(64);
         for section in RESERVED_ZERO_SECTIONS {
             match SECTION_ELEMENT_BYTES[section as usize] {
-                8 => writer.put(section, vec![0u64; words]),
-                _ => writer.put(section, vec![0u32; words]),
+                8 => self.put(section, vec![0u64; words]),
+                _ => self.put(section, vec![0u32; words]),
             }
         }
-        writer
     }
 
     pub fn put<T: Pod + Send + Sync>(&mut self, section: Section, data: Vec<T>) {
@@ -2760,7 +2812,28 @@ impl PackageWriter {
             std::mem::size_of::<T>(),
             SECTION_ELEMENT_BYTES[section as usize]
         );
-        self.sections[section as usize] = Some(Box::new(data));
+        let Some((file, end)) = &mut self.spill else {
+            self.sections[section as usize] = Some(SectionData::Memory(Box::new(data)));
+            return;
+        };
+        let bytes = data.bytes();
+        let offset = *end;
+        if self.spill_error.is_none() {
+            use std::io::{Seek, SeekFrom};
+            let written = file
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(bytes));
+            if let Err(error) = written {
+                self.spill_error = Some(error);
+            }
+        }
+        *end += bytes.len() as u64;
+        let hash = *hash_section(bytes).as_bytes();
+        self.sections[section as usize] = Some(SectionData::Spilled {
+            offset,
+            len: bytes.len(),
+            hash,
+        });
     }
 
     pub fn put_metadata<Q: Serialize>(&mut self, metadata: &RoutingPackageMetadata<Q>) {
@@ -2768,10 +2841,23 @@ impl PackageWriter {
         self.put(Section::Metadata, bytes);
     }
 
-    pub fn section_bytes(&self, index: usize) -> &[u8] {
-        self.sections[index]
-            .as_ref()
-            .map_or(&[], |section| section.bytes())
+    /// The bytes of a section held in memory (empty if it was not put);
+    /// `None` for a section in the spill file.
+    pub fn section_bytes(&self, index: usize) -> Option<&[u8]> {
+        match &self.sections[index] {
+            None => Some(&[]),
+            Some(SectionData::Memory(section)) => Some(section.bytes()),
+            Some(SectionData::Spilled { .. }) => None,
+        }
+    }
+
+    /// The byte length of a section (0 if it was not put).
+    pub fn section_len(&self, index: usize) -> usize {
+        match &self.sections[index] {
+            None => 0,
+            Some(SectionData::Memory(section)) => section.bytes().len(),
+            Some(SectionData::Spilled { len, .. }) => *len,
+        }
     }
 
     pub fn first_section_offset() -> usize {
@@ -2782,24 +2868,29 @@ impl PackageWriter {
     pub fn byte_len(&self) -> usize {
         let mut offset = Self::first_section_offset();
         for index in 0..SECTION_COUNT {
-            offset = (offset + self.section_bytes(index).len()).next_multiple_of(SECTION_ALIGN);
+            offset = (offset + self.section_len(index)).next_multiple_of(SECTION_ALIGN);
         }
         offset
     }
 
-    /// The final header and section table: every section hashed (in
-    /// parallel), then the root checksum over the header and table.
+    /// The final header and section table: every section in memory hashed
+    /// (in parallel; spilled ones were hashed when put), then the root
+    /// checksum over the header and table.
     pub fn seal(&self) -> &(Vec<u8>, Vec<u8>) {
+        assert!(!self.header.is_empty(), "the package header is not set");
         self.sealed.get_or_init(|| {
             use rayon::prelude::*;
             let hashes = (0..SECTION_COUNT)
                 .into_par_iter()
-                .map(|index| *blake3::hash(self.section_bytes(index)).as_bytes())
+                .map(|index| match &self.sections[index] {
+                    Some(SectionData::Spilled { hash, .. }) => *hash,
+                    _ => *hash_section(self.section_bytes(index).unwrap_or_default()).as_bytes(),
+                })
                 .collect::<Vec<_>>();
             let mut table = Vec::with_capacity(SECTION_COUNT * TABLE_ENTRY_BYTES);
             let mut offset = Self::first_section_offset();
             for (index, hash) in hashes.iter().enumerate() {
-                let len = self.section_bytes(index).len();
+                let len = self.section_len(index);
                 table.extend_from_slice(&(offset as u64).to_le_bytes());
                 table.extend_from_slice(&(len as u64).to_le_bytes());
                 table.extend_from_slice(hash);
@@ -2817,6 +2908,12 @@ impl PackageWriter {
 
     /// Streams the encoded package to `out`.
     pub fn write_to(&self, out: &mut impl Write) -> std::io::Result<()> {
+        if let Some(error) = &self.spill_error {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("writing a package section to the spill file failed: {error}"),
+            ));
+        }
         let (header, table) = self.seal();
         fn emit(out: &mut impl Write, written: &mut usize, bytes: &[u8]) -> std::io::Result<()> {
             out.write_all(bytes)?;
@@ -2833,7 +2930,26 @@ impl PackageWriter {
         emit(out, &mut written, table)?;
         for index in 0..SECTION_COUNT {
             pad(out, &mut written)?;
-            emit(out, &mut written, self.section_bytes(index))?;
+            match (&self.sections[index], &self.spill) {
+                (Some(SectionData::Spilled { offset, len, .. }), Some((file, _))) => {
+                    use std::io::{Seek, SeekFrom};
+                    let mut file = file;
+                    file.seek(SeekFrom::Start(*offset))?;
+                    let copied = std::io::copy(&mut file.take(*len as u64), out)?;
+                    if copied != *len as u64 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "the package spill file is shorter than its sections",
+                        ));
+                    }
+                    written += *len;
+                }
+                _ => emit(
+                    out,
+                    &mut written,
+                    self.section_bytes(index).unwrap_or_default(),
+                )?,
+            }
         }
         pad(out, &mut written)
     }
@@ -2845,6 +2961,11 @@ impl PackageWriter {
             .expect("writing to a Vec cannot fail");
         out
     }
+}
+
+/// A section's checksum: BLAKE3 over its bytes.
+fn hash_section(bytes: &[u8]) -> blake3::Hash {
+    blake3::hash(bytes)
 }
 
 /// The road class rank stored in `EdgeRoadRank` (higher is a bigger road).

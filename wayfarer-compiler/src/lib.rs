@@ -44,7 +44,7 @@ pub use package_build::{PackageBuildOptions, PackageBuildReport};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wayfarer_line_network::{
     DirectionalAccessModel, RoadRoutingAttrs, SharedLineInput, SharedLineLayer, SharedLineNetwork,
@@ -81,7 +81,8 @@ use profiling::Phase;
 #[derive(Debug, Clone)]
 pub(crate) struct RoadGraphCompileRequest {
     pub input_pbf_path: PathBuf,
-    /// Scratch space (the node store of large extracts). The compile owns it:
+    /// Scratch space (the node store of large extracts, the encoded way
+    /// facts while the graph is built). The compile owns it:
     /// it is removed when the compile ends, whether it succeeds, fails or is
     /// cancelled.
     pub temp_dir: PathBuf,
@@ -227,17 +228,31 @@ pub(crate) fn compile_route_archive(
                 CompileError::Failed(format!("Failed to start the compile's threads: {error}"))
             })
             .and_then(|pool| pool.install(|| compile(threads))),
-        None => compile(
-            profile
-                .worker_threads()
-                .min(rayon::current_num_threads())
-                .max(1),
-        ),
+        None => compile(default_decode_workers(
+            profile,
+            rayon::current_num_threads(),
+        )),
     };
     if result.is_err() && request.graph.temp_dir.exists() {
         let _ = std::fs::remove_dir_all(&request.graph.temp_dir);
     }
     result
+}
+
+/// The ingest's decode workers when the request sets no thread count: one
+/// per thread of the pool the compile runs on for the standard profile, and
+/// the low-memory profile's own (at most two) within that pool.
+///
+/// The standard profile's own default in `osm-pbf-ingest` leaves two cores
+/// for the reader and the collector, but both are nearly idle while the
+/// workers decode, so on four cores it left half of them unused (Małopolskie's
+/// ingest took 4.2 s with it and 3.8 s with four workers).
+fn default_decode_workers(profile: IngestBuildProfile, pool_threads: usize) -> usize {
+    match profile {
+        IngestBuildProfile::DesktopFull => pool_threads,
+        IngestBuildProfile::MobileOperational => profile.worker_threads().min(pool_threads),
+    }
+    .max(1)
 }
 
 fn compile_with_job(
@@ -282,6 +297,7 @@ fn compile_with_job(
         Some(&graph_manifest),
         &request.route_archive_path,
         &PackageBuildOptions::default(),
+        Some(&request.graph.temp_dir),
         job,
     )
     .map_err(|error| {
@@ -407,7 +423,9 @@ fn compile_road_graph_from_pbf(
     drop(phase);
     let phase = Phase::start("shared_line_network_finish");
     report_finalize_checkpoint(job, "before_line_network_finish", 0)?;
-    let inputs = roads.finish();
+    let inputs = roads
+        .finish(&request.temp_dir)
+        .map_err(CompileError::Failed)?;
     drop(phase);
     build_road_graph(
         &request.graph_id,
@@ -434,11 +452,22 @@ pub(crate) struct OsmRoadNetworkCollector<'a> {
 /// a map for a region (~1M ways) it was ~1.1 GiB live through line-network
 /// finish, graph building and enrichment. Encoded, Małopolskie's 670k ways
 /// take 57 MB plus a 16-byte index entry per way.
+///
+/// Between collection and enrichment the bytes wait in a scratch file
+/// ([`spill`](EncodedWayFacts::spill)): nothing reads them while the line
+/// network and the graph are built, the compile's highest steps before the
+/// package build. Enrichment then reads them from the file, mapped
+/// ([`restore`](EncodedWayFacts::restore)): its pages are the file's, which
+/// the system can drop and read again under pressure, not the heap's.
 #[derive(Default)]
 struct EncodedWayFacts {
     /// `(way id, byte offset)`, sorted by way id once collection ends.
     index: Vec<(i64, u64)>,
     bytes: Vec<u8>,
+    /// Where the bytes are while spilled.
+    spilled: Option<PathBuf>,
+    /// The spilled file once restored, and its path, removed on drop.
+    mapped: Option<(memmap2::Mmap, PathBuf)>,
 }
 
 impl EncodedWayFacts {
@@ -464,14 +493,69 @@ impl EncodedWayFacts {
         self.bytes.shrink_to_fit();
     }
 
+    /// Moves the bytes to a file in `dir` until [`restore`](Self::restore).
+    fn spill(&mut self, dir: &Path) -> Result<(), String> {
+        let path = dir.join("way-facts.spill");
+        std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::write(&path, &self.bytes))
+            .map_err(|error| format!("Failed to spill way facts to {path:?}: {error}"))?;
+        self.bytes = Vec::new();
+        self.spilled = Some(path);
+        Ok(())
+    }
+
+    /// Maps the spilled file for reading; it is removed when the facts drop.
+    fn restore(&mut self) -> Result<(), String> {
+        let Some(path) = self.spilled.take() else {
+            return Ok(());
+        };
+        let map = std::fs::File::open(&path)
+            .and_then(|file| {
+                if file.metadata()?.len() == 0 {
+                    // Nothing to map (and an empty mapping is refused).
+                    return Ok(None);
+                }
+                // SAFETY: the file is this compile's own scratch file, written
+                // by `spill` and not changed or truncated while mapped.
+                unsafe { memmap2::Mmap::map(&file) }.map(Some)
+            })
+            .map_err(|error| format!("Failed to map spilled way facts {path:?}: {error}"))?;
+        match map {
+            Some(map) => self.mapped = Some((map, path)),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        Ok(())
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.mapped {
+            Some((map, _)) => map,
+            None => &self.bytes,
+        }
+    }
+
     fn get(&self, way_id: i64) -> Result<Option<RoadWayFacts>, String> {
+        debug_assert!(self.spilled.is_none(), "way facts read while spilled");
         let Ok(position) = self.index.binary_search_by_key(&way_id, |(id, _)| *id) else {
             return Ok(None);
         };
         let offset = self.index[position].1 as usize;
-        codec::take_from_slice(&self.bytes[offset..])
+        codec::take_from_slice(&self.bytes()[offset..])
             .map(|(facts, _)| Some(facts))
             .map_err(|error| format!("Failed to decode way facts for way {way_id}: {error}"))
+    }
+}
+
+impl Drop for EncodedWayFacts {
+    fn drop(&mut self) {
+        if let Some((map, path)) = self.mapped.take() {
+            // Unmapped first: a mapped file cannot be removed on Windows. The
+            // scratch directory goes at the end of the compile regardless.
+            drop(map);
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -531,8 +615,10 @@ struct UnfinishedRoadInputs {
 }
 
 impl UnfinishedRoadInputs {
-    fn finish(mut self) -> CollectedRoadInputs {
+    /// Builds the line network; the way facts wait in `scratch` meanwhile.
+    fn finish(mut self, scratch: &Path) -> Result<CollectedRoadInputs, String> {
         self.way_facts.seal();
+        self.way_facts.spill(scratch)?;
         // Routing consumes topology only: render products belong exclusively
         // to vector compilation and are never derived here.
         #[cfg(not(feature = "benchmark-profiling"))]
@@ -541,14 +627,14 @@ impl UnfinishedRoadInputs {
         let network = self
             .builder
             .finish_topology_only_with_observer(&mut |name| profiling::checkpoint(name));
-        CollectedRoadInputs {
+        Ok(CollectedRoadInputs {
             network,
             turn_restrictions: self.turn_restrictions,
             route_memberships: self.route_memberships,
             barrier_node_tags: self.barrier_node_tags,
             traffic_controls: self.traffic_controls,
             way_facts: self.way_facts,
-        }
+        })
     }
 }
 
@@ -674,7 +760,7 @@ fn collect_way(
         min_zoom: road_min_zoom(road_class),
         max_zoom: 14,
         sort_order: road_sort_order(road_class),
-        routing: Some(road_routing_attrs(&way.tags, road_class)),
+        routing: Some(Arc::new(road_routing_attrs(&way.tags, road_class))),
     });
     Ok(collected)
 }
@@ -720,7 +806,7 @@ fn build_road_graph(
         route_memberships,
         barrier_node_tags,
         traffic_controls,
-        way_facts,
+        mut way_facts,
     } = inputs;
     let phase = Phase::start("topology_to_graph_builder");
     let topology_repair_report = topology_repair_report(&network);
@@ -775,21 +861,21 @@ fn build_road_graph(
     report_finalize_checkpoint(job, "after_builder_finish", rows_written)?;
 
     let phase = Phase::start("graph_source_enrichment");
+    // The graph's ways are those before the facts apply; they filter the
+    // memberships and restrictions first, so their list is gone before the
+    // facts' classes are built.
     let graph_way_ids = graph_way_ids(&road_graph);
+    let route_memberships = filtered_route_memberships(route_memberships, &graph_way_ids);
+    let turn_restrictions = filtered_turn_restrictions(turn_restrictions, &graph_way_ids);
+    drop(graph_way_ids);
+    way_facts.restore().map_err(CompileError::Failed)?;
     road_graph.refresh_shared_edge_way_facts_par_with(|way_id| way_facts.get(way_id))?;
     // Not read again.
     drop(way_facts);
     report_finalize_checkpoint(job, "after_apply_way_facts", rows_written)?;
-    road_graph.set_route_memberships(filtered_route_memberships(
-        route_memberships,
-        &graph_way_ids,
-    ));
+    road_graph.set_route_memberships(route_memberships);
     report_finalize_checkpoint(job, "after_load_route_memberships", rows_written)?;
-    road_graph.set_turn_restrictions(filtered_turn_restrictions(
-        turn_restrictions,
-        &graph_way_ids,
-    ));
-    drop(graph_way_ids);
+    road_graph.set_turn_restrictions(turn_restrictions);
     report_finalize_checkpoint(job, "after_load_turn_restrictions", rows_written)?;
     road_graph.refresh_route_membership_metadata();
     let raw_turn_restriction_count = road_graph.turn_restrictions.len();
@@ -1422,7 +1508,7 @@ fn routable_way_from_segment(
                 .find(|(key, _)| key == "coverage_id")
                 .map(|(_, value)| value.as_str()),
         ),
-        source_lineage_ids: segment.source_lineage_ids,
+        source_lineage_ids: segment.source_lineage_ids.to_vec(),
         points: segment.geometry,
     }
 }

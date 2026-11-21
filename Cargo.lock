@@ -693,9 +693,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "osm-pbf-ingest"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4a999265759c9277dac7792b33e6ff9fbe354bc0bb253201a980c6a0956b86"
+checksum = "df69d8b1afc54a1bf22ad255f879ebce5b5265b40ba1aebd13fa25753aad3780"
 dependencies = [
  "buffa",
  "compact_str",
@@ -1162,6 +1162,7 @@ dependencies = [
 name = "wayfarer-compiler"
 version = "0.2.0"
 dependencies = [
+ "memmap2",
  "osm-pbf-ingest",
  "petgraph",
  "rayon",

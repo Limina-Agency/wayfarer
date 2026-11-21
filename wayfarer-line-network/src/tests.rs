@@ -7,8 +7,8 @@ fn attrs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn routing(class: &str) -> Option<RoadRoutingAttrs> {
-    Some(RoadRoutingAttrs {
+fn routing(class: &str) -> Option<Arc<RoadRoutingAttrs>> {
+    Some(Arc::new(RoadRoutingAttrs {
         road_class: class.to_string(),
         directional_access: DirectionalAccessModel::Both,
         access: None,
@@ -18,7 +18,7 @@ fn routing(class: &str) -> Option<RoadRoutingAttrs> {
         has_ford: false,
         has_tunnel: false,
         access_restricted: false,
-    })
+    }))
 }
 
 fn road_input(
@@ -487,7 +487,7 @@ fn splits_topology_on_shared_source_nodes() {
             min_zoom: 12,
             max_zoom: 14,
             sort_order: 1,
-            routing: Some(RoadRoutingAttrs {
+            routing: Some(Arc::new(RoadRoutingAttrs {
                 road_class: "residential".to_string(),
                 directional_access: DirectionalAccessModel::Both,
                 access: None,
@@ -497,7 +497,7 @@ fn splits_topology_on_shared_source_nodes() {
                 has_ford: false,
                 has_tunnel: false,
                 access_restricted: false,
-            }),
+            })),
         },
         SharedLineInput {
             feature_id: 2,
@@ -510,7 +510,7 @@ fn splits_topology_on_shared_source_nodes() {
             min_zoom: 12,
             max_zoom: 14,
             sort_order: 1,
-            routing: Some(RoadRoutingAttrs {
+            routing: Some(Arc::new(RoadRoutingAttrs {
                 road_class: "residential".to_string(),
                 directional_access: DirectionalAccessModel::Both,
                 access: None,
@@ -520,7 +520,7 @@ fn splits_topology_on_shared_source_nodes() {
                 has_ford: false,
                 has_tunnel: false,
                 access_restricted: false,
-            }),
+            })),
         },
     ]);
 
@@ -599,18 +599,16 @@ fn one_way_render_strokes_merge_only_when_flow_is_continuous() {
         vec![1, 2],
         attrs(&[("class", "primary"), ("oneway", "yes")]),
     );
-    continuous_left.routing.as_mut().unwrap().directional_access = DirectionalAccessModel::Forward;
+    Arc::make_mut(continuous_left.routing.as_mut().unwrap()).directional_access =
+        DirectionalAccessModel::Forward;
     let mut continuous_right = road_input(
         2,
         vec![(50.0, 19.001), (50.0, 19.002)],
         vec![2, 3],
         attrs(&[("class", "primary"), ("oneway", "yes")]),
     );
-    continuous_right
-        .routing
-        .as_mut()
-        .unwrap()
-        .directional_access = DirectionalAccessModel::Forward;
+    Arc::make_mut(continuous_right.routing.as_mut().unwrap()).directional_access =
+        DirectionalAccessModel::Forward;
 
     let mut continuous_builder = SharedLineNetworkBuilder::default();
     continuous_builder.extend_inputs([continuous_left, continuous_right]);
@@ -630,14 +628,16 @@ fn one_way_render_strokes_merge_only_when_flow_is_continuous() {
         vec![1, 2],
         attrs(&[("class", "primary"), ("oneway", "yes")]),
     );
-    opposing_left.routing.as_mut().unwrap().directional_access = DirectionalAccessModel::Forward;
+    Arc::make_mut(opposing_left.routing.as_mut().unwrap()).directional_access =
+        DirectionalAccessModel::Forward;
     let mut opposing_right = road_input(
         4,
         vec![(50.0, 19.002), (50.0, 19.001)],
         vec![3, 2],
         attrs(&[("class", "primary"), ("oneway", "yes")]),
     );
-    opposing_right.routing.as_mut().unwrap().directional_access = DirectionalAccessModel::Forward;
+    Arc::make_mut(opposing_right.routing.as_mut().unwrap()).directional_access =
+        DirectionalAccessModel::Forward;
 
     let mut opposing_builder = SharedLineNetworkBuilder::default();
     opposing_builder.extend_inputs([opposing_left, opposing_right]);
@@ -912,7 +912,7 @@ fn discard_render_products_preserves_topology_and_stats() {
         min_zoom: 8,
         max_zoom: 14,
         sort_order: 1,
-        routing: Some(RoadRoutingAttrs {
+        routing: Some(Arc::new(RoadRoutingAttrs {
             road_class: "primary".to_string(),
             directional_access: DirectionalAccessModel::Both,
             access: None,
@@ -922,7 +922,7 @@ fn discard_render_products_preserves_topology_and_stats() {
             has_ford: false,
             has_tunnel: false,
             access_restricted: false,
-        }),
+        })),
     });
 
     let mut network = builder.finish();
@@ -1153,4 +1153,17 @@ fn short_roads_do_not_merge_across_published_attribute_boundaries() {
             "{key}"
         );
     }
+}
+
+#[test]
+fn permute_in_place_applies_the_order() {
+    let mut items = vec!['a', 'b', 'c', 'd', 'e', 'f'];
+    // Cycles (0 3 5), (1 4) and the fixed point 2.
+    let order = [3u32, 4, 2, 5, 1, 0];
+    let expected = order
+        .iter()
+        .map(|&from| items[from as usize])
+        .collect::<Vec<_>>();
+    permute_in_place(&mut items, &order);
+    assert_eq!(items, expected);
 }

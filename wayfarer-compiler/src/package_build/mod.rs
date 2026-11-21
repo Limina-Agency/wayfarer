@@ -356,7 +356,9 @@ pub fn build_package(
     metadata: &RoutingPackageMetadata<RoadGraphQualityManifest>,
     options: &PackageBuildOptions,
 ) -> Result<(PackageWriter, PackageBuildReport), RoutingPackageError> {
-    without_job(|job| build_package_from(GraphSource::Borrowed(graph), metadata, options, job))
+    without_job(|job| {
+        build_package_from(GraphSource::Borrowed(graph), metadata, options, job, None)
+    })
 }
 
 /// The road graph a package is built from: borrowed, or owned so that it can
@@ -382,13 +384,24 @@ impl GraphSource<'_> {
     }
 }
 
+/// Builds the sections of `source`'s graph. With a `spill` file each section
+/// goes there as soon as it is built and nothing later reads it (see
+/// [`PackageWriter::spilling`]); the build computes the sections in an order
+/// that frees most of them before the request sections (the build's peak)
+/// and the CCH order.
 fn build_package_from(
     mut source: GraphSource<'_>,
     metadata: &RoutingPackageMetadata<RoadGraphQualityManifest>,
     options: &PackageBuildOptions,
     job: &Job<'_>,
+    spill: Option<std::fs::File>,
 ) -> Result<(PackageWriter, PackageBuildReport), RoutingPackageError> {
     let graph = source.get();
+    let mut writer = match spill {
+        Some(file) => PackageWriter::spilling(file),
+        None => PackageWriter::in_memory(),
+    };
+    writer.put_metadata(metadata);
     let started = Instant::now();
     job.report(
         CompileStage::BuildPackage,
@@ -507,6 +520,8 @@ fn build_package_from(
         }
     }
     report.barrier_node_count = barrier_node.len();
+    writer.put(Section::BarrierClass, barrier_class);
+    writer.put(Section::BarrierAccess, barrier_access);
     clock.lap("nodes")?;
 
     // Edges: grouped by compact source node, ordered by edge id within a node
@@ -641,20 +656,29 @@ fn build_package_from(
                 )
         })
         .collect::<Vec<_>>();
-    let si_legal_reason = (0..shared_count as u32)
-        .map(|shared| info_of(shared).attrs.legal_reason)
-        .collect::<Vec<u8>>();
-    let edge_junction = edge_raw
-        .par_iter()
-        .map(|raw| {
-            let edge = road_edge(*raw);
-            junction::encode(edge.end_control, edge.end_minor_approach)
-        })
-        .collect::<Vec<u8>>();
-    let road_rank = edge_shared_info
-        .par_iter()
-        .map(|shared| road_type_rank(info_of(*shared).attrs.road_type))
-        .collect::<Vec<_>>();
+    writer.put(
+        Section::SharedInfoLegalReason,
+        (0..shared_count as u32)
+            .map(|shared| info_of(shared).attrs.legal_reason)
+            .collect::<Vec<u8>>(),
+    );
+    writer.put(
+        Section::EdgeJunction,
+        edge_raw
+            .par_iter()
+            .map(|raw| {
+                let edge = road_edge(*raw);
+                junction::encode(edge.end_control, edge.end_minor_approach)
+            })
+            .collect::<Vec<u8>>(),
+    );
+    writer.put(
+        Section::EdgeRoadRank,
+        edge_shared_info
+            .par_iter()
+            .map(|shared| road_type_rank(info_of(*shared).attrs.road_type))
+            .collect::<Vec<_>>(),
+    );
     // Inferred speed + 1, 0 for none.
     let edge_inferred_speed = edge_raw
         .par_iter()
@@ -665,6 +689,7 @@ fn build_package_from(
             }),
         })
         .collect::<Result<Vec<u16>, _>>()?;
+    writer.put(Section::EdgeInferredSpeed, edge_inferred_speed);
     let mut edge_flags = edge_raw
         .par_iter()
         .zip(&edge_shared_info)
@@ -685,6 +710,7 @@ fn build_package_from(
             *flags |= EDGE_FLAG_BARRIER_AT_TARGET;
         }
     }
+    writer.put(Section::BarrierNode, barrier_node);
 
     // Costing attributes (derived columns read these): a table of the
     // distinct (flags, classes, speeds) tuples in order of first use, and each
@@ -736,14 +762,21 @@ fn build_package_from(
     drop(shared_cost_inputs);
     drop(tuple_rows);
     report.cost_tuple_count = si_cost_flags.len();
-    let conditional_edges = (0..edge_count as u32)
-        .filter(|edge| {
-            !info_of(edge_shared_info[*edge as usize])
-                .attrs
-                .conditional_restrictions
-                .is_empty()
-        })
-        .collect::<Vec<_>>();
+    writer.put(Section::SharedInfoCostFlags, si_cost_flags);
+    writer.put(Section::SharedInfoCostClasses, si_cost_classes);
+    writer.put(Section::SharedInfoSpeeds, si_speeds);
+    writer.put(Section::SharedInfoCostTuple, si_cost_tuple);
+    writer.put(
+        Section::ConditionalEdges,
+        (0..edge_count as u32)
+            .filter(|edge| {
+                !info_of(edge_shared_info[*edge as usize])
+                    .attrs
+                    .conditional_restrictions
+                    .is_empty()
+            })
+            .collect::<Vec<_>>(),
+    );
 
     // Identity tokens per shared info.
     let interner = TokenInterner::from_shared_infos(shared_infos.iter().map(|info| info.attrs));
@@ -763,6 +796,9 @@ fn build_package_from(
         })
         .collect::<Vec<_>>();
     report.way_id_wide_count = si_way_wide.len();
+    writer.put(Section::SharedInfoWay, si_way);
+    writer.put(Section::SharedInfoWayWideShared, si_way_wide_shared);
+    writer.put(Section::SharedInfoWayWide, si_way_wide);
     let si_name = (0..shared_count as u32)
         .map(|shared| {
             interner
@@ -833,6 +869,7 @@ fn build_package_from(
         }
     }
     drop(classes);
+    writer.put(Section::EdgeDuration, edge_duration);
     clock.lap("costs")?;
 
     // Restrictions, from the road graph's resolved restrictions.
@@ -939,6 +976,46 @@ fn build_package_from(
         complex_prefix_pool.extend_from_slice(prefix);
         complex_prefix_start.push(complex_prefix_pool.len() as u32);
     }
+    // Via nodes: where a restricted transition happens (for the pieces).
+    let mut restricted = vec![false; node_count];
+    for (from, _, _, _) in &simple_rows {
+        restricted[edge_target[*from as usize] as usize] = true;
+    }
+    for edge in &complex_prefix_pool {
+        restricted[edge_target[*edge as usize] as usize] = true;
+    }
+    let (simple_restriction_count, complex_restriction_count) =
+        (simple_rows.len(), complex_rows.len());
+    writer.put(
+        Section::SimpleFrom,
+        simple_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::SimpleTo,
+        simple_rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::SimpleVia,
+        simple_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::SimpleMask,
+        simple_rows.iter().map(|row| row.3).collect::<Vec<_>>(),
+    );
+    drop(simple_rows);
+    writer.put(
+        Section::ComplexTo,
+        complex_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+    );
+    writer.put(
+        Section::ComplexMask,
+        complex_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+    );
+    drop(complex_rows);
+    writer.put(Section::ComplexPrefixStart, complex_prefix_start);
+    writer.put(Section::ComplexPrefixPool, complex_prefix_pool);
+    writer.put(Section::ComplexFirst, complex_first);
+    writer.put(Section::ComplexByFirst, complex_by_first);
     clock.lap("restrictions")?;
 
     // Shapes: the road graph geometry of each shared info, as E7 deltas with
@@ -989,71 +1066,12 @@ fn build_package_from(
     }
     report.shape_byte_len = shape_bytes.len() + shape_start.len() * 4;
     drop(si_consistent);
+    writer.put(Section::ShapeStart, shape_start);
+    writer.put(Section::ShapeBytes, shape_bytes);
+    writer.put(Section::ExactShapeShared, exact_shape_shared);
+    writer.put(Section::ExactShapeStart, exact_shape_start);
+    writer.put(Section::ExactShapePoints, exact_shape_points);
     clock.lap("shapes")?;
-
-    // Incoming adjacency: compact edges grouped by target, ascending edge index.
-    let mut first_out = vec![0u32; node_count + 1];
-    for source in &edge_source {
-        first_out[*source as usize + 1] += 1;
-    }
-    for node in 0..node_count {
-        first_out[node + 1] += first_out[node];
-    }
-    let mut first_in = vec![0u32; node_count + 1];
-    for target in &edge_target {
-        first_in[*target as usize + 1] += 1;
-    }
-    for node in 0..node_count {
-        first_in[node + 1] += first_in[node];
-    }
-    let mut in_cursor = first_in.clone();
-    let mut in_edges = vec![0u32; edge_count];
-    for (edge, target) in edge_target.iter().enumerate() {
-        let slot = &mut in_cursor[*target as usize];
-        in_edges[*slot as usize] = edge as u32;
-        *slot += 1;
-    }
-    drop(in_cursor);
-
-    // Request sections (correlation, legs).
-    let request_started = Instant::now();
-    let request_sections = request::build_request_sections(&request::RequestBuildInput {
-        graph,
-        node_raw: &nodes,
-        first_out: &first_out,
-        edge_source: &edge_source,
-        edge_target: &edge_target,
-        edge_ids: &edge_ids,
-        edge_id_base,
-        edge_id_lookup: &edge_id_lookup,
-        edge_raw: &edge_raw,
-        edge_shared_info: &edge_shared_info,
-        edge_flags: &edge_flags,
-        edge_profile_access: &edge_profile_access,
-        shared_raw: &shared_raw,
-    })?;
-    report.request_byte_len = request_sections.byte_len();
-    report.request_opposing_exception_count = request_sections.opposing_exception_count();
-    report.mode_mask_exception_count = request_sections.mode_mask_exception_count();
-    report.tier_exception_count = request_sections.tier_exception_count();
-    report.request_ms = request_started.elapsed().as_millis();
-    drop(edge_raw);
-    drop(shared_raw);
-    // Not stored: engines build the lookup from the ids on first use.
-    drop(edge_id_lookup);
-    // Name and ref tokens per attribute class: the class key holds the name
-    // and ref, so every shared info of a class has the same tokens.
-    let shared_class = request_sections.shared_attr_class();
-    let class_count = request_sections.class_count();
-    let si_name = per_class(&si_name, shared_class, class_count, "name")?;
-    let si_ref = per_class(&si_ref, shared_class, class_count, "ref")?;
-    let (si_route_ref_start, si_route_ref_pool) = per_class_lists(
-        &si_route_ref_start,
-        &si_route_ref_pool,
-        shared_class,
-        class_count,
-    )?;
-    clock.lap("request sections")?;
 
     // Node positions: unit vectors in fixed point, and E7 / exact positions
     // only when they cannot be recomputed from them. A node whose position
@@ -1061,7 +1079,6 @@ fn build_package_from(
     // the others need to round-trip.
     let node_lat = nodes.iter().map(|raw| position(*raw).0).collect::<Vec<_>>();
     let node_lng = nodes.iter().map(|raw| position(*raw).1).collect::<Vec<_>>();
-    drop(nodes);
     let mut node_xyz = Vec::with_capacity(node_count * 3);
     for (lat, lng) in node_lat.iter().zip(&node_lng) {
         node_xyz.extend_from_slice(&fixed_xyz(unit_xyz(*lat, *lng)));
@@ -1081,6 +1098,8 @@ fn build_package_from(
     } else {
         (node_lat_e7, node_lng_e7)
     };
+    writer.put(Section::NodeLatE7, node_lat_e7);
+    writer.put(Section::NodeLngE7, node_lng_e7);
     report.node_inexact_count = node_lat
         .iter()
         .zip(&node_lng)
@@ -1098,10 +1117,23 @@ fn build_package_from(
         .iter()
         .flat_map(|node| [node_lat[*node as usize], node_lng[*node as usize]])
         .collect::<Vec<_>>();
+    drop(node_lat);
+    drop(node_lng);
+    writer.put(Section::NodeLatLng, node_lat_lng);
+    writer.put(Section::NodeLatLngNodes, node_lat_lng_nodes);
     let layout = PackageLayout {
         node_e7_derived,
         edge_id_base,
     };
+
+    // Out-adjacency.
+    let mut first_out = vec![0u32; node_count + 1];
+    for source in &edge_source {
+        first_out[*source as usize + 1] += 1;
+    }
+    for node in 0..node_count {
+        first_out[node + 1] += first_out[node];
+    }
 
     // Admissible, consistent A* factor: the smallest cost per metre any edge
     // realises, measured against max(polyline length, endpoint chord) so it
@@ -1141,7 +1173,149 @@ fn build_package_from(
         }
         report.heuristic_cost_per_m.push((*profile, factor));
     }
+    writer.put(Section::EdgeLength, edge_length);
     clock.lap("adjacency, positions, heuristic")?;
+
+    // Clean pieces per column, for the route search's walks, from the
+    // incoming adjacency: compact edges grouped by target, ascending edge
+    // index.
+    let mut first_in = vec![0u32; node_count + 1];
+    for target in &edge_target {
+        first_in[*target as usize + 1] += 1;
+    }
+    for node in 0..node_count {
+        first_in[node + 1] += first_in[node];
+    }
+    let mut in_cursor = first_in.clone();
+    let mut in_edges = vec![0u32; edge_count];
+    for (edge, target) in edge_target.iter().enumerate() {
+        let slot = &mut in_cursor[*target as usize];
+        in_edges[*slot as usize] = edge as u32;
+        *slot += 1;
+    }
+    drop(in_cursor);
+    let piece_bits = pieces::piece_bits(
+        &pieces::PieceInput {
+            node_count,
+            edge_count,
+            first_out: &first_out,
+            first_in: &first_in,
+            in_edges: &in_edges,
+            edge_source: &edge_source,
+            edge_target: &edge_target,
+            edge_cost: &edge_cost,
+            edge_shared_info: &edge_shared_info,
+            restricted: &restricted,
+        },
+        column_count,
+    );
+    drop(restricted);
+    drop(first_in);
+    drop(in_edges);
+    if trace() {
+        eprintln!(
+            "  piece (chain, tree) nodes per column: {:?}",
+            piece_bits.counts
+        );
+    }
+    writer.put(Section::PieceChain, piece_bits.chain);
+    writer.put(Section::PieceTree, piece_bits.tree);
+    writer.put(Section::EdgeCost, edge_cost);
+    clock.lap("pieces")?;
+
+    // Twins: stored as each edge's reverse edge (`Section::EdgeTwin`) and the
+    // few edges without one.
+    let edge_twin = edge_twins(
+        &first_out,
+        &edge_source,
+        &edge_target,
+        &edge_shared_info,
+        &edge_flags,
+        &heading_start,
+        &heading_end,
+    );
+    let mut lone_in_edge = (0..edge_count as u32)
+        .filter(|edge| edge_twin[*edge as usize] == NO_TWIN)
+        .collect::<Vec<_>>();
+    lone_in_edge.sort_unstable_by_key(|edge| (edge_target[*edge as usize], *edge));
+    let mut lone_in_present = vec![0u64; node_count.div_ceil(64)];
+    for edge in &lone_in_edge {
+        let target = edge_target[*edge as usize] as usize;
+        lone_in_present[target / 64] |= 1 << (target % 64);
+    }
+    report.lone_edge_count = lone_in_edge.len();
+    writer.put(Section::EdgeHeadingStart, heading_start);
+    // Derived from the twins' start headings, but for the edges without a
+    // twin.
+    let lone_heading_end = lone_in_edge
+        .iter()
+        .map(|edge| heading_end[*edge as usize])
+        .collect::<Vec<_>>();
+    drop(heading_end);
+    writer.put(Section::LoneHeadingEnd, lone_heading_end);
+    writer.put(Section::EdgeTwin, edge_twin);
+    writer.put(Section::LoneInPresent, lone_in_present);
+    writer.put(Section::LoneInEdge, lone_in_edge);
+    clock.lap("twins")?;
+
+    // Request sections (correlation, legs).
+    let request_started = Instant::now();
+    let request_sections = request::build_request_sections(&request::RequestBuildInput {
+        graph,
+        node_raw: &nodes,
+        first_out: &first_out,
+        edge_source: &edge_source,
+        edge_target: &edge_target,
+        edge_ids: &edge_ids,
+        edge_id_base,
+        edge_id_lookup: &edge_id_lookup,
+        edge_raw: &edge_raw,
+        edge_shared_info: &edge_shared_info,
+        edge_flags: &edge_flags,
+        edge_profile_access: &edge_profile_access,
+        shared_raw: &shared_raw,
+    })?;
+    report.request_byte_len = request_sections.byte_len();
+    report.request_opposing_exception_count = request_sections.opposing_exception_count();
+    report.mode_mask_exception_count = request_sections.mode_mask_exception_count();
+    report.tier_exception_count = request_sections.tier_exception_count();
+    report.request_ms = request_started.elapsed().as_millis();
+    drop(edge_raw);
+    drop(shared_raw);
+    drop(nodes);
+    // Not stored: engines build the lookup from the ids on first use.
+    drop(edge_id_lookup);
+    // Derived from the twins and the out-adjacency.
+    drop(edge_source);
+    writer.put(Section::EdgeProfileAccess, edge_profile_access);
+    writer.put(Section::EdgeFlags, edge_flags);
+    writer.put(
+        Section::EdgeId,
+        edge_ids
+            .iter()
+            .map(|id| (id - edge_id_base) as u32)
+            .collect::<Vec<_>>(),
+    );
+    drop(edge_ids);
+    // Name and ref tokens per attribute class: the class key holds the name
+    // and ref, so every shared info of a class has the same tokens.
+    let shared_class = request_sections.shared_attr_class();
+    let class_count = request_sections.class_count();
+    let si_name = per_class(&si_name, shared_class, class_count, "name")?;
+    let si_ref = per_class(&si_ref, shared_class, class_count, "ref")?;
+    let (si_route_ref_start, si_route_ref_pool) = per_class_lists(
+        &si_route_ref_start,
+        &si_route_ref_pool,
+        shared_class,
+        class_count,
+    )?;
+    writer.put(Section::SharedInfoName, si_name);
+    writer.put(Section::SharedInfoRef, si_ref);
+    writer.put(Section::SharedInfoRouteRefStart, si_route_ref_start);
+    writer.put(Section::SharedInfoRouteRefPool, si_route_ref_pool);
+    writer.put(Section::EdgeSharedInfo, edge_shared_info);
+    request_sections.put(&mut writer);
+    clock.lap("request sections")?;
 
     source.release();
     // The CCH order, from the node graph and the fixed-point positions
@@ -1168,168 +1342,21 @@ fn build_package_from(
         0,
         "Ordered nodes for CCH potentials",
     );
-    drop(node_lat);
-    drop(node_lng);
     clock.lap("cch order")?;
-
-    // Clean pieces per column, for the route search's walks.
-    // Via nodes: where a restricted transition happens.
-    let mut restricted = vec![false; node_count];
-    for (from, _, _, _) in &simple_rows {
-        restricted[edge_target[*from as usize] as usize] = true;
-    }
-    for edge in &complex_prefix_pool {
-        restricted[edge_target[*edge as usize] as usize] = true;
-    }
-    let piece_bits = pieces::piece_bits(
-        &pieces::PieceInput {
-            node_count,
-            edge_count,
-            first_out: &first_out,
-            first_in: &first_in,
-            in_edges: &in_edges,
-            edge_source: &edge_source,
-            edge_target: &edge_target,
-            edge_cost: &edge_cost,
-            edge_shared_info: &edge_shared_info,
-            restricted: &restricted,
-        },
-        column_count,
-    );
-    drop(restricted);
-    if trace() {
-        eprintln!(
-            "  piece (chain, tree) nodes per column: {:?}",
-            piece_bits.counts
-        );
-    }
-    clock.lap("pieces")?;
-    // Twins, once nothing reads the incoming adjacency any more: it is
-    // stored as each edge's reverse edge (`Section::EdgeTwin`) and the few
-    // edges without one.
-    drop(first_in);
-    drop(in_edges);
-    let edge_twin = edge_twins(
-        &first_out,
-        &edge_source,
-        &edge_target,
-        &edge_shared_info,
-        &edge_flags,
-        &heading_start,
-        &heading_end,
-    );
-    let mut lone_in_edge = (0..edge_count as u32)
-        .filter(|edge| edge_twin[*edge as usize] == NO_TWIN)
-        .collect::<Vec<_>>();
-    lone_in_edge.sort_unstable_by_key(|edge| (edge_target[*edge as usize], *edge));
-    let mut lone_in_present = vec![0u64; node_count.div_ceil(64)];
-    for edge in &lone_in_edge {
-        let target = edge_target[*edge as usize] as usize;
-        lone_in_present[target / 64] |= 1 << (target % 64);
-    }
-    report.lone_edge_count = lone_in_edge.len();
 
     let counts = PackageCounts {
         node_count,
         edge_count,
         shared_info_count: shared_count,
-        simple_restriction_count: simple_rows.len(),
-        complex_restriction_count: complex_rows.len(),
+        simple_restriction_count,
+        complex_restriction_count,
         column_count,
     };
-    let mut writer = PackageWriter::new(counts, layout, profile_columns, heuristic_cost_per_m);
-    writer.put_metadata(metadata);
+    writer.set_header(counts, layout, profile_columns, heuristic_cost_per_m);
     writer.put(Section::NodeFirstOut, first_out);
     writer.put(Section::NodeXyzFixed, node_xyz);
     writer.put(Section::CchRank, cch_rank);
-    writer.put(Section::NodeLatE7, node_lat_e7);
-    writer.put(Section::NodeLngE7, node_lng_e7);
-    writer.put(Section::NodeLatLng, node_lat_lng);
-    writer.put(Section::NodeLatLngNodes, node_lat_lng_nodes);
-    // Derived from the twins and the out-adjacency.
-    drop(edge_source);
     writer.put(Section::EdgeTarget, edge_target);
-    writer.put(
-        Section::EdgeId,
-        edge_ids
-            .iter()
-            .map(|id| (id - edge_id_base) as u32)
-            .collect::<Vec<_>>(),
-    );
-    drop(edge_ids);
-    writer.put(Section::EdgeLength, edge_length);
-    writer.put(Section::EdgeSharedInfo, edge_shared_info);
-    writer.put(Section::EdgeHeadingStart, heading_start);
-    // Derived from the twins' start headings, but for the edges without a
-    // twin.
-    let lone_heading_end = lone_in_edge
-        .iter()
-        .map(|edge| heading_end[*edge as usize])
-        .collect::<Vec<_>>();
-    drop(heading_end);
-    writer.put(Section::LoneHeadingEnd, lone_heading_end);
-    writer.put(Section::EdgeFlags, edge_flags);
-    writer.put(Section::EdgeRoadRank, road_rank);
-    writer.put(Section::EdgeCost, edge_cost);
-    writer.put(Section::EdgeDuration, edge_duration);
-    writer.put(Section::SharedInfoWay, si_way);
-    writer.put(Section::SharedInfoWayWideShared, si_way_wide_shared);
-    writer.put(Section::SharedInfoWayWide, si_way_wide);
-    writer.put(Section::SharedInfoName, si_name);
-    writer.put(Section::SharedInfoRef, si_ref);
-    writer.put(Section::SharedInfoRouteRefStart, si_route_ref_start);
-    writer.put(Section::SharedInfoRouteRefPool, si_route_ref_pool);
-    writer.put(
-        Section::SimpleFrom,
-        simple_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-    );
-    writer.put(
-        Section::SimpleTo,
-        simple_rows.iter().map(|row| row.1).collect::<Vec<_>>(),
-    );
-    writer.put(
-        Section::SimpleVia,
-        simple_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
-    );
-    writer.put(
-        Section::SimpleMask,
-        simple_rows.iter().map(|row| row.3).collect::<Vec<_>>(),
-    );
-    writer.put(
-        Section::ComplexTo,
-        complex_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-    );
-    writer.put(
-        Section::ComplexMask,
-        complex_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
-    );
-    writer.put(Section::ComplexPrefixStart, complex_prefix_start);
-    writer.put(Section::ComplexPrefixPool, complex_prefix_pool);
-    writer.put(Section::EdgeTwin, edge_twin);
-    writer.put(Section::LoneInPresent, lone_in_present);
-    writer.put(Section::LoneInEdge, lone_in_edge);
-    writer.put(Section::EdgeProfileAccess, edge_profile_access);
-    writer.put(Section::PieceChain, piece_bits.chain);
-    writer.put(Section::PieceTree, piece_bits.tree);
-    writer.put(Section::ComplexFirst, complex_first);
-    writer.put(Section::ComplexByFirst, complex_by_first);
-    writer.put(Section::ShapeStart, shape_start);
-    writer.put(Section::ShapeBytes, shape_bytes);
-    writer.put(Section::ExactShapeShared, exact_shape_shared);
-    writer.put(Section::ExactShapeStart, exact_shape_start);
-    writer.put(Section::ExactShapePoints, exact_shape_points);
-    writer.put(Section::SharedInfoCostFlags, si_cost_flags);
-    writer.put(Section::SharedInfoCostClasses, si_cost_classes);
-    writer.put(Section::SharedInfoSpeeds, si_speeds);
-    writer.put(Section::SharedInfoCostTuple, si_cost_tuple);
-    writer.put(Section::EdgeInferredSpeed, edge_inferred_speed);
-    writer.put(Section::ConditionalEdges, conditional_edges);
-    writer.put(Section::EdgeJunction, edge_junction);
-    writer.put(Section::SharedInfoLegalReason, si_legal_reason);
-    writer.put(Section::BarrierNode, barrier_node);
-    writer.put(Section::BarrierClass, barrier_class);
-    writer.put(Section::BarrierAccess, barrier_access);
-    request_sections.put(&mut writer);
 
     report.node_count = node_count;
     report.edge_count = edge_count;
@@ -1487,31 +1514,58 @@ pub fn write_package_consuming(
     path: &std::path::Path,
     options: &PackageBuildOptions,
 ) -> Result<PackageBuildReport, RoutingPackageError> {
-    without_job(|job| write_package_for_job(graph, manifest, path, options, job))
+    without_job(|job| write_package_for_job(graph, manifest, path, options, None, job))
 }
 
 /// [`write_package_consuming`] for a compile job: reports the build, CCH
 /// order and write stages, and stops within about a second of a cancel, leaving no
 /// file at `path` (nor its `.tmp`). After a cancel the error says only that;
-/// the job tells the caller it was a cancel.
+/// the job tells the caller it was a cancel. With a `spill_dir` the sections
+/// go to a file there as they are built (removed after the write), instead
+/// of staying in memory until the write.
 pub(crate) fn write_package_for_job(
     graph: RoadGraph,
     manifest: Option<&RoadGraphPackageManifest>,
     path: &std::path::Path,
     options: &PackageBuildOptions,
+    spill_dir: Option<&std::path::Path>,
     job: &Job<'_>,
 ) -> Result<PackageBuildReport, RoutingPackageError> {
     let metadata = package_metadata(&graph, manifest);
-    let (writer, report) = build_package_from(
-        GraphSource::Owned(Some(Box::new(graph))),
-        &metadata,
-        options,
-        job,
-    )?;
-    let mut clock = PhaseClock::new(job);
-    write_file(path, &writer, job)?;
-    clock.time("write");
-    Ok(report)
+    let spill_path = spill_dir.map(|dir| dir.join("package-sections.spill"));
+    let spill = match &spill_path {
+        Some(spill_path) => {
+            if let Some(dir) = spill_path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(spill_path)?,
+            )
+        }
+        None => None,
+    };
+    let result = (|| {
+        let (writer, report) = build_package_from(
+            GraphSource::Owned(Some(Box::new(graph))),
+            &metadata,
+            options,
+            job,
+            spill,
+        )?;
+        let mut clock = PhaseClock::new(job);
+        write_file(path, &writer, job)?;
+        clock.time("write");
+        Ok(report)
+    })();
+    if let Some(spill_path) = &spill_path {
+        let _ = std::fs::remove_file(spill_path);
+    }
+    result
 }
 
 /// Bytes handed to the file per write while writing a package, so a cancel

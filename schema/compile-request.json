@@ -39,7 +39,7 @@
       ]
     },
     "threads": {
-      "description": "Threads for the compile: a rayon pool of this many is built for it (the\nglobal pool is not used) and the ingest runs this many decode workers,\nplus a reader thread. `None` runs on the current rayon pool (the global\none, or the caller's inside `ThreadPool::install`, which is how a\ncaller sets thread names, stack sizes or priorities) with the memory\nprofile's decode workers, at most that pool's size. The package's bytes\nare the same for every thread count.",
+      "description": "Threads for the compile: a rayon pool of this many is built for it (the\nglobal pool is not used) and the ingest runs this many decode workers,\nplus a reader thread. `None` runs on the current rayon pool (the global\none, or the caller's inside `ThreadPool::install`, which is how a\ncaller sets thread names, stack sizes or priorities) with one decode\nworker per thread of that pool (at most two with\n[`MemoryProfile::Low`]). The package's bytes are the same for every\nthread count.",
       "type": [
         "integer",
         "null"

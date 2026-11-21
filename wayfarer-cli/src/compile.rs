@@ -65,7 +65,7 @@ pub(crate) struct CompileArgs {
     /// package's bytes are the same.
     #[arg(long, conflicts_with = "request")]
     low_memory: bool,
-    /// Threads for the compile [default: all cores, less two for the ingest].
+    /// Threads for the compile [default: all cores].
     /// The package's bytes are the same for any count.
     #[arg(long, value_name = "N", conflicts_with = "request")]
     threads: Option<NonZeroUsize>,
