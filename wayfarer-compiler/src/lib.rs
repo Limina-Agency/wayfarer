@@ -41,6 +41,7 @@ use osm_pbf_ingest::{
 };
 pub use package_build::{PackageBuildOptions, PackageBuildReport};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -54,8 +55,8 @@ use wayfarer_road_graph::{
     DirectionalAccess, EnhanceOptions, NodeBarrierTags, ROAD_GRAPH_SNAPSHOT_VERSION,
     RelationMemberRefType, RoadGraph, RoadGraphBuilder, RoadGraphPackageManifest,
     RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadTurnRestriction, RoadType,
-    RoadWayFacts, RoutableWay, SharedInfoIndex, TagInterner, TrafficControl,
-    TrafficControlDirection, TrafficControlPoint, enhance_road_graph_with,
+    RoadWayFacts, RoutableWay, SharedInfoIndex, TagInterner, TemplateWay, TrafficControl,
+    TrafficControlDirection, TrafficControlPoint, WayTemplate, enhance_road_graph_with,
     evaluate_road_graph_quality, resolve_turn_restrictions_with_report,
     vehicle_access_is_destination_only,
 };
@@ -864,34 +865,47 @@ fn place_line(locations: &NodeLocations, input: &mut SharedLineInput) {
     input.geometry = geometry;
 }
 
-/// Yields a vector's items in order and gives its buffer back as it empties:
-/// whenever the remaining items fit in half the buffer they move to one that
-/// size. A large vector consumed into something that grows (the topology
-/// edges into the graph builder, 13.7 M on Poland) is then not held in full
-/// until its last item.
-struct ShrinkingDrain<T> {
-    /// The items not yet yielded, last first.
+/// Takes a vector's items in order, a batch at a time, and gives its buffer
+/// back as it empties: whenever the remaining items fit in half the buffer
+/// they move to one that size. A large vector consumed into something that
+/// grows (the topology edges into the graph builder, 13.7 M on Poland) is
+/// then not held in full until its last item.
+struct ShrinkingBatches<T> {
+    /// The items not yet taken, last first.
     rest: Vec<T>,
+    batch_len: usize,
 }
 
-impl<T> ShrinkingDrain<T> {
-    fn new(mut items: Vec<T>) -> Self {
+impl<T> ShrinkingBatches<T> {
+    fn new(mut items: Vec<T>, batch_len: usize) -> Self {
         items.reverse();
-        Self { rest: items }
+        Self {
+            rest: items,
+            batch_len,
+        }
     }
 }
 
-impl<T> Iterator for ShrinkingDrain<T> {
-    type Item = T;
+impl<T> Iterator for ShrinkingBatches<T> {
+    type Item = Vec<T>;
 
-    fn next(&mut self) -> Option<T> {
-        let item = self.rest.pop()?;
+    fn next(&mut self) -> Option<Vec<T>> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        let mut batch = self
+            .rest
+            .split_off(self.rest.len().saturating_sub(self.batch_len));
+        batch.reverse();
         if self.rest.capacity() > 1024 && self.rest.len() <= self.rest.capacity() / 2 {
             self.rest.shrink_to_fit();
         }
-        Some(item)
+        Some(batch)
     }
 }
+
+/// Topology segments pushed to the graph builder at a time.
+const SEGMENT_BATCH_LEN: usize = 16 * 1024;
 
 fn build_road_graph(
     graph_id: &str,
@@ -931,23 +945,55 @@ fn build_road_graph(
         RoadGraphBuilder::new(graph_id).with_country_code(country_code.map(str::to_string));
     let mut tags = TagInterner::new();
     drop(nodes);
+    // A segment's way attributes come from its tag list and routing values,
+    // both shared handles (`SharedLineNetworkBuilder` interns them), so each
+    // distinct pair becomes a builder template once. The handles are kept
+    // with their template so their addresses stay theirs.
+    let mut templates = FxHashMap::<(usize, usize), (WayTemplate, SegmentHandles)>::default();
     let mut rows_written = 0;
     // The road segments (as `SharedLineTopology::road_segments` picks them),
-    // consumed: each segment's geometry moves to the builder, and the rest of
-    // it, and the edge vector itself, is freed as the builder grows.
-    for segment in ShrinkingDrain::new(edges)
-        .filter(|edge| edge.layer == SharedLineLayer::Roads && edge.routing.is_some())
-    {
-        let start_source_node_id = source_node_id_of(segment.start_node);
-        let end_source_node_id = source_node_id_of(segment.end_node);
-        builder.push_way(routable_way_from_segment(
-            segment,
-            start_source_node_id,
-            end_source_node_id,
-            &mut tags,
-        ));
-        rows_written += 1;
+    // consumed a batch at a time: each segment's geometry moves to the
+    // builder, and the rest of it, and the edge vector itself, is freed as
+    // the builder grows.
+    for mut batch in ShrinkingBatches::new(edges, SEGMENT_BATCH_LEN) {
+        batch.retain(|edge| edge.layer == SharedLineLayer::Roads && edge.routing.is_some());
+        let segment_templates = batch
+            .iter()
+            .map(|segment| {
+                let routing = segment.routing.as_ref().expect("a road segment's routing");
+                let key = (
+                    Arc::as_ptr(&segment.attrs) as *const () as usize,
+                    Arc::as_ptr(routing) as usize,
+                );
+                let (template, _) = templates.entry(key).or_insert_with(|| {
+                    let template = builder.way_template(segment_way_template(
+                        &segment.attrs,
+                        routing,
+                        &mut tags,
+                    ));
+                    (template, (Arc::clone(&segment.attrs), Arc::clone(routing)))
+                });
+                *template
+            })
+            .collect::<Vec<_>>();
+        let ways = batch
+            .into_par_iter()
+            .zip(segment_templates)
+            .map(|(segment, template)| {
+                let start_source_node_id = source_node_id_of(segment.start_node);
+                let end_source_node_id = source_node_id_of(segment.end_node);
+                template_way_from_segment(
+                    segment,
+                    template,
+                    start_source_node_id,
+                    end_source_node_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows_written += ways.len();
+        builder.push_template_ways(ways);
     }
+    drop(templates);
     drop(node_source_ids);
     drop(phase);
 
@@ -1447,19 +1493,21 @@ fn tag_owned(tags: &Tags, key: &str) -> Option<String> {
     tags.get(key).map(ToString::to_string)
 }
 
-fn routable_way_from_segment(
-    segment: SharedTopologyEdge,
-    start_source_node_id: Option<i64>,
-    end_source_node_id: Option<i64>,
+/// The handles a segment's way template is derived from (see
+/// [`segment_way_template`]).
+type SegmentHandles = (Arc<[(String, String)]>, Arc<RoadRoutingAttrs>);
+
+/// A road segment's way attributes, from its topology attributes and routing
+/// values: the [`RoutableWay`] the builder takes as a template, without the
+/// segment's id, lineage, points and source nodes.
+fn segment_way_template(
+    segment_attrs: &[(String, String)],
+    routing: &RoadRoutingAttrs,
     tags: &mut TagInterner,
 ) -> RoutableWay {
-    let routing = segment
-        .routing
-        .as_ref()
-        .expect("road topology edge must carry routing attrs");
     // Routing topology carries only a handful of attrs; a linear lookup avoids
     // building a string map per segment for mostly-missing keys.
-    let attrs = SegmentAttrs(&segment.attrs);
+    let attrs = SegmentAttrs(segment_attrs);
     let attr = |key: &str| attrs.value(key);
     let road_type = match routing.road_class.as_str() {
         "motorway" | "trunk" => RoadType::Motorway,
@@ -1472,20 +1520,7 @@ fn routable_way_from_segment(
         _ => RoadType::Other,
     };
 
-    let point_count = segment.geometry.len();
     RoutableWay {
-        osm_way_id: segment.feature_id,
-        source_node_ids: (0..point_count)
-            .map(|index| {
-                if index == 0 {
-                    start_source_node_id
-                } else if index + 1 == point_count {
-                    end_source_node_id
-                } else {
-                    None
-                }
-            })
-            .collect(),
         road_type,
         directional_access: match routing.directional_access {
             DirectionalAccessModel::Both => DirectionalAccess::Both,
@@ -1556,14 +1591,35 @@ fn routable_way_from_segment(
         access_restricted: routing.access_restricted,
         is_access_restricted: routing.access_restricted,
         coverage_id: tags.intern_opt(
-            segment
-                .attrs
+            segment_attrs
                 .iter()
                 .find(|(key, _)| key == "coverage_id")
                 .map(|(_, value)| value.as_str()),
         ),
-        source_lineage_ids: segment.source_lineage_ids.to_vec(),
+        ..Default::default()
+    }
+}
+
+/// A road segment as the builder takes it with its way `template`: its id,
+/// lineage and points, and its end nodes' source nodes.
+fn template_way_from_segment(
+    segment: SharedTopologyEdge,
+    template: WayTemplate,
+    start_source_node_id: Option<i64>,
+    end_source_node_id: Option<i64>,
+) -> TemplateWay {
+    let last = segment.geometry.len().saturating_sub(1) as u32;
+    let mut source_node_ids = Vec::new();
+    source_node_ids.extend(start_source_node_id.map(|node_id| (0, node_id)));
+    if last > 0 {
+        source_node_ids.extend(end_source_node_id.map(|node_id| (last, node_id)));
+    }
+    TemplateWay {
+        template,
+        osm_way_id: segment.feature_id,
         points: segment.geometry,
+        source_node_ids,
+        source_lineage_ids: segment.source_lineage_ids.to_vec(),
     }
 }
 
