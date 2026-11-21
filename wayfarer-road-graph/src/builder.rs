@@ -318,8 +318,10 @@ impl RoadGraphBuilder {
             |lat: f64, lng: f64, source_node_id: Option<i64>, graph: &mut RoadGraph| -> NodeIndex {
                 let key = (to_fixed(lat), to_fixed(lng));
                 if let Some(index) = node_map.get(&key).copied() {
-                    if graph.graph[index].source_node_id.is_none() {
-                        graph.graph[index].source_node_id = source_node_id;
+                    if graph.graph.node_source_node_id(index.index()).is_none() {
+                        graph
+                            .graph
+                            .set_node_source_node_id(index.index(), source_node_id);
                     }
                     index
                 } else {
@@ -705,10 +707,7 @@ impl RoadGraphBuilder {
                 }
 
                 start_node_idx = end_node_idx;
-                let continuation = {
-                    let node = &graph.graph[start_node_idx];
-                    (node.lat, node.lng)
-                };
+                let continuation = { graph.graph.node_lat_lng(start_node_idx.index()) };
                 current_segment_points.clear();
                 current_segment_points.push(continuation);
                 segment_start = index;
@@ -733,19 +732,21 @@ impl RoadGraphBuilder {
         // for the SAR `barriers` relaxation. The engine applies them at
         // transitions through the node.
         if !self.barrier_nodes.is_empty() {
-            for node in graph.graph.node_weights_mut() {
-                let Some(tags) = node
-                    .source_node_id
+            for node in 0..graph.graph.node_count() {
+                let Some(tags) = graph
+                    .graph
+                    .node_source_node_id(node)
                     .and_then(|id| self.barrier_nodes.get(&id))
                 else {
                     continue;
                 };
+                let (mut barrier_class, mut barrier_access) = graph.graph.node_barrier(node);
                 self.report.barrier_nodes_seen += 1;
                 match derive_node_barrier(tags) {
                     None => self.report.barrier_unknown_value_count += 1,
                     Some(barrier) if barrier.has_effect() => {
                         let access = barrier.profile_access();
-                        node.barrier_access = access.0;
+                        barrier_access = access.0;
                         self.report.barrier_constraints_applied += 1;
                         self.report.barrier_hard_block_count += usize::from(access.closed() != 0);
                         self.report.barrier_conditional_count += usize::from(access.gate() != 0);
@@ -753,9 +754,12 @@ impl RoadGraphBuilder {
                     Some(_) => {}
                 }
                 if let Some(class) = sar_barrier_class(tags) {
-                    node.barrier_class = class as u8;
+                    barrier_class = class as u8;
                     self.report.sar_barrier_node_count += 1;
                 }
+                graph
+                    .graph
+                    .set_node_barrier(node, barrier_class, barrier_access);
             }
         }
 

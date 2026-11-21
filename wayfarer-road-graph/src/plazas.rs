@@ -172,12 +172,12 @@ pub(crate) fn synthesize_pedestrian_plazas(
     }
     let info_index_by_id = SharedInfoIndex::new(&graph.shared_edge_infos);
     let mut ways_at_node: HashMap<NodeIndex, BTreeSet<i64>> = HashMap::new();
-    for edge_ref in graph.graph.edge_references() {
-        let (source, target) = (edge_ref.source(), edge_ref.target());
+    for edge in 0..graph.graph.edge_count() {
+        let (source, target) = (graph.graph.source(edge), graph.graph.target(edge));
         if !is_ring_node[source.index()] && !is_ring_node[target.index()] {
             continue;
         }
-        if let Some(info_index) = info_index_by_id.get(edge_ref.weight().shared_edge_info_id) {
+        if let Some(info_index) = info_index_by_id.get(graph.graph.edge_shared_info_id(edge)) {
             let way_id = graph.shared_edge_infos.at(info_index).osm_way_id;
             for node in [source, target] {
                 if is_ring_node[node.index()] {
@@ -255,10 +255,7 @@ pub(crate) fn synthesize_pedestrian_plazas(
 
         let mut plaza_edges = 0usize;
         for anchor in anchors.iter().copied() {
-            let anchor_point = {
-                let node = &graph.graph[anchor];
-                (node.lat, node.lng)
-            };
+            let anchor_point = graph.graph.node_lat_lng(anchor.index());
             let distance = calculate_path_distance(&[anchor_point, center]);
             if distance <= 0.0 {
                 continue;

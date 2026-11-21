@@ -5,7 +5,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use petgraph::visit::EdgeRef;
 use tempfile::tempdir;
 use wayfarer_package::{DirectionalAccess, MobilityMode, OsmMode, RoadType, TrafficControl};
 use wayfarer_road_graph::{
@@ -187,8 +186,8 @@ fn edge_between(graph: &RoadGraph, osm_way_id: i64, from: i64, to: i64) -> u64 {
                 .find(|info| info.shared_edge_info_id == edge.weight().shared_edge_info_id)
                 .expect("shared info");
             info.osm_way_id == osm_way_id
-                && graph.graph[edge.source()].source_node_id == Some(from)
-                && graph.graph[edge.target()].source_node_id == Some(to)
+                && graph.graph.node(edge.source()).source_node_id == Some(from)
+                && graph.graph.node(edge.target()).source_node_id == Some(to)
         })
         .map(|edge| edge.weight().edge_id)
         .expect("directed edge")
@@ -933,8 +932,8 @@ fn grid_edge(graph: &RoadGraph, from: (usize, usize), to: (usize, usize)) -> u64
         .graph
         .edge_references()
         .find(|edge| {
-            graph.graph[edge.source()].source_node_id == node(from)
-                && graph.graph[edge.target()].source_node_id == node(to)
+            graph.graph.node(edge.source()).source_node_id == node(from)
+                && graph.graph.node(edge.target()).source_node_id == node(to)
         })
         .map(|edge| edge.weight().edge_id)
         .expect("grid edge")
@@ -3554,8 +3553,8 @@ fn package_searches_are_exact_under_random_complex_restrictions() {
     let mut out = std::collections::BTreeMap::<i64, Vec<(i64, u64)>>::new();
     for edge in graph.graph.edge_references() {
         let (Some(from), Some(to)) = (
-            graph.graph[edge.source()].source_node_id,
-            graph.graph[edge.target()].source_node_id,
+            graph.graph.node(edge.source()).source_node_id,
+            graph.graph.node(edge.target()).source_node_id,
         ) else {
             continue;
         };
@@ -4766,8 +4765,8 @@ fn randomly_restricted_grid(seed: u64) -> RoadGraph {
     let mut out = std::collections::BTreeMap::<i64, Vec<(i64, u64)>>::new();
     for edge in graph.graph.edge_references() {
         let (Some(from), Some(to)) = (
-            graph.graph[edge.source()].source_node_id,
-            graph.graph[edge.target()].source_node_id,
+            graph.graph.node(edge.source()).source_node_id,
+            graph.graph.node(edge.target()).source_node_id,
         ) else {
             continue;
         };
@@ -6331,8 +6330,8 @@ fn roads_kept_for_sar_leave_normal_requests_unchanged() {
                         edge.weight().edge_id,
                         (
                             info.osm_way_id,
-                            graph.graph[edge.source()].source_node_id,
-                            graph.graph[edge.target()].source_node_id,
+                            graph.graph.node(edge.source()).source_node_id,
+                            graph.graph.node(edge.target()).source_node_id,
                         ),
                     )
                 })
@@ -6517,7 +6516,7 @@ fn sar_wrong_way_and_barriers_cost_and_report_what_they_do() {
         .filter(|edge| {
             [edge.source(), edge.target()]
                 .iter()
-                .any(|node| graph.graph[*node].source_node_id == Some(sar_grid_node(4, 3)))
+                .any(|node| graph.graph.node(*node).source_node_id == Some(sar_grid_node(4, 3)))
         })
         .map(|edge| edge.weight().edge_id)
         .collect::<std::collections::BTreeSet<_>>();
@@ -7740,11 +7739,14 @@ fn set_way_modes(graph: &mut RoadGraph, way: i64, mask: u32) {
         .map(|info| info.shared_edge_info_id)
         .collect::<Vec<_>>();
     let mut changed = 0;
-    for edge in graph.graph.edge_weights_mut() {
-        if infos.contains(&edge.shared_edge_info_id) {
-            edge.mobility_mode_mask = mask;
-            changed += 1;
-        }
+    for edge in graph.graph.edge_indices() {
+        changed += graph.graph.update_edge(edge, |edge| {
+            let found = infos.contains(&edge.shared_edge_info_id);
+            if found {
+                edge.mobility_mode_mask = mask;
+            }
+            usize::from(found)
+        });
     }
     assert!(changed > 0, "way {way}");
 }

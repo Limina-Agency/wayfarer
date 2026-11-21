@@ -1095,9 +1095,9 @@ fn graph_way_ids(graph: &RoadGraph) -> Vec<i64> {
     // The lineage of every shared info a legal edge uses.
     let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
     let mut legal_info = vec![false; graph.shared_edge_infos.len()];
-    for edge in graph.graph.edge_weights() {
-        if !edge.is_sar_only()
-            && let Some(index) = info_index.get(edge.shared_edge_info_id)
+    for edge in 0..graph.graph.edge_count() {
+        if graph.graph.edge_direction_osm_mode_mask(edge) != 0
+            && let Some(index) = info_index.get(graph.graph.edge_shared_info_id(edge))
         {
             legal_info[index] = true;
         }
@@ -1829,7 +1829,6 @@ fn road_routing_attrs(tags: &Tags, road_class: &str) -> RoadRoutingAttrs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use petgraph::visit::EdgeRef;
     use std::sync::Arc;
     use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RoutingEngine, RoutingPackage};
     use wayfarer_road_graph::{ResolvedEdgeRestriction, RoutableWay, TraversalDirection};
@@ -2075,8 +2074,8 @@ mod tests {
                     .unwrap()
                     .osm_way_id
                     == way_id
-                    && graph.graph[edge.source()].source_node_id == Some(from)
-                    && graph.graph[edge.target()].source_node_id == Some(to)
+                    && graph.graph.node_source_node_id(edge.source().index()) == Some(from)
+                    && graph.graph.node_source_node_id(edge.target().index()) == Some(to)
             })
             .unwrap_or_else(|| panic!("no edge of way {way_id} from {from} to {to}"))
             .weight()

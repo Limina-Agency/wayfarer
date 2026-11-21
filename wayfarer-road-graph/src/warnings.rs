@@ -46,7 +46,7 @@ pub(crate) fn cluster_warnings(
     // number below.
     let mut candidates = Vec::<(u32, i32, i32)>::new();
     for node_index in graph.graph.node_indices() {
-        let node = &graph.graph[node_index];
+        let node = graph.graph.node(node_index);
         if matches!(kind, ClusterWarningKind::UnsnappedEndpoints)
             && (node.source_node_id.is_some() || node.junction_kind != RoadJunctionKind::DeadEnd)
         {
@@ -162,7 +162,7 @@ pub(crate) fn cluster_warnings(
 
     for (first_member, member_count) in clusters.into_iter().take(4) {
         let (node_graph_index, lat_fixed, lng_fixed) = candidates[first_member];
-        let node = &graph.graph[NodeIndex::new(node_graph_index as usize)];
+        let node = graph.graph.node(NodeIndex::new(node_graph_index as usize));
         let (example_kind, label) = match kind {
             ClusterWarningKind::NearDuplicateNodes => (
                 RoadGraphQualityExampleKind::NearDuplicateNodeCluster,
@@ -194,9 +194,9 @@ pub(crate) fn add_edge_quality_warnings(
     let mut missing_heading_count = 0usize;
     let mut missing_speed_count = 0usize;
     let mut short_edge_count = 0usize;
-    for raw_edge in graph.graph.raw_edges() {
-        let edge = &raw_edge.weight;
-        let edge_component_id = graph.graph[raw_edge.source()].component_id;
+    for raw_edge in graph.graph.edge_references() {
+        let edge = raw_edge.weight();
+        let edge_component_id = graph.graph.node_component_id(raw_edge.source().index());
         if edge.start_heading_deg.is_none() || edge.end_heading_deg.is_none() {
             missing_heading_count += 1;
         }
@@ -286,9 +286,9 @@ pub(crate) fn add_rich_road_fact_coverage_warnings(
     info_index_by_id: &SharedInfoIndex,
 ) {
     let mut example_count = 0usize;
-    for raw_edge in graph.graph.raw_edges() {
-        let edge = &raw_edge.weight;
-        let edge_component_id = graph.graph[raw_edge.source()].component_id;
+    for raw_edge in graph.graph.edge_references() {
+        let edge = raw_edge.weight();
+        let edge_component_id = graph.graph.node_component_id(raw_edge.source().index());
         let Some(info) = shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id) else {
             continue;
         };
@@ -392,14 +392,17 @@ pub(crate) fn add_topology_integrity_warnings(
         largest_component_id = Some(*component_id);
     }
 
-    let raw_edges = graph.graph.raw_edges();
+    let network = &graph.graph;
+    let out_edges = network.adjacency(Direction::Outgoing);
     let has_edge = |source: usize, target: usize, id: u64, direction: TraversalDirection| {
-        graph
-            .graph
-            .edges_connecting(NodeIndex::new(source), NodeIndex::new(target))
-            .any(|edge_ref| {
-                let edge = edge_ref.weight();
-                edge.shared_edge_info_id == id && edge.traversal_direction == direction
+        out_edges
+            .edges(NodeIndex::new(source))
+            .iter()
+            .map(|&edge| edge as usize)
+            .any(|edge| {
+                network.target(edge).index() == target
+                    && network.edge_shared_info_id(edge) == id
+                    && network.edge_traversal_direction(edge) == direction
             })
     };
     // Both directions of a segment check against the same geometry length, so
@@ -424,11 +427,12 @@ pub(crate) fn add_topology_integrity_warnings(
     const DISTANCE_MISMATCH: u8 = 1 << 3;
     const UNREACHABLE_MAJOR: u8 = 1 << 4;
     const UNCONNECTED_LINK: u8 = 1 << 5;
-    let failed_checks = raw_edges
-        .par_iter()
-        .map(|raw_edge| {
-            let edge = &raw_edge.weight;
-            let edge_component_id = graph.graph[raw_edge.source()].component_id;
+    let failed_checks = (0..network.edge_count())
+        .into_par_iter()
+        .map(|at| {
+            let raw_edge = network.edge_ref(EdgeIndex::new(at));
+            let edge = raw_edge.weight();
+            let edge_component_id = network.node_component_id(raw_edge.source().index());
             let Some(info) = shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id)
             else {
                 return 0u8;
@@ -503,7 +507,7 @@ pub(crate) fn add_topology_integrity_warnings(
             continue;
         }
         let edge = edge_ref.weight();
-        let edge_component_id = graph.graph[edge_ref.source()].component_id;
+        let edge_component_id = graph.graph.node_component_id(edge_ref.source().index());
         let Some(info) = shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id) else {
             continue;
         };
@@ -640,9 +644,8 @@ pub(crate) fn add_topology_integrity_warnings(
     let duplicate_groups = (0..graph.graph.node_count())
         .into_par_iter()
         .filter_map(|source| {
-            let mut keys = graph
-                .graph
-                .edges(NodeIndex::new(source))
+            let mut keys = out_edges
+                .edge_refs(network, NodeIndex::new(source))
                 .filter(|edge_ref| !edge_ref.weight().is_sar_only())
                 .filter_map(|edge_ref| {
                     let edge = edge_ref.weight();
@@ -671,8 +674,8 @@ pub(crate) fn add_topology_integrity_warnings(
     for (key, group) in duplicate_groups.iter().flatten() {
         report.duplicate_parallel_edge_count += group.len() - 1;
         for &index in group.iter().skip(1).take(4) {
-            let edge = &raw_edges[index].weight;
-            let edge_component_id = graph.graph[raw_edges[index].source()].component_id;
+            let edge = &network.edge(EdgeIndex::new(index));
+            let edge_component_id = network.node_component_id(network.source(index).index());
             push_quality_example(
                 &mut report.warning_examples,
                 RoadGraphQualityExample {
@@ -704,14 +707,17 @@ pub(crate) fn add_dead_end_quality_warnings(
     info_index_by_id: &SharedInfoIndex,
 ) {
     let mut examples_added = 0usize;
-    for node_index in graph.graph.node_indices() {
-        let node = &graph.graph[node_index];
+    let network = &graph.graph;
+    let out_edges = network.adjacency(Direction::Outgoing);
+    let in_edges = network.adjacency(Direction::Incoming);
+    for node_index in network.node_indices() {
+        let node = network.node(node_index);
         if node.junction_kind != RoadJunctionKind::DeadEnd {
             continue;
         }
         let mut has_non_service_edge = false;
         let mut source_lineage_ids = BTreeSet::new();
-        for edge_ref in graph.graph.edges(node_index) {
+        for edge_ref in out_edges.edge_refs(network, node_index) {
             let edge = edge_ref.weight();
             source_lineage_ids.extend(edge_lineage(graph, info_index_by_id, edge));
             if shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id).is_some_and(
@@ -720,7 +726,7 @@ pub(crate) fn add_dead_end_quality_warnings(
                 has_non_service_edge = true;
             }
         }
-        for edge_ref in graph.graph.edges_directed(node_index, Direction::Incoming) {
+        for edge_ref in in_edges.edge_refs(network, node_index) {
             let edge = edge_ref.weight();
             source_lineage_ids.extend(edge_lineage(graph, info_index_by_id, edge));
             if shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id).is_some_and(
@@ -777,6 +783,7 @@ pub(crate) fn detect_shortcut_candidates(
     // Edges already in a candidate, by edge index. Edge ids are unique, so this
     // is the former set of edge ids without a tree lookup per edge.
     let mut seen_edges = vec![false; graph.graph.edge_count()];
+    let out_edges = graph.graph.adjacency(Direction::Outgoing);
     for edge_ref in graph.graph.edge_references() {
         let edge = edge_ref.weight();
         if seen_edges[edge_ref.id().index()] {
@@ -795,12 +802,13 @@ pub(crate) fn detect_shortcut_candidates(
         let mut current_edge_index = edge_ref.id();
 
         loop {
-            let node = &graph.graph[end_node];
+            let node = graph.graph.node(end_node);
             if node.junction_kind != RoadJunctionKind::Through {
                 break;
             }
             let next = matching_shortcut_successor(
                 graph,
+                &out_edges,
                 info_index_by_id,
                 end_node,
                 previous_node,
@@ -831,8 +839,8 @@ pub(crate) fn detect_shortcut_candidates(
         report.candidate_count += 1;
         report.candidate_edge_count += edge_ids.len();
         if report.examples.len() < 8 {
-            let start = &graph.graph[start_node];
-            let end = &graph.graph[end_node];
+            let start = graph.graph.node(start_node);
+            let end = graph.graph.node(end_node);
             report.examples.push(RoadGraphShortcutCandidateExample {
                 start_node_id: start.id,
                 end_node_id: end.id,
@@ -850,6 +858,7 @@ pub(crate) fn detect_shortcut_candidates(
 
 fn matching_shortcut_successor(
     graph: &RoadGraph,
+    out_edges: &Adjacency,
     info_index_by_id: &SharedInfoIndex,
     node_index: NodeIndex,
     previous_node: NodeIndex,
@@ -858,7 +867,7 @@ fn matching_shortcut_successor(
 ) -> Option<(EdgeIndex, u64, NodeIndex, f32)> {
     // The only matching edge, if exactly one matches.
     let mut candidate = None;
-    for edge_ref in graph.graph.edges(node_index) {
+    for edge_ref in out_edges.edge_refs(&graph.graph, node_index) {
         if edge_ref.id() == current_edge_index || edge_ref.target() == previous_node {
             continue;
         }

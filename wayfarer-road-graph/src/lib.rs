@@ -36,7 +36,10 @@
 
 use geo::{Centroid, Contains, InteriorPoint, LineString};
 use petgraph::Direction;
-use petgraph::graph::{EdgeIndex, Graph, NodeIndex};
+#[cfg(test)]
+use petgraph::graph::Graph;
+use petgraph::graph::{EdgeIndex, NodeIndex};
+#[cfg(test)]
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -55,13 +58,12 @@ pub use wayfarer_package::{
     TraversalDirection,
 };
 
-pub type RoadNetwork = Graph<RoadNode, RoadEdge>;
-
 mod builder;
 mod container;
 mod enhance;
 mod geometry;
 mod graph;
+mod network;
 mod plazas;
 mod quality;
 mod report;
@@ -76,6 +78,7 @@ pub use container::*;
 pub use enhance::*;
 use geometry::*;
 pub use graph::*;
+pub use network::{Adjacency, EdgeColumn, NodeColumn, RoadEdgeRef, RoadNetwork};
 use plazas::*;
 pub use quality::*;
 pub use report::*;

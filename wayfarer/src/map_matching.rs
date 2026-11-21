@@ -1416,7 +1416,6 @@ fn default_trace_alternative_count() -> usize {
 mod tests {
     use super::*;
     use crate::RoutingEngine;
-    use petgraph::visit::EdgeRef;
     use wayfarer_package::{DirectionalAccess, RoadType};
     use wayfarer_road_graph::{RoadGraph, RoadGraphBuilder, RoutableWay, enhance_road_graph};
 
@@ -1758,7 +1757,10 @@ mod tests {
             .graph
             .edge_references()
             .filter_map(|edge| {
-                let (source, target) = (&graph.graph[edge.source()], &graph.graph[edge.target()]);
+                let (source, target) = (
+                    &graph.graph.node(edge.source()),
+                    &graph.graph.node(edge.target()),
+                );
                 ((source.lat - lat).abs() < 1e-9
                     && (target.lat - lat).abs() < 1e-9
                     && (target.lng > source.lng) == eastward)

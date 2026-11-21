@@ -6,7 +6,6 @@ use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use petgraph::Direction;
 use petgraph::graph::{EdgeIndex, NodeIndex};
-use petgraph::visit::EdgeRef;
 use rstar::{AABB, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
 use wayfarer_package::{
@@ -81,6 +80,10 @@ pub struct RouteGraphIndex {
     /// The graph's shared infos whole: the reference costs read them as one
     /// `SharedEdgeInfo` each.
     shared_infos: Vec<SharedEdgeInfo>,
+    /// The graph's nodes and edges whole, by index: records hand them out by
+    /// reference, and the road graph stores them as columns.
+    nodes: Vec<RoadNode>,
+    edges: Vec<RoadEdge>,
     #[cfg_attr(not(test), allow(dead_code))]
     component_size_by_id: HashMap<u32, usize>,
     /// Spatial index over every geometry window of every directed edge, used
@@ -203,7 +206,7 @@ fn node_id_index_from_graph(graph: &RoadGraph) -> Vec<(i64, usize)> {
     let mut index = graph
         .graph
         .node_indices()
-        .map(|node_index| (graph.graph[node_index].id, node_index.index()))
+        .map(|node_index| (graph.graph.node_id(node_index.index()), node_index.index()))
         .collect::<Vec<_>>();
     index.sort_unstable_by_key(|(node_id, _)| *node_id);
     index
@@ -285,6 +288,8 @@ impl RouteGraphIndex {
             opposing_edge_by_id,
             shared_info_by_id,
             shared_infos: graph.shared_edge_infos.to_vec(),
+            nodes: graph.graph.node_weights().collect(),
+            edges: graph.graph.edge_weights().collect(),
             component_size_by_id,
             segment_index: OnceLock::new(),
             simple_restrictions: simple_restrictions(graph),
@@ -367,9 +372,7 @@ impl<'a> GraphAccess<'a> {
     }
 
     pub fn node_by_raw_node_index(&self, raw_node_index: usize) -> Option<&RoadNode> {
-        self.graph()
-            .graph
-            .node_weight(NodeIndex::new(raw_node_index))
+        self.index.nodes.get(raw_node_index)
     }
 
     pub fn node_id_for_raw_node_index(&self, raw_node_index: usize) -> Option<i64> {
@@ -447,9 +450,7 @@ impl<'a> GraphAccess<'a> {
 
     pub fn node_by_id(&self, node_id: i64) -> Option<&RoadNode> {
         let raw_node_index = lookup_raw_node_index(&self.index.node_by_id, node_id)?;
-        self.graph()
-            .graph
-            .node_weight(NodeIndex::new(raw_node_index))
+        self.index.nodes.get(raw_node_index)
     }
 
     pub fn edge_by_id(&self, edge_id: u64) -> Option<EdgeRecord<'_>> {
@@ -671,8 +672,14 @@ impl<'a> GraphAccess<'a> {
         let mut seen_edges = BTreeSet::<u64>::new();
 
         while let Some(node) = queue.pop_front() {
-            for edge_ref in self.graph().graph.edges_directed(node, direction) {
-                let edge = edge_ref.weight();
+            let adjacency = match direction {
+                Direction::Outgoing => &self.index.outgoing_raw_adjacency,
+                Direction::Incoming => &self.index.incoming_raw_adjacency,
+            };
+            let network = &self.graph().graph;
+            // The count does not depend on the order edges are taken in.
+            for &raw_edge_index in adjacency.get(node.index()).unwrap_or(&[]) {
+                let edge = &self.index.edges[raw_edge_index];
                 if edge.mobility_mode_mask & profile_mask == 0 {
                     continue;
                 }
@@ -680,8 +687,8 @@ impl<'a> GraphAccess<'a> {
                     return Some(seen_edges.len());
                 }
                 let next_node = match direction {
-                    Direction::Outgoing => edge_ref.target(),
-                    Direction::Incoming => edge_ref.source(),
+                    Direction::Outgoing => network.target(raw_edge_index),
+                    Direction::Incoming => network.source(raw_edge_index),
                 };
                 if seen_nodes.insert(next_node) {
                     queue.push_back(next_node);
@@ -698,15 +705,14 @@ impl<'a> GraphAccess<'a> {
             .edge_metadata_by_raw_edge_index
             .get(edge_index.index())
             .and_then(|metadata| *metadata)?;
-        let graph = self.graph();
-        let edge = graph.graph.edge_weight(edge_index)?;
+        let edge = self.index.edges.get(edge_index.index())?;
         if metadata.edge_id != edge.edge_id {
             return None;
         }
         let source_index = NodeIndex::new(metadata.source_raw_node_index);
         let target_index = NodeIndex::new(metadata.target_raw_node_index);
-        let source = graph.graph.node_weight(source_index)?;
-        let target = graph.graph.node_weight(target_index)?;
+        let source = self.index.nodes.get(source_index.index())?;
+        let target = self.index.nodes.get(target_index.index())?;
         let shared_info = self
             .index
             .shared_infos

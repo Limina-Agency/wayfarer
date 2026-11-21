@@ -191,7 +191,7 @@ fn road_graph_snapshot(graph: &RoadGraph) -> RoadGraphSnapshot {
     for node_index in graph.graph.node_indices() {
         node_lookup.insert(node_index, nodes.len());
         nodes.push(SnapshotNode::new(
-            &graph.graph[node_index],
+            &graph.graph.node(node_index),
             graph.node_road_type_counts.get(node_index.index()),
         ));
     }
@@ -209,7 +209,7 @@ fn road_graph_snapshot(graph: &RoadGraph) -> RoadGraphSnapshot {
                 edge: SnapshotEdge::new(
                     edge_ref.weight(),
                     shared_edge_info(graph, &info_index, edge_ref.weight().shared_edge_info_id),
-                    graph.graph[edge_ref.source()].component_id,
+                    graph.graph.node_component_id(edge_ref.source().index()),
                 ),
             })
         })

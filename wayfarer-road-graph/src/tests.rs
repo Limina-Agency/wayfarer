@@ -519,9 +519,7 @@ fn graph_manifest_counts_quality_metrics() {
     let first_edge = graph.graph.edge_indices().next().unwrap();
     graph
         .graph
-        .edge_weight_mut(first_edge)
-        .unwrap()
-        .mobility_mode_mask = 0;
+        .update_edge(first_edge, |edge| edge.mobility_mode_mask = 0);
     graph.set_turn_restrictions(vec![RoadTurnRestriction {
         relation_id: 99,
         restriction: "no_left_turn".to_string(),
@@ -693,7 +691,7 @@ fn enhancement_assigns_components_degrees_headings_speeds_and_warnings() {
     let center_index = graph
         .graph
         .node_indices()
-        .find(|index| graph.graph[*index].source_node_id == Some(100))
+        .find(|index| graph.graph.node(*index).source_node_id == Some(100))
         .unwrap();
     let center_counts = &graph.node_road_type_counts[center_index.index()];
     assert!(!center_counts.incoming.is_empty());
@@ -761,9 +759,10 @@ fn enhancement_reports_valhalla_style_topology_quality_warnings() {
         .find(|edge_ref| edge_ref.weight().shared_edge_info_id == missing_opposing_shared_id)
         .map(|edge_ref| edge_ref.id())
         .unwrap();
-    let mismatch_edge = graph.graph.edge_weight_mut(mismatch_edge_id).unwrap();
-    mismatch_edge.mobility_mode_mask = 0;
-    mismatch_edge.distance_m = 1.0;
+    graph.graph.update_edge(mismatch_edge_id, |mismatch_edge| {
+        mismatch_edge.mobility_mode_mask = 0;
+        mismatch_edge.distance_m = 1.0;
+    });
 
     let missing_geometry_shared_id = graph
         .shared_edge_infos
@@ -1040,13 +1039,16 @@ fn enhancement_classifies_roundabout_and_complex_junctions() {
 
     let report = enhance_road_graph(&mut graph);
 
-    assert_eq!(graph.graph[hub].junction_kind, RoadJunctionKind::Complex);
-    assert!(graph.graph[hub].is_complex_junction);
     assert_eq!(
-        graph.graph[roundabout_a].junction_kind,
+        graph.graph.node(hub).junction_kind,
+        RoadJunctionKind::Complex
+    );
+    assert!(graph.graph.node(hub).is_complex_junction);
+    assert_eq!(
+        graph.graph.node(roundabout_a).junction_kind,
         RoadJunctionKind::Roundabout
     );
-    assert_eq!(graph.graph[roundabout_a].roundabout_exit_count, 1);
+    assert_eq!(graph.graph.node(roundabout_a).roundabout_exit_count, 1);
     assert_eq!(report.complex_junction_node_count, 1);
     assert_eq!(report.roundabout_node_count, 2);
 }
@@ -2440,7 +2442,7 @@ fn control_point(lat: f64, lng: f64, control: TrafficControl) -> TrafficControlP
 /// The edge of `graph` from the node at `from` to the node at `to`.
 fn edge_at(graph: &RoadGraph, from: (f64, f64), to: (f64, f64)) -> RoadEdge {
     let at = |index: NodeIndex, (lat, lng): (f64, f64)| {
-        let node = &graph.graph[index];
+        let node = graph.graph.node(index);
         (node.lat - lat).abs() < 1e-9 && (node.lng - lng).abs() < 1e-9
     };
     graph

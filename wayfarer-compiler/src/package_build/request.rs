@@ -1,30 +1,32 @@
 //! Builds the request sections (see `wayfarer_package::request`)
 //! from the road graph.
 
-use petgraph::graph::NodeIndex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use wayfarer_package::RoadEdge;
 use wayfarer_package::codec;
 use wayfarer_package::request::*;
-use wayfarer_road_graph::{RoadGraph, opposing_edge_indices};
+use wayfarer_road_graph::{RoadNetwork, SharedEdgeInfos};
 
 use wayfarer_package::format::{PackageWriter, RoutingPackageError, Section, profile_bit};
 
 /// Inputs from the package build, in compact order.
 pub(crate) struct RequestBuildInput<'a> {
-    pub graph: &'a RoadGraph,
-    /// Road graph node index per compact node.
-    pub node_raw: &'a [u32],
+    /// The road graph's nodes and edges in compact order, with the columns
+    /// read here: node ids, components and roundabout exits; edge ids,
+    /// mobility masks and opposing edge ids.
+    pub network: &'a RoadNetwork,
+    pub shared_infos: &'a SharedEdgeInfos,
+    /// Each component's node count over the whole road graph.
+    pub component_sizes: &'a FxHashMap<u32, usize>,
     pub first_out: &'a [u32],
     pub edge_source: &'a [u32],
     pub edge_target: &'a [u32],
-    pub edge_ids: &'a [u64],
     /// Compact edge per edge id less `edge_id_base` (`u32::MAX` for none).
     pub edge_id_base: u64,
     pub edge_id_lookup: &'a [u32],
-    /// Road graph edge index per compact edge (build time only).
-    pub edge_raw: &'a [u32],
+    /// The compact edge correlation pairs each edge with (`u32::MAX` for
+    /// none): see [`wayfarer_road_graph::opposing_edge_indices`].
+    pub correlation_opposing: &'a [u32],
     pub edge_shared_info: &'a [u32],
     pub edge_flags: &'a [u8],
     pub edge_profile_access: &'a [u8],
@@ -157,22 +159,16 @@ fn deltas<T: Copy + Into<i128>>(ids: &[T]) -> Option<(i128, Vec<u32>)> {
 pub(crate) fn build_request_sections(
     input: &RequestBuildInput<'_>,
 ) -> Result<RequestSections, RoutingPackageError> {
-    let graph = input.graph;
-    let edge_count = input.edge_ids.len();
+    let network = input.network;
+    let edge_count = network.edge_count();
     let shared_count = input.shared_raw.len();
-    let node_count = input.node_raw.len();
-    let node = |compact: usize| &graph.graph[NodeIndex::new(input.node_raw[compact] as usize)];
-    let road_edge = |compact: usize| -> &RoadEdge {
-        &graph.graph.raw_edges()[input.edge_raw[compact] as usize].weight
-    };
-    let shared_info = |shared: usize| {
-        graph
-            .shared_edge_infos
-            .at(input.shared_raw[shared] as usize)
-    };
+    let node_count = network.node_count();
+    let shared_info = |shared: usize| input.shared_infos.at(input.shared_raw[shared] as usize);
 
     // Node ids (u32 deltas when they fit) and roundabout exits.
-    let node_ids = (0..node_count).map(|at| node(at).id).collect::<Vec<_>>();
+    let node_ids = (0..node_count)
+        .map(|at| network.node_id(at))
+        .collect::<Vec<_>>();
     let (node_base, node_id_delta, node_id_wide) = match deltas(&node_ids) {
         Some((base, deltas)) => {
             drop(node_ids);
@@ -181,22 +177,17 @@ pub(crate) fn build_request_sections(
         None => (0, Vec::new(), node_ids),
     };
     let roundabout_exits = (0..node_count)
-        .filter(|at| node(*at).roundabout_exit_count != 0)
-        .flat_map(|at| [at as u32, u32::from(node(at).roundabout_exit_count)])
+        .filter(|at| network.node_roundabout_exit_count(*at) != 0)
+        .flat_map(|at| [at as u32, u32::from(network.node_roundabout_exit_count(at))])
         .collect::<Vec<_>>();
 
     // Components: the road graph's component ids, and each component's node
     // count over the whole graph.
-    let mut size_by_component = FxHashMap::<u32, usize>::default();
-    for road_node in graph.graph.node_weights() {
-        if let Some(component) = road_node.component_id {
-            *size_by_component.entry(component).or_default() += 1;
-        }
-    }
+    let size_by_component = input.component_sizes;
     let components = (0..node_count)
         .map(|at| {
-            node(at)
-                .component_id
+            network
+                .node_component_id(at)
                 .filter(|component| *component != NONE_U32)
                 .unwrap_or(NONE_U32)
         })
@@ -226,7 +217,6 @@ pub(crate) fn build_request_sections(
         .flat_map(|(node, component)| [node as u32, *component])
         .collect::<Vec<_>>();
     drop(components);
-    drop(size_by_component);
     let mut component_sizes = component_sizes.into_iter().collect::<Vec<_>>();
     component_sizes.sort_unstable();
     let component_sizes = component_sizes
@@ -263,7 +253,7 @@ pub(crate) fn build_request_sections(
     // nothing, so classes and strings keep their first-use numbering.
     let mut table = StringsAndClasses::default();
     let mut shared_attr_class = Vec::with_capacity(shared_count);
-    let mut package_class_of = vec![u32::MAX; graph.shared_edge_infos.class_count()];
+    let mut package_class_of = vec![u32::MAX; input.shared_infos.class_count()];
     let mut conditional_shared = Vec::new();
     let mut conditional_start = vec![0u32];
     let mut conditional_pool = Vec::new();
@@ -379,8 +369,6 @@ pub(crate) fn build_request_sections(
     // (shared info, segment, direction) (the last edge of a key wins); legs
     // report the edge's own `opposing_edge_id`. Both are stored as
     // exceptions to the adjacency rule.
-    // By road graph edge index.
-    let correlation_opposing = opposing_edge_indices(graph);
     let derived = (0..edge_count as u32)
         .into_par_iter()
         .map(|edge| {
@@ -414,7 +402,7 @@ pub(crate) fn build_request_sections(
                 let actual = if value == NONE_U32 { NONE_U64 } else { actual };
                 let derived = match derived[edge as usize] {
                     NONE_U32 => NONE_U64,
-                    opposing => input.edge_ids[opposing as usize],
+                    opposing => network.edge_id(opposing as usize),
                 };
                 (derived != actual).then_some((edge, value))
             })
@@ -422,25 +410,23 @@ pub(crate) fn build_request_sections(
             .into_iter()
             .unzip()
     };
-    let (opposing_edge, opposing_value) = exceptions(&|edge| match correlation_opposing
-        [input.edge_raw[edge] as usize]
-    {
-        u32::MAX => NONE_U64,
-        raw => graph.graph.raw_edges()[raw as usize].weight.edge_id,
-    });
+    let (opposing_edge, opposing_value) =
+        exceptions(&|edge| match input.correlation_opposing[edge] {
+            u32::MAX => NONE_U64,
+            opposing => network.edge_id(opposing as usize),
+        });
     let (leg_opposing_edge, leg_opposing_value) =
-        exceptions(&|edge| road_edge(edge).opposing_edge_id.unwrap_or(NONE_U64));
+        exceptions(&|edge| network.edge_opposing_edge_id(edge).unwrap_or(NONE_U64));
     drop(derived);
-    drop(correlation_opposing);
 
     // Leg record exceptions: masks the profile bits do not rebuild. Tier
     // exceptions stay empty: no hierarchy tier is stored.
     let mut mode_mask_exceptions = Vec::new();
     let tier_exceptions = Vec::new();
     for edge in 0..edge_count {
-        let road = road_edge(edge);
-        if !exact_mode_mask(road.mobility_mode_mask) {
-            mode_mask_exceptions.extend([edge as u32, road.mobility_mode_mask]);
+        let mobility_mode_mask = network.edge_mobility_mode_mask(edge);
+        if !exact_mode_mask(mobility_mode_mask) {
+            mode_mask_exceptions.extend([edge as u32, mobility_mode_mask]);
         }
     }
 
