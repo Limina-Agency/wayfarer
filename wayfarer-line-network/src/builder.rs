@@ -55,6 +55,17 @@ impl SharedLineNetworkBuilder {
         self.inputs.is_empty()
     }
 
+    /// The inputs pushed so far, in push order: for a caller that pushes its
+    /// lines before their geometry is known and fills it in afterwards.
+    pub fn inputs_mut(&mut self) -> &mut [SharedLineInput] {
+        &mut self.inputs
+    }
+
+    /// Keeps only the inputs `keep` accepts, in push order.
+    pub fn retain_inputs(&mut self, keep: impl FnMut(&SharedLineInput) -> bool) {
+        self.inputs.retain(keep);
+    }
+
     pub fn finish(self) -> SharedLineNetwork {
         self.finish_with_observer(&mut |_| {})
     }
