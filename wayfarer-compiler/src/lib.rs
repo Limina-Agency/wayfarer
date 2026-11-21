@@ -864,6 +864,35 @@ fn place_line(locations: &NodeLocations, input: &mut SharedLineInput) {
     input.geometry = geometry;
 }
 
+/// Yields a vector's items in order and gives its buffer back as it empties:
+/// whenever the remaining items fit in half the buffer they move to one that
+/// size. A large vector consumed into something that grows (the topology
+/// edges into the graph builder, 13.7 M on Poland) is then not held in full
+/// until its last item.
+struct ShrinkingDrain<T> {
+    /// The items not yet yielded, last first.
+    rest: Vec<T>,
+}
+
+impl<T> ShrinkingDrain<T> {
+    fn new(mut items: Vec<T>) -> Self {
+        items.reverse();
+        Self { rest: items }
+    }
+}
+
+impl<T> Iterator for ShrinkingDrain<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        let item = self.rest.pop()?;
+        if self.rest.capacity() > 1024 && self.rest.len() <= self.rest.capacity() / 2 {
+            self.rest.shrink_to_fit();
+        }
+        Some(item)
+    }
+}
+
 fn build_road_graph(
     graph_id: &str,
     country_code: Option<&str>,
@@ -905,9 +934,8 @@ fn build_road_graph(
     let mut rows_written = 0;
     // The road segments (as `SharedLineTopology::road_segments` picks them),
     // consumed: each segment's geometry moves to the builder, and the rest of
-    // it is freed as the builder grows.
-    for segment in edges
-        .into_iter()
+    // it, and the edge vector itself, is freed as the builder grows.
+    for segment in ShrinkingDrain::new(edges)
         .filter(|edge| edge.layer == SharedLineLayer::Roads && edge.routing.is_some())
     {
         let start_source_node_id = source_node_id_of(segment.start_node);

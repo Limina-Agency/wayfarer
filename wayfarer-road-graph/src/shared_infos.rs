@@ -21,7 +21,7 @@ pub struct SharedEdge {
     /// Index into the classes of the [`SharedEdgeInfos`] that holds it.
     pub class: u32,
     /// The end of its points in the pool (the start is the previous info's).
-    geometry_end: u64,
+    geometry_end: u32,
 }
 
 /// A shared info read from [`SharedEdgeInfos`]: the segment's own fields, and
@@ -31,7 +31,7 @@ pub struct SharedEdge {
 pub struct SharedInfoRef<'a> {
     pub shared_edge_info_id: u64,
     pub osm_way_id: i64,
-    pub geometry: &'a [(f64, f64)],
+    pub geometry: InfoGeometry<'a>,
     /// The source ways the info's edges come from: `[osm_way_id]` unless set
     /// otherwise with [`SharedEdgeInfos::set_source_lineage_ids`].
     pub source_lineage_ids: &'a [i64],
@@ -53,10 +53,84 @@ impl SharedInfoRef<'_> {
     }
 }
 
+/// A shared info's points, read from the [`SharedEdgeInfos`]' pool, where
+/// they are kept as E7 pairs (half the size of `f64` pairs). The rare point
+/// that is not the `f64` of its E7 value is kept exactly beside them, so every
+/// point reads back as it was pushed.
+#[derive(Debug, Clone, Copy)]
+pub struct InfoGeometry<'a> {
+    fixed: &'a [(i32, i32)],
+    /// The exact points among `fixed`, by their pool index.
+    exact: &'a [(u32, (f64, f64))],
+    /// The pool index of `fixed[0]`.
+    start: u32,
+}
+
+impl<'a> InfoGeometry<'a> {
+    pub fn len(&self) -> usize {
+        self.fixed.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fixed.is_empty()
+    }
+
+    /// The point at `index`; panics past the end, as slice indexing does.
+    pub fn get(&self, index: usize) -> (f64, f64) {
+        let (lat, lng) = self.fixed[index];
+        if !self.exact.is_empty()
+            && let Ok(at) = self
+                .exact
+                .binary_search_by_key(&(self.start + index as u32), |(at, _)| *at)
+        {
+            return self.exact[at].1;
+        }
+        (from_fixed(lat), from_fixed(lng))
+    }
+
+    pub fn first(&self) -> Option<(f64, f64)> {
+        (!self.is_empty()).then(|| self.get(0))
+    }
+
+    pub fn last(&self) -> Option<(f64, f64)> {
+        (!self.is_empty()).then(|| self.get(self.len() - 1))
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (f64, f64)> + DoubleEndedIterator + Clone + 'a {
+        let geometry = *self;
+        (0..self.len()).map(move |index| geometry.get(index))
+    }
+
+    pub fn to_vec(&self) -> Vec<(f64, f64)> {
+        self.iter().collect()
+    }
+
+    /// The points into `buffer`, which is cleared first.
+    pub fn read_into<'b>(&self, buffer: &'b mut Vec<(f64, f64)>) -> &'b [(f64, f64)] {
+        buffer.clear();
+        buffer.extend(self.iter());
+        buffer
+    }
+}
+
+impl PartialEq<[(f64, f64)]> for InfoGeometry<'_> {
+    fn eq(&self, other: &[(f64, f64)]) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a == *b)
+    }
+}
+
 /// Distinct attribute sets, numbered in the order they were first added.
+///
+/// Each set is boxed: a table that is rebuilt (merged, finished, compacted)
+/// moves its sets' boxes instead of copying the sets (616 bytes each, and
+/// millions of them on a country) into a second table beside the first.
 #[derive(Debug, Clone, Default)]
 pub struct SharedInfoClasses {
-    classes: Vec<SharedEdgeInfo>,
+    // Boxed on purpose, see above.
+    #[allow(clippy::vec_box)]
+    classes: Vec<Box<SharedEdgeInfo>>,
     /// Class content hash to the newest class with that hash; `next` chains
     /// the older ones (`u32::MAX` ends a chain).
     by_hash: FxHashMap<u64, u32>,
@@ -85,7 +159,25 @@ impl SharedInfoClasses {
         }
     }
 
-    pub(crate) fn into_vec(self) -> Vec<SharedEdgeInfo> {
+    /// Rebuilds the hash chains for the classes in their current order, as
+    /// interning them in that order would (the classes are distinct).
+    fn reindex(&mut self) {
+        self.by_hash.clear();
+        self.next.clear();
+        for (class, attrs) in self.classes.iter().enumerate() {
+            let head = self
+                .by_hash
+                .insert(class_hash(attrs), class as u32)
+                .unwrap_or(u32::MAX);
+            self.next.push(head);
+        }
+        self.by_hash.shrink_to_fit();
+        self.next.shrink_to_fit();
+    }
+
+    /// The classes' attribute sets, by number.
+    #[allow(clippy::vec_box)]
+    pub(crate) fn into_boxes(self) -> Vec<Box<SharedEdgeInfo>> {
         self.classes
     }
 
@@ -94,14 +186,37 @@ impl SharedInfoClasses {
     pub fn intern(&mut self, mut attrs: SharedEdgeInfo) -> u32 {
         strip_segment_fields(&mut attrs);
         let hash = class_hash(&attrs);
-        let mut at = self.by_hash.get(&hash).copied().unwrap_or(u32::MAX);
-        let head = at;
+        match self.find(hash, &attrs) {
+            Ok(class) => class,
+            Err(head) => self.push(hash, head, Box::new(attrs)),
+        }
+    }
+
+    /// [`Self::intern`] for attributes already boxed: a new class keeps the
+    /// box.
+    pub(crate) fn intern_boxed(&mut self, mut attrs: Box<SharedEdgeInfo>) -> u32 {
+        strip_segment_fields(&mut attrs);
+        let hash = class_hash(&attrs);
+        match self.find(hash, &attrs) {
+            Ok(class) => class,
+            Err(head) => self.push(hash, head, attrs),
+        }
+    }
+
+    /// The class equal to `attrs`, or else the head of its hash's chain.
+    fn find(&self, hash: u64, attrs: &SharedEdgeInfo) -> Result<u32, u32> {
+        let head = self.by_hash.get(&hash).copied().unwrap_or(u32::MAX);
+        let mut at = head;
         while at != u32::MAX {
-            if class_eq(&self.classes[at as usize], &attrs) {
-                return at;
+            if class_eq(&self.classes[at as usize], attrs) {
+                return Ok(at);
             }
             at = self.next[at as usize];
         }
+        Err(head)
+    }
+
+    fn push(&mut self, hash: u64, head: u32, attrs: Box<SharedEdgeInfo>) -> u32 {
         let class = u32::try_from(self.classes.len()).expect("fewer than 2^32 classes");
         self.classes.push(attrs);
         self.next.push(head);
@@ -114,9 +229,12 @@ impl SharedInfoClasses {
 #[derive(Debug, Clone, Default)]
 pub struct SharedEdgeInfos {
     edges: Vec<SharedEdge>,
-    /// Every info's points, in info order: one allocation instead of one per
-    /// info.
-    points: Vec<(f64, f64)>,
+    /// Every info's points as E7 pairs, in info order: one allocation instead
+    /// of one per info (see [`InfoGeometry`]).
+    points: Vec<(i32, i32)>,
+    /// `(pool index, point)` of the points that are not the `f64` of their E7
+    /// pair, by index.
+    exact_points: Vec<(u32, (f64, f64))>,
     classes: SharedInfoClasses,
     /// `(index, lineage)` of the infos whose lineage is not `[osm_way_id]`,
     /// by index: the rare exceptions, instead of a lineage per edge.
@@ -167,13 +285,39 @@ impl SharedEdgeInfos {
         geometry: &[(f64, f64)],
         class: u32,
     ) {
-        self.points.extend_from_slice(geometry);
+        self.push_points(geometry);
         self.edges.push(SharedEdge {
             shared_edge_info_id,
             osm_way_id,
             class,
-            geometry_end: self.points.len() as u64,
+            geometry_end: pool_index(self.points.len()),
         });
+    }
+
+    /// Appends `geometry` to the pool.
+    fn push_points(&mut self, geometry: &[(f64, f64)]) {
+        for &(lat, lng) in geometry {
+            let fixed = (to_fixed(lat), to_fixed(lng));
+            if !is_exact_fixed((lat, lng), fixed) {
+                self.exact_points
+                    .push((pool_index(self.points.len()), (lat, lng)));
+            }
+            self.points.push(fixed);
+        }
+    }
+
+    fn geometry_at(&self, range: std::ops::Range<usize>) -> InfoGeometry<'_> {
+        let exact_start = self
+            .exact_points
+            .partition_point(|(at, _)| (*at as usize) < range.start);
+        let exact_end = exact_start
+            + self.exact_points[exact_start..]
+                .partition_point(|(at, _)| (*at as usize) < range.end);
+        InfoGeometry {
+            fixed: &self.points[range.clone()],
+            exact: &self.exact_points[exact_start..exact_end],
+            start: range.start as u32,
+        }
     }
 
     /// The number of distinct attribute sets.
@@ -213,7 +357,7 @@ impl SharedEdgeInfos {
         SharedInfoRef {
             shared_edge_info_id: edge.shared_edge_info_id,
             osm_way_id: edge.osm_way_id,
-            geometry: &self.points[self.geometry_range(index)],
+            geometry: self.geometry_at(self.geometry_range(index)),
             source_lineage_ids: sparse_get(&self.lineage, index)
                 .map_or(std::slice::from_ref(&edge.osm_way_id), |lineage| lineage),
             coverage_id: sparse_get(&self.coverage, index),
@@ -268,9 +412,27 @@ impl SharedEdgeInfos {
     pub fn set_geometry(&mut self, index: usize, geometry: &[(f64, f64)]) {
         let range = self.geometry_range(index);
         let delta = geometry.len() as i64 - range.len() as i64;
-        self.points.splice(range, geometry.iter().copied());
+        // The later points move to the end, the new ones go in their place.
+        let tail = self.points.split_off(range.end);
+        let exact_from = self
+            .exact_points
+            .partition_point(|(at, _)| (*at as usize) < range.start);
+        let exact_tail = self
+            .exact_points
+            .split_off(exact_from)
+            .into_iter()
+            .filter(|(at, _)| *at as usize >= range.end)
+            .collect::<Vec<_>>();
+        self.points.truncate(range.start);
+        self.push_points(geometry);
+        self.points.extend(tail);
+        self.exact_points.extend(
+            exact_tail
+                .into_iter()
+                .map(|(at, point)| (pool_index((at as i64 + delta) as usize), point)),
+        );
         for edge in &mut self.edges[index..] {
-            edge.geometry_end = (edge.geometry_end as i64 + delta) as u64;
+            edge.geometry_end = pool_index((edge.geometry_end as i64 + delta) as usize);
         }
     }
 
@@ -286,6 +448,12 @@ impl SharedEdgeInfos {
         let mut attrs = self.classes.get(self.edges[index].class).clone();
         change(&mut attrs);
         self.edges[index].class = self.classes.intern(attrs);
+    }
+
+    /// Takes the classes out, to be replaced with [`Self::replace_classes`];
+    /// until then the infos' classes are not there.
+    pub(crate) fn take_classes(&mut self) -> SharedInfoClasses {
+        std::mem::take(&mut self.classes)
     }
 
     /// Gives info `i` class `classes_of[i]` of `classes`, which replace the
@@ -316,24 +484,33 @@ impl SharedEdgeInfos {
         {
             return;
         }
-        // The used classes move to an exactly sized table, in their new order.
-        let mut by_new = vec![0u32; used as usize];
-        for (old_class, &new) in renumbered.iter().enumerate() {
-            if new != u32::MAX {
-                by_new[new as usize] = old_class as u32;
-            }
-        }
-        let mut old = std::mem::take(&mut self.classes.classes);
-        let mut classes = SharedInfoClasses::with_capacity(by_new.len());
-        for old_class in by_new {
-            let interned = classes.intern(std::mem::take(&mut old[old_class as usize]));
-            debug_assert_eq!(interned as usize, classes.len() - 1);
-        }
-        drop(old);
         for edge in &mut self.edges {
             edge.class = renumbered[edge.class as usize];
         }
-        self.classes = classes;
+        // The classes move to their new places within the table, which is then
+        // cut to the used ones: a second table, built while the first was still
+        // held, was the class table's size again (3M classes of 616 bytes on
+        // Germany). The unused classes go after the used ones.
+        let classes = &mut self.classes.classes;
+        let mut place = renumbered;
+        let mut next_unused = used;
+        for slot in &mut place {
+            if *slot == u32::MAX {
+                *slot = next_unused;
+                next_unused += 1;
+            }
+        }
+        // Each swap puts one class in its final place.
+        for at in 0..classes.len() {
+            while place[at] as usize != at {
+                let to = place[at] as usize;
+                classes.swap(at, to);
+                place.swap(at, to);
+            }
+        }
+        classes.truncate(used as usize);
+        classes.shrink_to_fit();
+        self.classes.reindex();
     }
 
     /// Every info whole, in order (for snapshots and tests).
@@ -680,6 +857,16 @@ fn class_eq(left: &SharedEdgeInfo, right: &SharedEdgeInfo) -> bool {
         && *is_access_restricted == r.is_access_restricted
 }
 
+/// A pool position as stored; a pool holds fewer than 2^32 points.
+fn pool_index(index: usize) -> u32 {
+    u32::try_from(index).expect("fewer than 2^32 shared info points")
+}
+
+/// Whether `point` reads back from its E7 pair `fixed` bit for bit.
+fn is_exact_fixed((lat, lng): (f64, f64), (lat7, lng7): (i32, i32)) -> bool {
+    from_fixed(lat7).to_bits() == lat.to_bits() && from_fixed(lng7).to_bits() == lng.to_bits()
+}
+
 #[cfg(test)]
 mod class_tests {
     use super::*;
@@ -734,5 +921,71 @@ mod class_tests {
         expected[0].name = Some(Arc::from("b"));
         expected[1].name = Some(Arc::from("b"));
         assert_eq!(shared.to_vec(), expected);
+    }
+
+    #[test]
+    fn compact_numbers_classes_by_first_use_and_still_interns() {
+        let infos = vec![
+            info(1, 10, "a"),
+            info(2, 11, "b"),
+            info(3, 12, "c"),
+            info(4, 13, "d"),
+        ];
+        let mut shared = SharedEdgeInfos::from(infos.clone());
+        // Classes a, b, c, d; the infos come to use d, c, d, a.
+        let (a, c, d) = (shared.at(0).class, shared.at(2).class, shared.at(3).class);
+        shared.set_class(0, d);
+        shared.set_class(1, c);
+        shared.set_class(2, d);
+        shared.set_class(3, a);
+        shared.compact();
+        assert_eq!(shared.class_count(), 3);
+        let names = (0..4)
+            .map(|index| (shared.at(index).class, shared.at(index).attrs.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                (0, Some(Arc::from("d"))),
+                (1, Some(Arc::from("c"))),
+                (0, Some(Arc::from("d"))),
+                (2, Some(Arc::from("a"))),
+            ]
+        );
+        // The rebuilt chains find each kept class, and a dropped one is new.
+        assert_eq!(shared.intern(info(9, 20, "a")), 2);
+        assert_eq!(shared.intern(info(9, 20, "d")), 0);
+        assert_eq!(shared.intern(info(9, 20, "b")), 3);
+    }
+
+    #[test]
+    fn points_read_back_exactly_with_and_without_e7_values() {
+        let mut infos = SharedEdgeInfos::new();
+        let class = infos.intern(SharedEdgeInfo::default());
+        let fixed = [(50.0612345, 19.9384567), (50.0612346, 19.9384568)];
+        let inexact = [(50.06123456789, 19.0), (50.0, 19.00000001234), (50.1, 19.1)];
+        infos.push_with_class(1, 10, &fixed, class);
+        infos.push_with_class(2, 20, &inexact, class);
+        infos.push_with_class(3, 30, &fixed, class);
+        assert_eq!(infos.at(0).geometry.to_vec(), fixed);
+        assert_eq!(infos.at(1).geometry.to_vec(), inexact);
+        assert_eq!(infos.at(2).geometry.to_vec(), fixed);
+        assert_eq!(infos.at(1).geometry.last(), Some((50.1, 19.1)));
+
+        // A geometry replaced in the middle moves the later exact points.
+        let replaced = [
+            (50.2, 19.2),
+            (50.20000000001, 19.2),
+            (50.3, 19.3),
+            (50.4, 19.4),
+        ];
+        infos.set_geometry(0, &replaced);
+        assert_eq!(infos.at(0).geometry.to_vec(), replaced);
+        assert_eq!(infos.at(1).geometry.to_vec(), inexact);
+        assert_eq!(infos.at(2).geometry.to_vec(), fixed);
+        infos.set_geometry(1, &fixed);
+        assert_eq!(infos.at(0).geometry.to_vec(), replaced);
+        assert_eq!(infos.at(1).geometry.to_vec(), fixed);
+        assert_eq!(infos.at(2).geometry.to_vec(), fixed);
     }
 }

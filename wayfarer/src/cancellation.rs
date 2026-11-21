@@ -408,8 +408,12 @@ mod tests {
                     })
                     .min()
                     .unwrap();
-                // Cancelled a tenth of the way in, the request returns well
-                // before half of its full time (retried: the machine is shared).
+                // Cancelled about a tenth of the way in, the request returns
+                // well within half of its full time after the cancel. The time
+                // counts from the cancel itself, not from the start: on a
+                // shared machine the canceller can wake late, and that delay
+                // says nothing about how soon the search stops. A cancel that
+                // lands after the request finished is retried.
                 let mut attempts = Vec::new();
                 let stopped = (0..5).any(|_| {
                     let token = CancelToken::new();
@@ -417,23 +421,25 @@ mod tests {
                     let canceller = std::thread::spawn(move || {
                         std::thread::sleep(full / 10);
                         token.cancel();
+                        Instant::now()
                     });
                     let started = Instant::now();
                     let outcome = run(kind, cancellation);
-                    let elapsed = started.elapsed();
-                    canceller.join().unwrap();
-                    attempts.push((outcome.clone(), elapsed));
+                    let finished = Instant::now();
+                    let cancelled = canceller.join().unwrap();
+                    let after_cancel = finished.saturating_duration_since(cancelled);
+                    attempts.push((outcome.clone(), finished - started, after_cancel));
                     match outcome {
                         Err(RouteError::Cancelled {
                             deadline_exceeded: false,
-                        }) => elapsed < full / 2,
+                        }) => after_cancel < full / 2,
                         Ok(()) => false,
                         Err(error) => panic!("{kind:?}: {error}"),
                     }
                 });
                 assert!(
                     stopped,
-                    "{kind:?} (full run {full:?}) did not stop early: {attempts:?}"
+                    "{kind:?} (full run {full:?}) did not stop early: {attempts:?} (outcome, elapsed, after the cancel)"
                 );
             }
         }

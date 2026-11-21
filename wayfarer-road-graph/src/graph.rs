@@ -244,15 +244,27 @@ impl RoadGraph {
             }
         }
 
-        let lineage = SharedInfoLineage::new(self, |_| true);
+        // With one info per id, an info's lineage is its own, so the table of
+        // every info's lineage (about 16 bytes a lineage way, sorted) is only
+        // built for any other numbering.
+        let info_ids = SharedInfoIndex::new(&self.shared_edge_infos);
+        let (used, lineage) = if info_ids.is_dense() {
+            (used_infos(self, &info_ids, |_| true), None)
+        } else {
+            (Vec::new(), Some(SharedInfoLineage::new(self, |_| true)))
+        };
+        drop(info_ids);
         // A class gets each distinct route-ref list once.
         let mut changed = FxHashMap::<(u32, Vec<String>), u32>::default();
         for info_index in 0..self.shared_edge_infos.len() {
             let info = self.shared_edge_infos.at(info_index);
+            let lineage_ids = match &lineage {
+                Some(lineage) => lineage.way_ids(info.shared_edge_info_id),
+                None if used.get(info_index) == Some(&true) => info.source_lineage_ids,
+                None => &[],
+            };
             let mut route_refs = BTreeSet::new();
-            for way_id in std::iter::once(info.osm_way_id)
-                .chain(lineage.way_ids(info.shared_edge_info_id).iter().copied())
-            {
+            for way_id in std::iter::once(info.osm_way_id).chain(lineage_ids.iter().copied()) {
                 if let Some(values) = route_refs_by_way.get(&way_id) {
                     route_refs.extend(values.iter().cloned());
                 }
@@ -315,16 +327,9 @@ struct SharedInfoLineage {
 
 impl SharedInfoLineage {
     fn new(graph: &RoadGraph, include: impl Fn(u64) -> bool) -> Self {
-        // The lineage is the info's; an info counts once some edge uses it.
         let info_index = SharedInfoIndex::new(&graph.shared_edge_infos);
-        let mut used = vec![false; graph.shared_edge_infos.len()];
-        for edge in graph.graph.edge_weights() {
-            if let Some(index) = info_index.get(edge.shared_edge_info_id)
-                && include(edge.shared_edge_info_id)
-            {
-                used[index] = true;
-            }
-        }
+        let used = used_infos(graph, &info_index, include);
+        drop(info_index);
         let mut pairs = graph
             .shared_edge_infos
             .iter()
@@ -350,6 +355,25 @@ impl SharedInfoLineage {
             + self.info_ids[start..].partition_point(|info_id| *info_id == shared_edge_info_id);
         &self.way_ids[start..end]
     }
+}
+
+/// Whether some directed edge uses each shared info, by position, among the
+/// infos whose id `include` accepts. The lineage is the info's: an info counts
+/// once some edge uses it.
+fn used_infos(
+    graph: &RoadGraph,
+    info_index: &SharedInfoIndex,
+    include: impl Fn(u64) -> bool,
+) -> Vec<bool> {
+    let mut used = vec![false; graph.shared_edge_infos.len()];
+    for edge in graph.graph.edge_weights() {
+        if let Some(index) = info_index.get(edge.shared_edge_info_id)
+            && include(edge.shared_edge_info_id)
+        {
+            used[index] = true;
+        }
+    }
+    used
 }
 
 pub(crate) fn shared_edge_info<'a>(
@@ -402,6 +426,12 @@ impl SharedInfoIndex {
                 .then(|| (shared_edge_info_id - 1) as usize),
             None => self.by_id.get(&shared_edge_info_id).copied(),
         }
+    }
+
+    /// Whether the infos are numbered 1, 2, 3… in order, so each id names
+    /// exactly one info.
+    pub fn is_dense(&self) -> bool {
+        self.dense_len.is_some()
     }
 
     pub fn contains_key(&self, shared_edge_info_id: &u64) -> bool {
@@ -515,9 +545,9 @@ impl MergedWayFacts {
     fn push(&mut self, run: WayFactsRun) {
         let global = run
             .classes
-            .into_vec()
+            .into_boxes()
             .into_iter()
-            .map(|attrs| self.classes.intern(attrs))
+            .map(|attrs| self.classes.intern_boxed(attrs))
             .collect::<Vec<_>>();
         self.classes_of
             .extend(run.classes_of.iter().map(|local| global[*local as usize]));

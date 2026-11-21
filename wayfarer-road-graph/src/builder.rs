@@ -101,9 +101,11 @@ pub struct RoadGraphBuilder {
     /// frees each chunk as it goes, instead of holding every (wide) way until
     /// the whole graph has been built.
     ways: Vec<Vec<PendingWay>>,
-    /// Per coordinate: the way points there, and the arms of motor roads
-    /// meeting there (a way's interior point is two arms, an end one).
-    coord_counts: FxHashMap<(i32, i32), PointCounts>,
+    /// Every pushed way point's coordinate ([`point_key`]), one entry per
+    /// point. `finish` sorts them to find the coordinates more than one way
+    /// point shares: 8 bytes a point here, where a map counting every
+    /// coordinate as the ways arrived held about 25 and doubled as it grew.
+    point_keys: Vec<u64>,
     /// The distinct pushed attributes (see [`PendingWay::attrs`]), by
     /// [`way_attrs_hash`].
     way_attrs: FxHashMap<u64, Vec<Arc<RoutableWay>>>,
@@ -156,7 +158,7 @@ impl RoadGraphBuilder {
             graph_id: graph_id.into(),
             country_code: None,
             ways: Vec::new(),
-            coord_counts: FxHashMap::default(),
+            point_keys: Vec::new(),
             way_attrs: FxHashMap::default(),
             next_edge_id: 1,
             next_shared_edge_info_id: 1,
@@ -211,16 +213,7 @@ impl RoadGraphBuilder {
             self.report.record_rejected_way("closed");
             return;
         }
-        let mode_mask = derive_osm_mode_mask(
-            way.highway.as_deref(),
-            way.access.as_deref(),
-            way.vehicle.as_deref(),
-            way.motor_vehicle.as_deref(),
-            way.motorcar.as_deref(),
-            way.bicycle.as_deref(),
-            way.foot.as_deref(),
-            way.motorroad.as_deref(),
-        );
+        let mode_mask = way_mode_mask(&way);
         // A drivable way the law closes to every mode is kept for SAR (the
         // physical graph): its edges have no
         // legal access, so normal routing never uses them.
@@ -267,16 +260,8 @@ impl RoadGraphBuilder {
         way.source_node_ids = Vec::new();
         let points = PendingPoints::new(std::mem::take(&mut way.points));
 
-        let motor = mode_mask & MOTOR_MODES != 0;
-        let last = points.len() - 1;
-        for index in 0..points.len() {
-            let key = points.fixed(index);
-            let counts = self.coord_counts.entry(key).or_default();
-            counts.points += 1;
-            if motor {
-                counts.motor_arms += u32::from(index > 0) + u32::from(index < last);
-            }
-        }
+        self.point_keys
+            .extend((0..points.len()).map(|index| point_key(points.fixed(index))));
 
         let osm_way_id = way.osm_way_id;
         let lineage = std::mem::take(&mut way.source_lineage_ids);
@@ -357,19 +342,20 @@ impl RoadGraphBuilder {
         // sized once: grown by doubling, the shared-info vector held its old
         // and new buffers at once and ended up to half unused (~0.5 GiB on a
         // region), and the edge vector likewise.
-        let coord_counts = std::mem::take(&mut self.coord_counts);
-        let mut shared_point = Vec::<bool>::new();
         // Junctions of motor roads, per way point; only read to place traffic
         // controls.
         let place_controls = !self.traffic_controls.is_empty();
+        let coord_counts = shared_coord_counts(
+            std::mem::take(&mut self.point_keys),
+            &self.ways,
+            place_controls,
+        );
+        let mut shared_point = Vec::<bool>::new();
         let mut motor_junction_point = Vec::<bool>::new();
         let mut segment_estimate = 0usize;
         // Nodes sit at segment ends: each shared coordinate once, plus the
         // unshared way ends and barrier points (an upper bound).
-        let mut node_estimate = coord_counts
-            .values()
-            .filter(|counts| counts.points > 1)
-            .count();
+        let mut node_estimate = coord_counts.len();
         let mut point_estimate = 0usize;
         for way in self.ways.iter().flatten() {
             let last = way.points.len().saturating_sub(1);
@@ -872,4 +858,71 @@ fn way_attrs_hash(way: &RoutableWay) -> u64 {
     )
         .hash(&mut hasher);
     hasher.finish()
+}
+
+/// The modes OSM tagging allows on `way`, before any direction.
+fn way_mode_mask(way: &RoutableWay) -> ModeMask {
+    derive_osm_mode_mask(
+        way.highway.as_deref(),
+        way.access.as_deref(),
+        way.vehicle.as_deref(),
+        way.motor_vehicle.as_deref(),
+        way.motorcar.as_deref(),
+        way.bicycle.as_deref(),
+        way.foot.as_deref(),
+        way.motorroad.as_deref(),
+    )
+}
+
+/// A fixed-point coordinate as one sortable key.
+fn point_key((lat, lng): (i32, i32)) -> u64 {
+    (u64::from(lat as u32) << 32) | u64::from(lng as u32)
+}
+
+fn point_of_key(key: u64) -> (i32, i32) {
+    ((key >> 32) as u32 as i32, key as u32 as i32)
+}
+
+/// The coordinates more than one way point shares, with how many points
+/// are there and, when `motor_arms`, the arms of motor roads meeting there
+/// (a way's interior point is two arms, an end one). A coordinate left
+/// out has a single point and at most two arms. `point_keys` holds every
+/// way point's [`point_key`].
+fn shared_coord_counts(
+    mut point_keys: Vec<u64>,
+    ways: &[Vec<PendingWay>],
+    motor_arms: bool,
+) -> FxHashMap<(i32, i32), PointCounts> {
+    point_keys.par_sort_unstable();
+    let shared_runs = || {
+        point_keys
+            .chunk_by(|left, right| left == right)
+            .filter(|run| run.len() > 1)
+    };
+    let mut counts = FxHashMap::default();
+    counts.reserve(shared_runs().count());
+    for run in shared_runs() {
+        counts.insert(
+            point_of_key(run[0]),
+            PointCounts {
+                points: run.len() as u32,
+                motor_arms: 0,
+            },
+        );
+    }
+    drop(point_keys);
+    if motor_arms {
+        for way in ways.iter().flatten() {
+            if way_mode_mask(&way.attrs) & MOTOR_MODES == 0 {
+                continue;
+            }
+            let last = way.points.len() - 1;
+            for index in 0..way.points.len() {
+                if let Some(point) = counts.get_mut(&way.points.fixed(index)) {
+                    point.motor_arms += u32::from(index > 0) + u32::from(index < last);
+                }
+            }
+        }
+    }
+    counts
 }

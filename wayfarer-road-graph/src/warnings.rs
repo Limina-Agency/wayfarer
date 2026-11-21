@@ -194,7 +194,9 @@ pub(crate) fn add_edge_quality_warnings(
     let mut missing_heading_count = 0usize;
     let mut missing_speed_count = 0usize;
     let mut short_edge_count = 0usize;
-    for edge in graph.graph.edge_weights() {
+    for raw_edge in graph.graph.raw_edges() {
+        let edge = &raw_edge.weight;
+        let edge_component_id = graph.graph[raw_edge.source()].component_id;
         if edge.start_heading_deg.is_none() || edge.end_heading_deg.is_none() {
             missing_heading_count += 1;
         }
@@ -212,7 +214,7 @@ pub(crate) fn add_edge_quality_warnings(
                         edge.edge_id, edge.distance_m
                     ),
                     edge_id: Some(edge.edge_id),
-                    component_id: edge.component_id,
+                    component_id: edge_component_id,
                     source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
@@ -231,7 +233,7 @@ pub(crate) fn add_edge_quality_warnings(
                         edge.edge_id
                     ),
                     edge_id: Some(edge.edge_id),
-                    component_id: edge.component_id,
+                    component_id: edge_component_id,
                     source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
@@ -284,7 +286,9 @@ pub(crate) fn add_rich_road_fact_coverage_warnings(
     info_index_by_id: &SharedInfoIndex,
 ) {
     let mut example_count = 0usize;
-    for edge in graph.graph.edge_weights() {
+    for raw_edge in graph.graph.raw_edges() {
+        let edge = &raw_edge.weight;
+        let edge_component_id = graph.graph[raw_edge.source()].component_id;
         let Some(info) = shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id) else {
             continue;
         };
@@ -346,7 +350,7 @@ pub(crate) fn add_rich_road_fact_coverage_warnings(
                         missing.join(", ")
                     ),
                     edge_id: Some(edge.edge_id),
-                    component_id: edge.component_id,
+                    component_id: edge_component_id,
                     source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },
@@ -424,6 +428,7 @@ pub(crate) fn add_topology_integrity_warnings(
         .par_iter()
         .map(|raw_edge| {
             let edge = &raw_edge.weight;
+            let edge_component_id = graph.graph[raw_edge.source()].component_id;
             let Some(info) = shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id)
             else {
                 return 0u8;
@@ -465,7 +470,7 @@ pub(crate) fn add_topology_integrity_warnings(
             }
             if is_major_road_type(info.attrs.road_type)
                 && largest_component_id.is_some()
-                && edge.component_id != largest_component_id
+                && edge_component_id != largest_component_id
             {
                 failed |= UNREACHABLE_MAJOR;
             }
@@ -476,7 +481,7 @@ pub(crate) fn add_topology_integrity_warnings(
             let source_incident = incident(source);
             let target_incident = incident(target);
             if info.attrs.is_link
-                && (edge.component_id != largest_component_id
+                && (edge_component_id != largest_component_id
                     || source_incident <= 1
                     || target_incident <= 1)
             {
@@ -498,6 +503,7 @@ pub(crate) fn add_topology_integrity_warnings(
             continue;
         }
         let edge = edge_ref.weight();
+        let edge_component_id = graph.graph[edge_ref.source()].component_id;
         let Some(info) = shared_edge_info(graph, info_index_by_id, edge.shared_edge_info_id) else {
             continue;
         };
@@ -513,7 +519,7 @@ pub(crate) fn add_topology_integrity_warnings(
                             edge.edge_id
                         ),
                         edge_id: Some(edge.edge_id),
-                        component_id: edge.component_id,
+                        component_id: edge_component_id,
                         source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
@@ -534,7 +540,7 @@ pub(crate) fn add_topology_integrity_warnings(
                             edge.edge_id, edge.shared_edge_info_id
                         ),
                         edge_id: Some(edge.edge_id),
-                        component_id: edge.component_id,
+                        component_id: edge_component_id,
                         source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
@@ -555,7 +561,7 @@ pub(crate) fn add_topology_integrity_warnings(
                             edge.edge_id, edge.shared_edge_info_id
                         ),
                         edge_id: Some(edge.edge_id),
-                        component_id: edge.component_id,
+                        component_id: edge_component_id,
                         source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
@@ -575,7 +581,7 @@ pub(crate) fn add_topology_integrity_warnings(
                             edge.edge_id, edge.distance_m, geometry_distance_m
                         ),
                         edge_id: Some(edge.edge_id),
-                        component_id: edge.component_id,
+                        component_id: edge_component_id,
                         source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
@@ -596,7 +602,7 @@ pub(crate) fn add_topology_integrity_warnings(
                             edge.edge_id
                         ),
                         edge_id: Some(edge.edge_id),
-                        component_id: edge.component_id,
+                        component_id: edge_component_id,
                         source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
@@ -617,7 +623,7 @@ pub(crate) fn add_topology_integrity_warnings(
                             edge.edge_id
                         ),
                         edge_id: Some(edge.edge_id),
-                        component_id: edge.component_id,
+                        component_id: edge_component_id,
                         source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                         ..Default::default()
                     },
@@ -666,6 +672,7 @@ pub(crate) fn add_topology_integrity_warnings(
         report.duplicate_parallel_edge_count += group.len() - 1;
         for &index in group.iter().skip(1).take(4) {
             let edge = &raw_edges[index].weight;
+            let edge_component_id = graph.graph[raw_edges[index].source()].component_id;
             push_quality_example(
                 &mut report.warning_examples,
                 RoadGraphQualityExample {
@@ -675,7 +682,7 @@ pub(crate) fn add_topology_integrity_warnings(
                         edge.edge_id, key.2
                     ),
                     edge_id: Some(edge.edge_id),
-                    component_id: edge.component_id,
+                    component_id: edge_component_id,
                     source_lineage_ids: edge_lineage(graph, info_index_by_id, edge),
                     ..Default::default()
                 },

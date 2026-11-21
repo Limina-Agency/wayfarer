@@ -124,15 +124,11 @@ pub struct RoadEdge {
     #[serde(default)]
     pub segment_index: u32,
     #[serde(default)]
-    pub component_id: Option<u32>,
-    #[serde(default)]
     pub start_heading_deg: Option<u16>,
     #[serde(default)]
     pub end_heading_deg: Option<u16>,
     #[serde(default)]
     pub inferred_speed_kph: Option<u16>,
-    #[serde(default)]
-    pub estimated_travel_time_s: Option<f32>,
     #[serde(default)]
     pub opposing_edge_id: Option<u64>,
     #[serde(default)]
@@ -162,6 +158,14 @@ impl RoadEdge {
     /// uses it, and graph statistics leave it out.
     pub fn is_sar_only(&self) -> bool {
         self.direction_osm_mode_mask() == 0
+    }
+
+    /// The time to drive the edge at its inferred speed, when it has one.
+    pub fn estimated_travel_time_s(&self) -> Option<f32> {
+        self.inferred_speed_kph.and_then(|speed| {
+            let speed_mps = speed as f32 * 1000.0 / 3600.0;
+            (speed_mps > 0.0).then_some(self.distance_m / speed_mps)
+        })
     }
 }
 
