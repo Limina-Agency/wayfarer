@@ -326,11 +326,11 @@ pub(crate) fn build_request_sections(
         f64::NEG_INFINITY,
     );
     for shared in 0..shared_count {
-        for (lat, lng) in shared_info(shared).geometry {
-            min_lat = min_lat.min(*lat);
-            max_lat = max_lat.max(*lat);
-            min_lng = min_lng.min(*lng);
-            max_lng = max_lng.max(*lng);
+        for (lat, lng) in shared_info(shared).geometry.iter() {
+            min_lat = min_lat.min(lat);
+            max_lat = max_lat.max(lat);
+            min_lng = min_lng.min(lng);
+            max_lng = max_lng.max(lng);
         }
     }
     if min_lat > max_lat {
@@ -347,9 +347,9 @@ pub(crate) fn build_request_sections(
         .par_iter()
         .flat_map_iter(|(edge, shared)| {
             let mut cells = Vec::new();
-            let points = &shared_info(*shared as usize).geometry;
-            for window in points.windows(2) {
-                let (a, b) = (window[0], window[1]);
+            let points = shared_info(*shared as usize).geometry;
+            for index in 1..points.len() {
+                let (a, b) = (points.get(index - 1), points.get(index));
                 let (rows, cols) =
                     grid.cells(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
                 for row in rows {
