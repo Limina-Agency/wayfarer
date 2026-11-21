@@ -63,16 +63,24 @@ pub struct RoadGraphAccessMaskCount {
 }
 
 impl RoadGraphBuildReport {
-    pub(crate) fn record_accepted_way(&mut self, road_type: RoadType) {
-        self.accepted_way_count += 1;
-        increment_named_count(
+    /// Counts `count` accepted ways of `road_type`.
+    pub(crate) fn record_accepted_ways(&mut self, road_type: RoadType, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.accepted_way_count += count;
+        add_named_count(
             &mut self.accepted_way_counts_by_road_type,
             road_type_label(road_type),
+            count,
         );
     }
 
-    pub(crate) fn record_rejected_way(&mut self, reason: &str) {
-        increment_named_count(&mut self.rejected_way_counts_by_reason, reason);
+    /// Counts `count` ways rejected for `reason`.
+    pub(crate) fn record_rejected_ways(&mut self, reason: &str, count: usize) {
+        if count > 0 {
+            add_named_count(&mut self.rejected_way_counts_by_reason, reason, count);
+        }
     }
 
     pub(crate) fn record_access_mask(
@@ -102,13 +110,13 @@ impl RoadGraphBuildReport {
     }
 }
 
-fn increment_named_count(counts: &mut Vec<RoadGraphNamedCount>, name: &str) {
+fn add_named_count(counts: &mut Vec<RoadGraphNamedCount>, name: &str, count: usize) {
     if let Some(entry) = counts.iter_mut().find(|entry| entry.name == name) {
-        entry.count += 1;
+        entry.count += count;
     } else {
         counts.push(RoadGraphNamedCount {
             name: name.to_string(),
-            count: 1,
+            count,
         });
     }
     counts.sort_by(|a, b| a.name.cmp(&b.name));
