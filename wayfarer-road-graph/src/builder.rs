@@ -184,7 +184,6 @@ pub struct RoadGraphBuilder {
     way_attrs: FxHashMap<u64, Vec<u32>>,
     next_edge_id: u64,
     next_shared_edge_info_id: u64,
-    next_synthetic_plaza_way_id: i64,
     barrier_nodes: HashMap<i64, NodeBarrierTags>,
     traffic_controls: FxHashMap<(i32, i32), TrafficControlPoint>,
     report: RoadGraphBuildReport,
@@ -229,7 +228,6 @@ impl RoadGraphBuilder {
             way_attrs: FxHashMap::default(),
             next_edge_id: 1,
             next_shared_edge_info_id: 1,
-            next_synthetic_plaza_way_id: SYNTHETIC_PLAZA_WAY_ID_BASE,
             barrier_nodes: HashMap::new(),
             traffic_controls: FxHashMap::default(),
             report: RoadGraphBuildReport::default(),
@@ -506,7 +504,6 @@ impl RoadGraphBuilder {
             plaza_accumulators,
             &mut self.next_edge_id,
             &mut self.next_shared_edge_info_id,
-            &mut self.next_synthetic_plaza_way_id,
             &mut self.report,
         );
 
@@ -841,7 +838,7 @@ const LINKED_NODE: u64 = 1 << 63;
 /// visit linked to itself ([`point_flags`]' `links`) is a node's first: the
 /// first visits are numbered in push order, chunk by chunk in parallel from
 /// each chunk's count, and every other visit reads its first visit's node. A
-/// node takes its first visit's position and the first source node id its
+/// node takes its first visit's position and the smallest source node id its
 /// visits have.
 fn number_nodes(
     ways: &[Vec<PendingWay>],
@@ -919,27 +916,26 @@ fn number_nodes(
         chunk_visits(ways, layout, flags, chunk).map(|visit| node_of(&visit))
     });
 
-    // A node whose first visit has no source node takes the first one a later
-    // visit has.
-    let mut late_sources = (0..ways.len())
+    // A node takes the smallest source node id any of its visits has, so it
+    // does not depend on which way reached the position first.
+    let smaller_sources = (0..ways.len())
         .into_par_iter()
         .flat_map_iter(|chunk| {
             chunk_visits(ways, layout, flags, chunk).filter_map(|visit| {
                 let node = node_of(&visit);
                 let source_node_id = visit.source_node_id?;
-                nodes[node as usize].source_node_id.is_none().then_some((
-                    visit.point,
-                    node,
-                    source_node_id,
-                ))
+                nodes[node as usize]
+                    .source_node_id
+                    .is_none_or(|current| source_node_id < current)
+                    .then_some((node, source_node_id))
             })
         })
         .collect::<Vec<_>>();
-    late_sources.par_sort_unstable();
-    for (_, node, source_node_id) in late_sources {
-        nodes[node as usize]
-            .source_node_id
-            .get_or_insert(source_node_id);
+    for (node, source_node_id) in smaller_sources {
+        let current = &mut nodes[node as usize].source_node_id;
+        if current.is_none_or(|current| source_node_id < current) {
+            *current = Some(source_node_id);
+        }
     }
     NodeNumbering { nodes, visit_nodes }
 }

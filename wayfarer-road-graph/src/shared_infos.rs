@@ -436,6 +436,61 @@ impl SharedEdgeInfos {
         }
     }
 
+    /// Moves the infos into a new order: info `i` becomes the one that was at
+    /// `order[i]`, with id `first_id + i`. `order` must be a permutation of
+    /// the indices. Classes are then numbered in order of first use (see
+    /// [`Self::compact`]), so reading the infos in order reads the pool and the
+    /// classes in order too.
+    pub fn reorder(&mut self, order: &[u32], first_id: u64) {
+        assert_eq!(order.len(), self.edges.len(), "not a permutation");
+        let mut seen = vec![false; order.len()];
+        for old in order {
+            let seen = &mut seen[*old as usize];
+            assert!(!*seen, "not a permutation");
+            *seen = true;
+        }
+        drop(seen);
+        let mut new_at = vec![0u32; order.len()];
+        for (new, old) in order.iter().enumerate() {
+            new_at[*old as usize] = new as u32;
+        }
+        let mut points = Vec::with_capacity(self.points.len());
+        let mut exact_points = Vec::with_capacity(self.exact_points.len());
+        let mut edges = Vec::with_capacity(self.edges.len());
+        for (new, old) in order.iter().enumerate() {
+            let old = *old as usize;
+            let range = self.geometry_range(old);
+            let exact_start = self
+                .exact_points
+                .partition_point(|(at, _)| (*at as usize) < range.start);
+            for (at, point) in self.exact_points[exact_start..]
+                .iter()
+                .take_while(|(at, _)| (*at as usize) < range.end)
+            {
+                let moved = points.len() + (*at as usize - range.start);
+                exact_points.push((pool_index(moved), *point));
+            }
+            points.extend_from_slice(&self.points[range]);
+            edges.push(SharedEdge {
+                shared_edge_info_id: first_id + new as u64,
+                geometry_end: pool_index(points.len()),
+                ..self.edges[old]
+            });
+        }
+        self.edges = edges;
+        self.points = points;
+        self.exact_points = exact_points;
+        fn remap<T>(entries: &mut [(u32, T)], new_at: &[u32]) {
+            for (at, _) in entries.iter_mut() {
+                *at = new_at[*at as usize];
+            }
+            entries.sort_unstable_by_key(|(at, _)| *at);
+        }
+        remap(&mut self.lineage, &new_at);
+        remap(&mut self.coverage, &new_at);
+        self.compact();
+    }
+
     /// Gives the info at `index` a class already added with [`Self::intern`].
     pub fn set_class(&mut self, index: usize, class: u32) {
         assert!((class as usize) < self.classes.len(), "unknown class");
@@ -870,6 +925,42 @@ fn is_exact_fixed((lat, lng): (f64, f64), (lat7, lng7): (i32, i32)) -> bool {
 #[cfg(test)]
 mod class_tests {
     use super::*;
+
+    #[test]
+    fn reorder_moves_every_part_of_an_info_with_it() {
+        let mut infos = SharedEdgeInfos::new();
+        let mut first = info(10, 100, "a");
+        // A point that is not the f64 of its E7 pair, kept exactly.
+        first.geometry = vec![(0.123_456_789_123, 1.0), (2.0, 3.0), (4.0, 5.0)];
+        infos.push(first);
+        infos.push(info(20, 200, "b"));
+        infos.push(info(30, 300, "a"));
+        infos.set_source_lineage_ids(0, vec![100, 101]);
+        infos.set_coverage_id(2, Some(Arc::from("c")));
+        let before = infos.iter().map(|info| info.to_info()).collect::<Vec<_>>();
+        let lineage = |infos: &SharedEdgeInfos, at| infos.at(at).source_lineage_ids.to_vec();
+        let coverage = |infos: &SharedEdgeInfos, at| infos.at(at).coverage_id.cloned();
+        infos.reorder(&[2, 0, 1], 1);
+        for (new, old) in [2usize, 0, 1].into_iter().enumerate() {
+            let moved = infos.at(new).to_info();
+            assert_eq!(moved.shared_edge_info_id, new as u64 + 1);
+            assert_eq!(
+                SharedEdgeInfo {
+                    shared_edge_info_id: before[old].shared_edge_info_id,
+                    ..moved
+                },
+                before[old]
+            );
+        }
+        assert_eq!(lineage(&infos, 1), vec![100, 101]);
+        assert_eq!(lineage(&infos, 0), vec![300]);
+        assert_eq!(coverage(&infos, 0).as_deref(), Some("c"));
+        assert_eq!(coverage(&infos, 1), None);
+        // Classes by first use: "a" (the info now first) is class 0.
+        assert_eq!(infos.at(0).class, 0);
+        assert_eq!(infos.at(1).class, 0);
+        assert_eq!(infos.at(2).class, 1);
+    }
 
     fn info(id: u64, way: i64, name: &str) -> SharedEdgeInfo {
         SharedEdgeInfo {

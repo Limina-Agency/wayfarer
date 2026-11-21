@@ -5,6 +5,36 @@ engine, service and C ABI crates) and `wayfarer-compiler-v*` (the compiler, the
 `wayfarer` binary and their crates). Each entry names the package format, the
 costing model and the C ABI version a release reads or writes.
 
+## Unreleased
+
+### Changes
+
+- **Tile-ready ids (compiler; package bytes change once).** Every id a
+  package stores is now a position in an order that follows from the graph
+  itself, not from the order the compiler happened to build it in: nodes run
+  along a Hilbert curve over one fixed world lattice of E7 positions (not
+  over the extract's bounding box), a node's edges are ordered by their way,
+  direction, target, segment and length, and node `i`, edge `i` and shared
+  info `i` have ids `i`, `i + 1` and `i + 1`; components are numbered by
+  their first node and name tokens by their first use. Plaza ways get the
+  synthetic id `-9000000000000 - way id` instead of a running number. So a
+  later compile split into tiles along ranges of the node order can number
+  each tile from the counts of the tiles before it and get the same ids. The
+  road graph is renumbered after enhancement
+  (`package_build::renumber_in_package_order`, public so a reference oracle
+  can share the package's ids); a test shuffles the order segments reach the
+  graph builder and checks that every section but the metadata keeps its
+  bytes. Format 2 is unchanged and old packages open as before, but a
+  recompiled package has new edge ids and a new dataset hash (Monaco
+  `991ab6f1…`), so overlay sets bound by edge id need rebinding. The graph
+  is the same: every edge with its ends, shape and attributes matches
+  0.2.0's, except that plaza centres move in the last bit. Routes keep their
+  costs except where endpoint snapping chose between equally good
+  candidates by edge id. The road graph's nodes, edges and shared infos are
+  stored in the new order, so their ids take no space and the package
+  build reads them in place; Małopolskie compiles in about the same time
+  (20.4 s, 21.7 s before) and peak memory (0.50–0.52 GiB).
+
 ## 0.2.0 (2026-11-19)
 
 Both lines. Package format 2 (reads 2 only), costing model 1, C ABI version 1.

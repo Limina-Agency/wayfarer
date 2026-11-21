@@ -737,6 +737,54 @@ impl RoadNetwork {
         nodes.count = order.len();
     }
 
+    /// Gives every node a new id and component: node `i` gets `id(i)` and
+    /// `component(i)`, which may read the node's current values. The columns
+    /// are rebuilt, so ids that count up with the index take no space.
+    pub fn renumber_nodes(
+        &mut self,
+        id: impl Fn(&Self, usize) -> i64,
+        component: impl Fn(&Self, usize) -> Option<u32>,
+    ) {
+        let mut ids = Packed::default();
+        let mut components = Packed::default();
+        for node in 0..self.nodes.count {
+            ids.push(id(self, node) as u64);
+            components.push(some_code(component(self, node)));
+        }
+        ids.shrink_to_fit();
+        components.shrink_to_fit();
+        self.nodes.id = ids;
+        self.nodes.component = components;
+    }
+
+    /// Gives every edge a new id, shared-info id and opposing edge id: edge
+    /// `i` gets `edge_id(i)`, `shared_edge_info_id(i)` and
+    /// `opposing_edge_id(i)`, which may read the edge's current values. The
+    /// columns are rebuilt, so ids that count up with the index take no
+    /// space.
+    pub fn renumber_edges(
+        &mut self,
+        edge_id: impl Fn(&Self, usize) -> u64,
+        shared_edge_info_id: impl Fn(&Self, usize) -> u64,
+        opposing_edge_id: impl Fn(&Self, usize) -> Option<u64>,
+    ) {
+        let mut ids = Packed::default();
+        let mut shared = Packed::default();
+        let mut opposing = OptionPacked::default();
+        for edge in 0..self.edges.count {
+            ids.push(edge_id(self, edge));
+            shared.push(shared_edge_info_id(self, edge));
+            opposing.push(opposing_edge_id(self, edge));
+        }
+        ids.shrink_to_fit();
+        shared.shrink_to_fit();
+        opposing.shrink_to_fit();
+        let edges = &mut self.edges;
+        edges.edge_id = ids;
+        edges.shared_edge_info_id = shared;
+        edges.opposing_edge_id = opposing;
+    }
+
     /// Frees node columns no later read needs. Reading a released column
     /// panics, as do [`Self::node`] and [`Self::set_node`]; the node count
     /// stays.

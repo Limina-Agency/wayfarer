@@ -92,6 +92,22 @@ pub(crate) struct RoadGraphCompileRequest {
     pub country_code: Option<String>,
     /// Changes memory use and speed, never the package's bytes.
     pub build_profile: IngestBuildProfile,
+    /// The order the road segments reach the graph builder in. Never changes
+    /// the package's bytes either: the package's order and ids follow from
+    /// the graph alone, which is what lets a tile of a larger compile number
+    /// its part as the whole compile would.
+    pub segment_order: SegmentOrder,
+}
+
+/// See [`RoadGraphCompileRequest::segment_order`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SegmentOrder {
+    /// The line network's order (last segment first).
+    #[default]
+    Topology,
+    /// Tests: a pseudo-random permutation from the seed.
+    #[cfg(test)]
+    Shuffled(u64),
 }
 
 #[derive(Debug)]
@@ -438,6 +454,7 @@ fn compile_road_graph_from_pbf(
     build_road_graph(
         &request.graph_id,
         request.country_code.as_deref(),
+        request.segment_order,
         inputs,
         job,
     )
@@ -910,6 +927,7 @@ const SEGMENT_BATCH_LEN: usize = 16 * 1024;
 fn build_road_graph(
     graph_id: &str,
     country_code: Option<&str>,
+    segment_order: SegmentOrder,
     inputs: CollectedRoadInputs,
     job: &Job<'_>,
 ) -> Result<RoadGraphCompileResult, CompileError> {
@@ -923,7 +941,26 @@ fn build_road_graph(
     } = inputs;
     let phase = Phase::start("topology_to_graph_builder");
     let topology_repair_report = topology_repair_report(&network);
-    let SharedLineTopology { nodes, edges } = network.topology;
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let SharedLineTopology { nodes, mut edges } = network.topology;
+    match segment_order {
+        SegmentOrder::Topology => {}
+        #[cfg(test)]
+        SegmentOrder::Shuffled(seed) => {
+            // Fisher–Yates with a splitmix64 stream.
+            let mut state = seed;
+            let mut next = || {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            };
+            for index in (1..edges.len()).rev() {
+                edges.swap(index, (next() % (index as u64 + 1)) as usize);
+            }
+        }
+    }
     // Topology node ids are small and dense, so they index a vector; a later
     // node with the same id wins, as a collected map's insert did.
     let mut node_source_ids = Vec::<Option<Option<i64>>>::new();
@@ -1044,6 +1081,12 @@ fn build_road_graph(
             node_road_type_counts: false,
         },
     );
+    drop(phase);
+    // The package's ids, from the graph rather than from the order it was
+    // built in (see `package_build::renumber_in_package_order`).
+    let phase = Phase::start("renumber_in_package_order");
+    package_build::renumber_in_package_order(&mut road_graph)
+        .map_err(|error| CompileError::Failed(error.to_string()))?;
     drop(phase);
     report_finalize_checkpoint(job, "after_enhance_road_graph", rows_written)?;
 
@@ -2098,6 +2141,7 @@ mod tests {
                 graph_id: "fixture".to_string(),
                 country_code: None,
                 build_profile: IngestBuildProfile::DesktopFull,
+                segment_order: SegmentOrder::Topology,
             },
             2,
             &Job::new(&never, &mut ignore),
@@ -2900,6 +2944,68 @@ mod tests {
         assert_eq!(road_sort_order(road_class(&tags)), 240);
     }
 
+    /// The package compiled from `pbf` with the road segments reaching the
+    /// builder in `order`.
+    fn package_in_segment_order(pbf: &Path, dir: &Path, order: SegmentOrder) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let request = RouteArchiveCompileRequest {
+            graph: RoadGraphCompileRequest {
+                input_pbf_path: pbf.to_path_buf(),
+                temp_dir: dir.join("scratch"),
+                graph_id: "segment-order".to_string(),
+                country_code: None,
+                build_profile: IngestBuildProfile::DesktopFull,
+                segment_order: order,
+            },
+            route_archive_path: dir.join("routing.mrt"),
+            threads: Some(2),
+        };
+        compile_route_archive(&request, &|| false, &mut |_| {}).unwrap();
+        request.route_archive_path
+    }
+
+    /// What a tiled compile needs from the id scheme: every order and id in
+    /// a package follows from the graph, not from the order its parts were
+    /// built in. Shuffling the segments the builder gets renumbers every
+    /// road graph node, edge and shared info and reorders plaza rings, and
+    /// must leave every section alone but the metadata. That holds the
+    /// build's quality report, whose examples are the first ones the build
+    /// met, named by its own ids (a tiled compile reports its own).
+    #[test]
+    fn packages_do_not_depend_on_the_order_segments_reach_the_builder() {
+        for fixture in ["monaco.osm.pbf", "krakow-centre.osm.pbf"] {
+            let pbf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures")
+                .join(fixture);
+            let root = tempfile::tempdir().unwrap();
+            let reference = package_in_segment_order(
+                &pbf,
+                &root.path().join("topology"),
+                SegmentOrder::Topology,
+            );
+            let expected = wayfarer_package::format::PackageFile::verify(&reference).unwrap();
+            for seed in [1, 2] {
+                let shuffled = package_in_segment_order(
+                    &pbf,
+                    &root.path().join(format!("shuffled-{seed}")),
+                    SegmentOrder::Shuffled(seed),
+                );
+                let actual = wayfarer_package::format::PackageFile::verify(&shuffled).unwrap();
+                let differing = expected
+                    .sections
+                    .iter()
+                    .zip(&actual.sections)
+                    .filter(|(a, b)| a != b && a.name != "Metadata")
+                    .map(|(a, _)| a.name)
+                    .collect::<Vec<_>>();
+                assert!(
+                    differing.is_empty(),
+                    "{fixture}, seed {seed}: sections differ: {differing:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn monaco_packages_are_deterministic_and_behaviorally_stable() {
         let pbf = std::env::var_os("WAYFARER_ROUTE_PARITY_PBF")
@@ -2938,63 +3044,66 @@ mod tests {
         // was ignored (later engine and compiler changes moved these routes
         // and their edge ids); the package still matches
         // fixtures/monaco-info.json. The totals must match to f32 rounding
-        // and the edge fingerprints exactly.
+        // and the edge fingerprints exactly. Fingerprints re-recorded on
+        // 2026-11-21 when edge ids became positions in the package order
+        // (`package_build::renumber_in_package_order`): the same routes,
+        // with the same totals, under new ids.
         let golden: [(f64, f64, f64, usize, u64); 8] = [
             (
                 2047.6120446791913,
                 190.58227701867665,
                 217.15802776261896,
                 57,
-                15212771926247900046,
+                2361029945959432928,
             ),
             (
                 1945.352435067371,
                 1373.1899599859382,
                 1461.2465279433395,
                 72,
-                8754937441538723445,
+                18153314860976308213,
             ),
             (
                 3072.489087949827,
                 208.33119192260511,
                 252.9142019371356,
                 89,
-                18118173261714362790,
+                13544991242613529721,
             ),
             (
                 2047.6120446791913,
                 215.8750875036877,
                 337.44146348403336,
                 57,
-                15212771926247900046,
+                2361029945959432928,
             ),
             (
                 2401.0263224734517,
                 201.42088467548498,
                 196.40290802292756,
                 62,
-                17383834656155057796,
+                17325639605596943052,
             ),
             (
                 1934.7695955783877,
                 1365.719717485633,
                 1458.796490425792,
                 72,
-                3845908430387602659,
+                3222675881509893555,
             ),
             (
                 2401.0263224734517,
                 174.75927405121425,
                 201.07278831440556,
                 62,
-                17383834656155057796,
+                17325639605596943052,
             ),
             (
                 2348.2805601252767,
                 254.42299810042812,
                 293.3094785621453,
                 57,
-                6086558223065972223,
+                17410398497319394578,
             ),
         ];
         let mut golden_index = 0usize;

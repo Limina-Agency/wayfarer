@@ -368,6 +368,7 @@ pub(crate) fn compile_reporting(
             graph_id: graph_id.clone(),
             country_code: request.country.clone(),
             build_profile: request.memory.ingest_profile(),
+            segment_order: crate::SegmentOrder::Topology,
         },
         route_archive_path: request.output.clone(),
         threads: request.threads,
