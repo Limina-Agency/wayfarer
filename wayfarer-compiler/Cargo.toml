@@ -29,6 +29,7 @@ schemars = { workspace = true, optional = true }
 petgraph = { workspace = true }
 rustc-hash = "2"
 rayon = { workspace = true }
+memmap2 = "0.9"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
