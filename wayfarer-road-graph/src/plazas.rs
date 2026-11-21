@@ -3,9 +3,12 @@
 use super::*;
 
 /// Base for synthetic plaza `osm_way_id`s. OSM object ids are non-negative, so
-/// the negative range is collision-free; each synthesized plaza claims one id by
-/// decrementing from this base. Synthetic ids never match a `source_ways` row, so
-/// the way-fact refresh leaves their foot-only masks untouched.
+/// the negative range is collision-free; the plaza of way `w` has the id
+/// `SYNTHETIC_PLAZA_WAY_ID_BASE - w`, which depends on that way alone (not on
+/// which other plazas a compile synthesizes), so it is the same in every
+/// compile that sees the plaza, a tile of a larger one included. Synthetic ids
+/// never match a `source_ways` row, so the way-fact refresh leaves their
+/// foot-only masks untouched.
 pub(crate) const SYNTHETIC_PLAZA_WAY_ID_BASE: i64 = -9_000_000_000_000;
 
 /// Minimum plaza polygon area (m²) eligible for interior anchor-star edges.
@@ -97,6 +100,34 @@ fn reassemble_ring(segments: &[Vec<(f64, f64)>]) -> Option<Vec<(f64, f64)>> {
     Some(ring)
 }
 
+/// Orients each segment so its fixed-point points read no greater than
+/// reversed, then sorts the segments by those points: the same set of
+/// segments gives the same order and directions however it was pushed.
+fn canonical_segment_order(segments: &mut [Vec<(f64, f64)>]) {
+    let fixed = |segment: &[(f64, f64)]| {
+        segment
+            .iter()
+            .map(|&(lat, lng)| (to_fixed(lat), to_fixed(lng)))
+            .collect::<Vec<_>>()
+    };
+    for segment in segments.iter_mut() {
+        let forward = fixed(segment);
+        let mut backward = forward.clone();
+        backward.reverse();
+        if backward < forward {
+            segment.reverse();
+        }
+    }
+    segments.sort_by_cached_key(|segment| {
+        let key = fixed(segment);
+        let exact = segment
+            .iter()
+            .map(|&(lat, lng)| (lat.to_bits(), lng.to_bits()))
+            .collect::<Vec<_>>();
+        (key, exact)
+    });
+}
+
 /// Locally-projected (equirectangular) polygon area in square metres. Adequate
 /// for the plaza-size threshold at city scale.
 fn ring_area_m2(ring: &[(f64, f64)]) -> f64 {
@@ -151,7 +182,6 @@ pub(crate) fn synthesize_pedestrian_plazas(
     plaza_accumulators: HashMap<i64, PlazaAccumulator>,
     next_edge_id: &mut u64,
     next_shared_edge_info_id: &mut u64,
-    next_synthetic_plaza_way_id: &mut i64,
     report: &mut RoadGraphBuildReport,
 ) {
     if plaza_accumulators.is_empty() {
@@ -191,7 +221,10 @@ pub(crate) fn synthesize_pedestrian_plazas(
     let mut plazas: Vec<(i64, PlazaAccumulator)> = plaza_accumulators.into_iter().collect();
     plazas.sort_by_key(|(way_id, _)| *way_id);
 
-    for (plaza_way_id, accumulator) in plazas {
+    for (plaza_way_id, mut accumulator) in plazas {
+        // The ring (and so the centre) from the segments in a fixed order,
+        // whatever order their ways reached the builder in.
+        canonical_segment_order(&mut accumulator.segments);
         let Some(ring) = reassemble_ring(&accumulator.segments) else {
             report.plaza_skipped_open_ring += 1;
             continue;
@@ -231,8 +264,7 @@ pub(crate) fn synthesize_pedestrian_plazas(
             continue;
         };
 
-        let synthetic_way_id = *next_synthetic_plaza_way_id;
-        *next_synthetic_plaza_way_id -= 1;
+        let synthetic_way_id = SYNTHETIC_PLAZA_WAY_ID_BASE - plaza_way_id;
 
         let center_node = graph.add_node(RoadNode {
             id: graph.graph.node_count() as i64,

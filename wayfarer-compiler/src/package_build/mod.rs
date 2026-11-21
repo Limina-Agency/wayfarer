@@ -5,11 +5,19 @@
 //! the reference oracle (`wayfarer::reference`) applies to the same
 //! records, so the stored weights are the record weights cast to f32 by
 //! construction. Nodes are the
-//! endpoints of edges, ordered along a Hilbert curve; edges are grouped by
-//! source node and ordered by edge id within a node.
+//! endpoints of edges, ordered along a Hilbert curve over a fixed world
+//! lattice; edges are grouped by source node and ordered by edge id within a
+//! node, and shared infos by id. A compile first gives the road graph its
+//! package ids ([`renumber_in_package_order`]), so those ids, and with them
+//! every order and id in the package, follow from the graph itself rather
+//! than from the order the compiler built it in.
 
+mod order;
 mod pieces;
 mod request;
+
+use order::package_node_key;
+pub use order::renumber_in_package_order;
 
 /// Reports named checkpoints of a package build (with their live heap) when
 /// set; the compiler's opt-in `benchmark-profiling` build installs a reporter.
@@ -290,27 +298,6 @@ fn restriction_mobility_mode_mask(restriction: &ResolvedEdgeRestriction) -> u32 
     }
 }
 
-/// Hilbert index of (x, y) on a 2^16 grid; keeps spatially close nodes close
-/// in memory so a search's working set stays cache-friendly.
-fn hilbert_index(mut x: u32, mut y: u32) -> u64 {
-    let mut index = 0u64;
-    let mut s = 1u32 << 15;
-    while s > 0 {
-        let rx = u32::from(x & s > 0);
-        let ry = u32::from(y & s > 0);
-        index += u64::from(s) * u64::from(s) * u64::from((3 * rx) ^ ry);
-        if ry == 0 {
-            if rx == 1 {
-                x = (s - 1).wrapping_sub(x) & 0xFFFF;
-                y = (s - 1).wrapping_sub(y) & 0xFFFF;
-            }
-            std::mem::swap(&mut x, &mut y);
-        }
-        s >>= 1;
-    }
-    index
-}
-
 /// Road graph package metadata for `graph`: its manifest's schema, hash,
 /// counts and quality when the caller has one, else the graph's own counts.
 pub fn package_metadata(
@@ -480,7 +467,9 @@ fn build_package_from(
         EdgeColumn::SegmentIndex,
     ]);
 
-    // Nodes: the endpoints of edges, ordered along a Hilbert curve.
+    // Nodes: the endpoints of edges, ordered along a Hilbert curve over the world
+    // lattice (see `package_node_key`), then by node id: after
+    // `renumber_in_package_order`, the order the ids already follow.
     let mut node_used = vec![false; raw_node_count];
     for (source, target) in network.sources().iter().zip(network.targets()) {
         node_used[*source as usize] = true;
@@ -490,24 +479,11 @@ fn build_package_from(
         .filter(|raw| node_used[*raw as usize])
         .collect::<Vec<_>>();
     drop(node_used);
-    let (min_lat, max_lat, min_lng, max_lng) = nodes.iter().fold(
-        (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
-        |(a, b, c, d), raw| {
-            let (lat, lng) = network.node_lat_lng(*raw as usize);
-            (a.min(lat), b.max(lat), c.min(lng), d.max(lng))
-        },
-    );
-    let quantize = |value: f64, low: f64, high: f64| {
-        let span = (high - low).max(1e-9);
-        (((value - low) / span) * 65_535.0).clamp(0.0, 65_535.0) as u32
-    };
     nodes.par_sort_by_cached_key(|raw| {
         let (lat, lng) = network.node_lat_lng(*raw as usize);
         (
-            hilbert_index(
-                quantize(lng, min_lng, max_lng),
-                quantize(lat, min_lat, max_lat),
-            ),
+            package_node_key(lat, lng, None),
+            network.node_id(*raw as usize),
             *raw,
         )
     });
@@ -809,7 +785,12 @@ fn build_package_from(
     );
 
     // Identity tokens per shared info.
-    let interner = TokenInterner::from_shared_infos(shared_infos.iter().map(|info| info.attrs));
+    // Numbered over the package's shared infos in order, so the numbers
+    // follow from the package (not from every shared info the graph holds,
+    // in the graph's build order).
+    let interner = TokenInterner::from_shared_infos(
+        (0..shared_count as u32).map(|shared| info_of(shared).attrs),
+    );
     // Way ids: `u32`, and the others (synthetic negative ids) apart.
     let (mut si_way_wide_shared, mut si_way_wide) = (Vec::new(), Vec::new());
     let si_way = (0..shared_count as u32)

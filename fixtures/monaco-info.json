@@ -1,8 +1,8 @@
 {
-  "byteLen": 665408,
+  "byteLen": 665024,
   "costingModelVersion": 1,
   "countryCode": "MC",
-  "datasetHash": "2c86fe9f9e0b22b3c240f53788e8b82444156f629ab4d1ec9b11d6a37863c92e",
+  "datasetHash": "991ab6f1106a71d1cb258dd8b07ded9d4fa506f643f4556deac9243719823c68",
   "edgeCount": 8550,
   "formatVersion": 2,
   "graphId": "monaco",
