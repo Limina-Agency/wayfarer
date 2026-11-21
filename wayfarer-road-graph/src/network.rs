@@ -214,6 +214,40 @@ impl Packed {
         }
     }
 
+    /// The values at `order`'s indices, in its order, in the column's
+    /// layout (a run counting up becomes the narrowest layout of its values).
+    fn permuted(&self, order: &[u32]) -> Self {
+        fn gather<T: Copy + Send + Sync>(values: &[T], order: &[u32]) -> Vec<T> {
+            order.par_iter().map(|&at| values[at as usize]).collect()
+        }
+        match self {
+            Self::Iota { .. } => {
+                let mut values = Self::default();
+                values.materialize(self.width(), order.len());
+                match &mut values {
+                    Self::U8(out) => {
+                        out.par_extend(order.par_iter().map(|&at| self.get(at as usize) as u8))
+                    }
+                    Self::U16(out) => {
+                        out.par_extend(order.par_iter().map(|&at| self.get(at as usize) as u16))
+                    }
+                    Self::U32(out) => {
+                        out.par_extend(order.par_iter().map(|&at| self.get(at as usize) as u32))
+                    }
+                    Self::U64(out) => {
+                        out.par_extend(order.par_iter().map(|&at| self.get(at as usize)))
+                    }
+                    Self::Iota { .. } => unreachable!("materialized above"),
+                }
+                values
+            }
+            Self::U8(values) => Self::U8(gather(values, order)),
+            Self::U16(values) => Self::U16(gather(values, order)),
+            Self::U32(values) => Self::U32(gather(values, order)),
+            Self::U64(values) => Self::U64(gather(values, order)),
+        }
+    }
+
     /// Removes the value at `index`, moving the last value into its place.
     fn swap_remove(&mut self, index: usize) {
         let last = self.len() - 1;
@@ -285,6 +319,27 @@ impl OptionPacked {
 
     pub(crate) fn reserve_exact(&mut self, additional: usize) {
         self.values.reserve_exact(additional);
+    }
+
+    fn permuted(&self, order: &[u32]) -> Self {
+        let mut none = Vec::new();
+        if !self.none.is_empty() {
+            none = vec![0u64; order.len().div_ceil(64)];
+            for (index, &at) in order.iter().enumerate() {
+                let at = at as usize;
+                if self
+                    .none
+                    .get(at / 64)
+                    .is_some_and(|word| word & (1 << (at % 64)) != 0)
+                {
+                    none[index / 64] |= 1 << (index % 64);
+                }
+            }
+        }
+        Self {
+            values: self.values.permuted(order),
+            none,
+        }
     }
 
     fn swap_remove(&mut self, index: usize) {
@@ -416,6 +471,7 @@ fn node_kind_byte(node: &RoadNode) -> u8 {
 /// The nodes, a column per field.
 #[derive(Debug, Clone, Default)]
 struct NodeColumns {
+    count: usize,
     id: Packed,
     lat_lng: Vec<(f64, f64)>,
     source_node_id: OptionPacked,
@@ -435,6 +491,7 @@ struct NodeColumns {
 /// The directed edges, a column per field.
 #[derive(Debug, Clone, Default)]
 struct EdgeColumns {
+    count: usize,
     source: Vec<u32>,
     target: Vec<u32>,
     edge_id: Packed,
@@ -452,6 +509,42 @@ struct EdgeColumns {
     end_heading: Packed,
     inferred_speed: Packed,
     opposing_edge_id: OptionPacked,
+}
+
+/// A node column a caller may release ([`RoadNetwork::release_node_columns`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeColumn {
+    Id,
+    LatLng,
+    SourceNodeId,
+    ComponentId,
+    /// The incoming, outgoing and incident edge counts.
+    EdgeCounts,
+    /// Junction kind, complex flag and highest incident road type.
+    Junction,
+    RoundaboutEntryCount,
+    RoundaboutExitCount,
+    /// Barrier class and access.
+    Barrier,
+}
+
+/// An edge column a caller may release ([`RoadNetwork::release_edge_columns`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeColumn {
+    /// The edge sources (the edge count stays).
+    Source,
+    EdgeId,
+    SharedEdgeInfoId,
+    Distance,
+    BaseCost,
+    MobilityModeMask,
+    /// The forward and reverse OSM mode masks.
+    OsmModeMasks,
+    SegmentIndex,
+    /// Start and end headings.
+    Headings,
+    InferredSpeed,
+    OpposingEdgeId,
 }
 
 /// The graph's nodes and directed edges; see the module documentation.
@@ -499,11 +592,11 @@ impl RoadNetwork {
     }
 
     pub fn node_count(&self) -> usize {
-        self.nodes.lat_lng.len()
+        self.nodes.count
     }
 
     pub fn edge_count(&self) -> usize {
-        self.edges.source.len()
+        self.edges.count
     }
 
     pub fn reserve_exact_nodes(&mut self, additional: usize) {
@@ -557,6 +650,163 @@ impl RoadNetwork {
         edges.opposing_edge_id.shrink_to_fit();
     }
 
+    /// Reorders the edges: edge `i` becomes what was edge `order[i]`.
+    /// `order` is a permutation of the edge indices. One column is
+    /// reordered at a time, so this holds one column's copy beside the graph.
+    pub fn permute_edges(&mut self, order: &[u32]) {
+        assert_eq!(
+            order.len(),
+            self.edge_count(),
+            "not a permutation of the edges"
+        );
+        fn gather<T: Copy + Send + Sync>(values: &mut Vec<T>, order: &[u32]) {
+            if values.len() == order.len() {
+                *values = order.par_iter().map(|&at| values[at as usize]).collect();
+            }
+        }
+        fn gather_packed(values: &mut Packed, order: &[u32]) {
+            if values.len() == order.len() {
+                *values = values.permuted(order);
+            }
+        }
+        let edges = &mut self.edges;
+        gather(&mut edges.source, order);
+        gather(&mut edges.target, order);
+        gather_packed(&mut edges.edge_id, order);
+        gather_packed(&mut edges.shared_edge_info_id, order);
+        gather(&mut edges.distance_m, order);
+        gather(&mut edges.base_cost, order);
+        gather_packed(&mut edges.mobility_mode_mask, order);
+        gather_packed(&mut edges.osm_forward_mode_mask, order);
+        gather_packed(&mut edges.osm_reverse_mode_mask, order);
+        gather(&mut edges.flags, order);
+        gather_packed(&mut edges.segment_index, order);
+        gather_packed(&mut edges.start_heading, order);
+        gather_packed(&mut edges.end_heading, order);
+        gather_packed(&mut edges.inferred_speed, order);
+        if edges.opposing_edge_id.values.len() == order.len() {
+            edges.opposing_edge_id = edges.opposing_edge_id.permuted(order);
+        }
+    }
+
+    /// Keeps the nodes `order` lists, in its order: node `i` becomes what was
+    /// node `order[i]`, and the edges' endpoints follow. Every endpoint must
+    /// be kept.
+    pub fn permute_nodes(&mut self, order: &[u32]) {
+        let mut new_of_old = vec![u32::MAX; self.node_count()];
+        for (new, &old) in order.iter().enumerate() {
+            assert_eq!(new_of_old[old as usize], u32::MAX, "a node is listed twice");
+            new_of_old[old as usize] = new as u32;
+        }
+        let remap = |ends: &mut Vec<u32>| {
+            ends.par_iter_mut().for_each(|end| {
+                let new = new_of_old[*end as usize];
+                assert_ne!(new, u32::MAX, "an edge's endpoint is not kept");
+                *end = new;
+            });
+        };
+        remap(&mut self.edges.source);
+        remap(&mut self.edges.target);
+        drop(new_of_old);
+        let old_count = self.node_count();
+        fn gather<T: Copy + Send + Sync>(values: &mut Vec<T>, order: &[u32], old_count: usize) {
+            if values.len() == old_count {
+                *values = order.par_iter().map(|&at| values[at as usize]).collect();
+            }
+        }
+        fn gather_packed(values: &mut Packed, order: &[u32], old_count: usize) {
+            if values.len() == old_count {
+                *values = values.permuted(order);
+            }
+        }
+        let nodes = &mut self.nodes;
+        gather_packed(&mut nodes.id, order, old_count);
+        gather_packed(&mut nodes.component, order, old_count);
+        gather_packed(&mut nodes.incoming, order, old_count);
+        gather_packed(&mut nodes.outgoing, order, old_count);
+        gather_packed(&mut nodes.incident, order, old_count);
+        gather(&mut nodes.kind, order, old_count);
+        gather_packed(&mut nodes.roundabout_entries, order, old_count);
+        gather_packed(&mut nodes.roundabout_exits, order, old_count);
+        gather(&mut nodes.barrier_class, order, old_count);
+        gather_packed(&mut nodes.barrier_access, order, old_count);
+        if nodes.source_node_id.values.len() == old_count {
+            nodes.source_node_id = nodes.source_node_id.permuted(order);
+        }
+        gather(&mut nodes.lat_lng, order, old_count);
+        nodes.count = order.len();
+    }
+
+    /// Frees node columns no later read needs. Reading a released column
+    /// panics, as do [`Self::node`] and [`Self::set_node`]; the node count
+    /// stays.
+    pub fn release_node_columns(&mut self, columns: &[NodeColumn]) {
+        let nodes = &mut self.nodes;
+        for column in columns {
+            match column {
+                NodeColumn::Id => nodes.id = Packed::default(),
+                NodeColumn::LatLng => nodes.lat_lng = Vec::new(),
+                NodeColumn::SourceNodeId => nodes.source_node_id = OptionPacked::default(),
+                NodeColumn::ComponentId => nodes.component = Packed::default(),
+                NodeColumn::EdgeCounts => {
+                    nodes.incoming = Packed::default();
+                    nodes.outgoing = Packed::default();
+                    nodes.incident = Packed::default();
+                }
+                NodeColumn::Junction => nodes.kind = Vec::new(),
+                NodeColumn::RoundaboutEntryCount => nodes.roundabout_entries = Packed::default(),
+                NodeColumn::RoundaboutExitCount => nodes.roundabout_exits = Packed::default(),
+                NodeColumn::Barrier => {
+                    nodes.barrier_class = Vec::new();
+                    nodes.barrier_access = Packed::default();
+                }
+            }
+        }
+    }
+
+    /// Frees edge columns no later read needs. Reading a released column
+    /// panics, as do [`Self::edge`] and [`Self::set_edge`]; the endpoints
+    /// and the edge count stay.
+    pub fn release_edge_columns(&mut self, columns: &[EdgeColumn]) {
+        let edges = &mut self.edges;
+        for column in columns {
+            match column {
+                EdgeColumn::Source => edges.source = Vec::new(),
+                EdgeColumn::EdgeId => edges.edge_id = Packed::default(),
+                EdgeColumn::SharedEdgeInfoId => edges.shared_edge_info_id = Packed::default(),
+                EdgeColumn::Distance => edges.distance_m = Vec::new(),
+                EdgeColumn::BaseCost => edges.base_cost = Vec::new(),
+                EdgeColumn::MobilityModeMask => edges.mobility_mode_mask = Packed::default(),
+                EdgeColumn::OsmModeMasks => {
+                    edges.osm_forward_mode_mask = Packed::default();
+                    edges.osm_reverse_mode_mask = Packed::default();
+                }
+                EdgeColumn::SegmentIndex => edges.segment_index = Packed::default(),
+                EdgeColumn::Headings => {
+                    edges.start_heading = Packed::default();
+                    edges.end_heading = Packed::default();
+                }
+                EdgeColumn::InferredSpeed => edges.inferred_speed = Packed::default(),
+                EdgeColumn::OpposingEdgeId => edges.opposing_edge_id = OptionPacked::default(),
+            }
+        }
+    }
+
+    /// The edge sources, moved out (the edge count stays).
+    pub fn take_sources(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.edges.source)
+    }
+
+    /// The edge distances, moved out.
+    pub fn take_distances(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.edges.distance_m)
+    }
+
+    /// The edge targets, moved out (the edge count stays).
+    pub fn take_targets(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.edges.target)
+    }
+
     /// Bytes the columns hold, for reporting.
     pub fn heap_bytes(&self) -> usize {
         let nodes = &self.nodes;
@@ -594,6 +844,7 @@ impl RoadNetwork {
         let index = self.node_count();
         assert!(index < u32::MAX as usize, "the graph exceeds u32 indexing");
         let nodes = &mut self.nodes;
+        nodes.count += 1;
         nodes.id.push(node.id as u64);
         nodes.lat_lng.push((node.lat, node.lng));
         nodes
@@ -623,6 +874,7 @@ impl RoadNetwork {
             "an edge's endpoint is not a node of the graph"
         );
         let edges = &mut self.edges;
+        edges.count += 1;
         edges.source.push(source.index() as u32);
         edges.target.push(target.index() as u32);
         edges.edge_id.push(edge.edge_id);
@@ -797,6 +1049,7 @@ impl RoadNetwork {
         let at = index.index();
         let removed = self.edge_weight(index)?;
         let edges = &mut self.edges;
+        edges.count -= 1;
         edges.source.swap_remove(at);
         edges.target.swap_remove(at);
         edges.edge_id.swap_remove(at);
@@ -945,6 +1198,31 @@ impl RoadNetwork {
             TraversalDirection::Forward => self.edges.osm_forward_mode_mask.get(edge) as ModeMask,
             TraversalDirection::Backward => self.edges.osm_reverse_mode_mask.get(edge) as ModeMask,
         }
+    }
+
+    #[inline]
+    pub fn edge_start_heading_deg(&self, edge: usize) -> Option<u16> {
+        code_u16(self.edges.start_heading.get(edge))
+    }
+
+    #[inline]
+    pub fn edge_end_heading_deg(&self, edge: usize) -> Option<u16> {
+        code_u16(self.edges.end_heading.get(edge))
+    }
+
+    #[inline]
+    pub fn edge_inferred_speed_kph(&self, edge: usize) -> Option<u16> {
+        code_u16(self.edges.inferred_speed.get(edge))
+    }
+
+    #[inline]
+    pub fn edge_end_control(&self, edge: usize) -> TrafficControl {
+        TrafficControl::from_code((self.edges.flags[edge] >> 2) & 0b111)
+    }
+
+    #[inline]
+    pub fn edge_end_minor_approach(&self, edge: usize) -> bool {
+        self.edges.flags[edge] & EDGE_MINOR_APPROACH != 0
     }
 
     #[inline]

@@ -78,7 +78,7 @@ pub use container::*;
 pub use enhance::*;
 use geometry::*;
 pub use graph::*;
-pub use network::{Adjacency, RoadEdgeRef, RoadNetwork};
+pub use network::{Adjacency, EdgeColumn, NodeColumn, RoadEdgeRef, RoadNetwork};
 use plazas::*;
 pub use quality::*;
 pub use report::*;

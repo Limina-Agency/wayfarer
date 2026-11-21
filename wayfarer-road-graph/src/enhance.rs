@@ -597,7 +597,11 @@ pub fn enhance_road_graph_with(
 /// The edges are found through their indices sorted by key (4 bytes an
 /// edge) rather than a map from key to edge (~40 bytes an edge).
 pub fn opposing_edge_indices(graph: &RoadGraph) -> Vec<u32> {
-    let edges = &graph.graph;
+    opposing_edge_indices_of(&graph.graph)
+}
+
+/// [`opposing_edge_indices`] of a graph's network alone.
+pub fn opposing_edge_indices_of(edges: &RoadNetwork) -> Vec<u32> {
     let key = |edge: usize, direction: TraversalDirection| {
         (
             edges.edge_shared_info_id(edge),
