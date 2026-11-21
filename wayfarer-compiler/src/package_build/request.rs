@@ -1,7 +1,7 @@
 //! Builds the request sections (see `wayfarer_package::request`)
 //! from the road graph.
 
-use petgraph::graph::NodeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use wayfarer_package::RoadEdge;
@@ -161,9 +161,15 @@ pub(crate) fn build_request_sections(
     let edge_count = input.edge_ids.len();
     let shared_count = input.shared_raw.len();
     let node_count = input.node_raw.len();
-    let node = |compact: usize| &graph.graph[NodeIndex::new(input.node_raw[compact] as usize)];
-    let road_edge = |compact: usize| -> &RoadEdge {
-        &graph.graph.raw_edges()[input.edge_raw[compact] as usize].weight
+    let node = |compact: usize| {
+        graph
+            .graph
+            .node(NodeIndex::new(input.node_raw[compact] as usize))
+    };
+    let road_edge = |compact: usize| -> RoadEdge {
+        graph
+            .graph
+            .edge(EdgeIndex::new(input.edge_raw[compact] as usize))
     };
     let shared_info = |shared: usize| {
         graph
@@ -426,7 +432,7 @@ pub(crate) fn build_request_sections(
         [input.edge_raw[edge] as usize]
     {
         u32::MAX => NONE_U64,
-        raw => graph.graph.raw_edges()[raw as usize].weight.edge_id,
+        raw => graph.graph.edge_id(raw as usize),
     });
     let (leg_opposing_edge, leg_opposing_value) =
         exceptions(&|edge| road_edge(edge).opposing_edge_id.unwrap_or(NONE_U64));

@@ -1,12 +1,10 @@
 use crate::{
-    OsmMode, RelationMemberRefType, ResolvedEdgeRestriction, RoadGraph, RoadGraphNamedCount,
-    RoadGraphRestrictionReport, RoadGraphUnresolvedRestrictionExample,
-    RoadGraphUnresolvedRestrictionReason, SharedInfoIndex, TraversalDirection,
-    mobility_mode_mask_from_osm,
+    Adjacency, OsmMode, RelationMemberRefType, ResolvedEdgeRestriction, RoadGraph,
+    RoadGraphNamedCount, RoadGraphRestrictionReport, RoadGraphUnresolvedRestrictionExample,
+    RoadGraphUnresolvedRestrictionReason, SharedInfoIndex, mobility_mode_mask_from_osm,
 };
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -42,16 +40,16 @@ pub fn resolve_turn_restrictions_with_report(
         })
         .collect::<HashSet<_>>();
     let mut entries = Vec::new();
-    for edge_ref in graph.graph.edge_references() {
-        let edge = edge_ref.weight();
+    let network = &graph.graph;
+    for edge in 0..network.edge_count() {
         // SAR-only edges (ways closed to every mode) resolve nothing: the
         // restrictions resolve as they did before those ways were kept.
-        if edge.is_sar_only() {
+        if network.edge_direction_osm_mode_mask(edge) == 0 {
             continue;
         }
         // The edge's ways: its shared info's way and source lineage.
         let Some(info) = info_index
-            .get(edge.shared_edge_info_id)
+            .get(network.edge_shared_info_id(edge))
             .map(|index| graph.shared_edge_infos.at(index))
         else {
             continue;
@@ -71,12 +69,13 @@ pub fn resolve_turn_restrictions_with_report(
             .copied()
             .collect::<BTreeSet<_>>();
         way_ids.insert(info.osm_way_id);
+        let (source, target) = (network.source(edge).index(), network.target(edge).index());
         entries.push(EdgeResolutionEntry {
-            edge_id: edge.edge_id,
-            source_index: edge_ref.source().index(),
-            target_index: edge_ref.target().index(),
-            source_node_id: graph.graph[edge_ref.source()].source_node_id,
-            target_node_id: graph.graph[edge_ref.target()].source_node_id,
+            edge_id: network.edge_id(edge),
+            source_index: source,
+            target_index: target,
+            source_node_id: network.node_source_node_id(source),
+            target_node_id: network.node_source_node_id(target),
             way_ids,
         });
     }
@@ -94,6 +93,18 @@ pub fn resolve_turn_restrictions_with_report(
             .unwrap_or(&[])
     };
 
+    // Outgoing edges per node, built when an `only_*` restriction first
+    // needs them.
+    let out_edges = std::cell::OnceCell::new();
+    let other_out_edges = |node_index: usize, allowed: &HashSet<u64>, osm_mode_mask: u32| {
+        other_out_edges(
+            graph,
+            out_edges.get_or_init(|| graph.graph.adjacency(Direction::Outgoing)),
+            node_index,
+            allowed,
+            osm_mode_mask,
+        )
+    };
     let mut resolved = Vec::new();
     let mut report = RoadGraphRestrictionReport {
         raw_restriction_count: graph.turn_restrictions.len(),
@@ -163,7 +174,7 @@ pub fn resolve_turn_restrictions_with_report(
                         }
                         only_turn_found = true;
                         for to_edge_id in
-                            other_out_edges(graph, from_edge.target_index, &allowed, osm_mode_mask)
+                            other_out_edges(from_edge.target_index, &allowed, osm_mode_mask)
                         {
                             resolved.push(ResolvedEdgeRestriction::Simple {
                                 relation_id: restriction.relation_id,
@@ -258,8 +269,7 @@ pub fn resolve_turn_restrictions_with_report(
                     }
                     only_turn_found = !only_turns.is_empty();
                     for ((from_edge_id, via_edge_ids), (end_index, allowed)) in only_turns {
-                        for to_edge_id in other_out_edges(graph, end_index, &allowed, osm_mode_mask)
-                        {
+                        for to_edge_id in other_out_edges(end_index, &allowed, osm_mode_mask) {
                             resolved.push(ResolvedEdgeRestriction::Complex {
                                 relation_id: restriction.relation_id,
                                 restriction: restriction.restriction.clone(),
@@ -322,22 +332,21 @@ fn via_way_ids(restriction: &crate::RoadTurnRestriction) -> &[i64] {
 /// but the `allowed` ones, among those its modes may use.
 fn other_out_edges(
     graph: &RoadGraph,
+    out_edges: &Adjacency,
     node_index: usize,
     allowed: &HashSet<u64>,
     osm_mode_mask: u32,
 ) -> Vec<u64> {
-    let mut edge_ids = graph
-        .graph
-        .edges_directed(NodeIndex::new(node_index), Direction::Outgoing)
-        .map(|edge_ref| edge_ref.weight())
-        .filter(|edge| {
-            let edge_mask = match edge.traversal_direction {
-                TraversalDirection::Forward => edge.osm_forward_mode_mask,
-                TraversalDirection::Backward => edge.osm_reverse_mode_mask,
-            };
-            !allowed.contains(&edge.edge_id) && edge_mask & osm_mode_mask != 0
+    let network = &graph.graph;
+    let mut edge_ids = out_edges
+        .edges(NodeIndex::new(node_index))
+        .iter()
+        .map(|&edge| edge as usize)
+        .filter(|&edge| {
+            !allowed.contains(&network.edge_id(edge))
+                && network.edge_direction_osm_mode_mask(edge) & osm_mode_mask != 0
         })
-        .map(|edge| edge.edge_id)
+        .map(|edge| network.edge_id(edge))
         .collect::<Vec<_>>();
     edge_ids.sort_unstable();
     edge_ids

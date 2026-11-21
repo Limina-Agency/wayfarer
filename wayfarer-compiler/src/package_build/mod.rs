@@ -431,14 +431,15 @@ fn build_package_from(
         }
     }
 
-    let raw_edges = graph.graph.raw_edges();
-    let raw_node_count = graph.graph.node_count();
-    if raw_edges.is_empty() {
+    let network = &graph.graph;
+    let raw_edge_count = network.edge_count();
+    let raw_node_count = network.node_count();
+    if raw_edge_count == 0 {
         return Err(RoutingPackageError::Unsupported(
             "the graph has no edges".into(),
         ));
     }
-    if raw_edges.len() >= u32::MAX as usize || raw_node_count >= u32::MAX as usize {
+    if raw_edge_count >= u32::MAX as usize || raw_node_count >= u32::MAX as usize {
         return Err(RoutingPackageError::Unsupported(
             "the graph exceeds u32 indexing".into(),
         ));
@@ -451,11 +452,11 @@ fn build_package_from(
         .enumerate()
         .map(|(index, info)| (info.shared_edge_info_id, index as u32))
         .collect::<FxHashMap<_, _>>();
-    let edge_shared_raw = raw_edges
-        .par_iter()
+    let edge_shared_raw = (0..raw_edge_count)
+        .into_par_iter()
         .map(|raw_edge| {
             shared_by_id
-                .get(&raw_edge.weight.shared_edge_info_id)
+                .get(&network.edge_shared_info_id(raw_edge))
                 .copied()
         })
         .collect::<Option<Vec<u32>>>()
@@ -464,22 +465,20 @@ fn build_package_from(
         })?;
     drop(shared_by_id);
     let shared_infos = &graph.shared_edge_infos;
-    let road_edge = |raw: u32| -> &RoadEdge { &raw_edges[raw as usize].weight };
+    let road_edge =
+        |raw: u32| -> RoadEdge { network.edge(petgraph::graph::EdgeIndex::new(raw as usize)) };
 
     // Nodes: the endpoints of edges, ordered along a Hilbert curve.
     let mut node_used = vec![false; raw_node_count];
-    for raw_edge in raw_edges {
-        node_used[raw_edge.source().index()] = true;
-        node_used[raw_edge.target().index()] = true;
+    for (source, target) in network.sources().iter().zip(network.targets()) {
+        node_used[*source as usize] = true;
+        node_used[*target as usize] = true;
     }
     let mut nodes = (0..raw_node_count as u32)
         .filter(|raw| node_used[*raw as usize])
         .collect::<Vec<_>>();
     drop(node_used);
-    let position = |raw: u32| {
-        let node = &graph.graph[petgraph::graph::NodeIndex::new(raw as usize)];
-        (node.lat, node.lng)
-    };
+    let position = |raw: u32| network.node_lat_lng(raw as usize);
     let (min_lat, max_lat, min_lng, max_lng) = nodes.iter().fold(
         (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
         |(a, b, c, d), raw| {
@@ -512,11 +511,11 @@ fn build_package_from(
     let mut barrier_class = Vec::new();
     let mut barrier_access = Vec::new();
     for (compact, raw) in nodes.iter().enumerate() {
-        let node = &graph.graph[petgraph::graph::NodeIndex::new(*raw as usize)];
-        if node.barrier_class != 0 || node.barrier_access != 0 {
+        let (class, access) = network.node_barrier(*raw as usize);
+        if class != 0 || access != 0 {
             barrier_node.push(compact as u32);
-            barrier_class.push(node.barrier_class);
-            barrier_access.push(node.barrier_access);
+            barrier_class.push(class);
+            barrier_access.push(access);
         }
     }
     report.barrier_node_count = barrier_node.len();
@@ -528,13 +527,12 @@ fn build_package_from(
     // (the adjacency order of the road graph's index, which keeps
     // tie-breaking comparable). `order[compact edge]` is (source node, edge
     // id, raw edge); edge ids are unique, so the order is total.
-    let mut order = raw_edges
-        .par_iter()
-        .enumerate()
-        .map(|(raw, raw_edge)| {
+    let mut order = (0..raw_edge_count)
+        .into_par_iter()
+        .map(|raw| {
             (
-                raw_node_to_compact[raw_edge.source().index()],
-                raw_edge.weight.edge_id,
+                raw_node_to_compact[network.sources()[raw] as usize],
+                network.edge_id(raw),
                 raw as u32,
             )
         })
@@ -550,7 +548,7 @@ fn build_package_from(
     drop(order);
     let edge_target = edge_raw
         .par_iter()
-        .map(|raw| raw_node_to_compact[raw_edges[*raw as usize].target().index()])
+        .map(|raw| raw_node_to_compact[network.targets()[*raw as usize] as usize])
         .collect::<Vec<_>>();
     // Edge ids: a dense lookup from (id - base) to the compact edge.
     let edge_id_base = edge_ids.iter().copied().min().unwrap_or(0);
@@ -845,7 +843,7 @@ fn build_package_from(
             .for_each(|(edge, (cost, duration))| {
                 let shared = edge_shared_info[edge];
                 let inputs = EdgeCostInputs::from_parts(
-                    road_edge(edge_raw[edge]),
+                    &road_edge(edge_raw[edge]),
                     info_of(shared).attrs,
                     classes[shared as usize],
                 );

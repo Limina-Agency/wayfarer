@@ -32,7 +32,7 @@ pub struct NodeRoadTypeCounts {
 impl RoadGraph {
     pub fn new(graph_id: impl Into<String>) -> Self {
         Self {
-            graph: Graph::new(),
+            graph: RoadNetwork::new(),
             graph_id: graph_id.into(),
             shared_edge_infos: SharedEdgeInfos::new(),
             way_facts: Vec::new(),
@@ -300,18 +300,22 @@ impl RoadGraph {
                 )
             })
             .collect::<Vec<_>>();
-        for edge in self.graph.edge_weights_mut() {
+        for edge in 0..self.graph.edge_count() {
             if let Some((forward_mask, reverse_mask)) = info_index
-                .get(edge.shared_edge_info_id)
+                .get(self.graph.edge_shared_info_id(edge))
                 .map(|info_position| masks[info_position])
             {
-                edge.osm_forward_mode_mask = forward_mask;
-                edge.osm_reverse_mode_mask = reverse_mask;
-                edge.mobility_mode_mask =
-                    mobility_mode_mask_from_osm(match edge.traversal_direction {
+                let mobility_mode_mask =
+                    mobility_mode_mask_from_osm(match self.graph.edge_traversal_direction(edge) {
                         TraversalDirection::Forward => forward_mask,
                         TraversalDirection::Backward => reverse_mask,
                     });
+                self.graph.set_edge_mode_masks(
+                    edge,
+                    forward_mask,
+                    reverse_mask,
+                    mobility_mode_mask,
+                );
             }
         }
     }
@@ -366,9 +370,10 @@ fn used_infos(
     include: impl Fn(u64) -> bool,
 ) -> Vec<bool> {
     let mut used = vec![false; graph.shared_edge_infos.len()];
-    for edge in graph.graph.edge_weights() {
-        if let Some(index) = info_index.get(edge.shared_edge_info_id)
-            && include(edge.shared_edge_info_id)
+    for edge in 0..graph.graph.edge_count() {
+        let shared_edge_info_id = graph.graph.edge_shared_info_id(edge);
+        if let Some(index) = info_index.get(shared_edge_info_id)
+            && include(shared_edge_info_id)
         {
             used[index] = true;
         }

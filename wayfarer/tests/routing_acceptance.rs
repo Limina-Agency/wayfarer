@@ -557,8 +557,8 @@ fn persisted_package(graph: &RoadGraph) -> (tempfile::TempDir, Arc<RoutingPackag
 #[test]
 fn package_outbound_reach_matches_graph_access() {
     let graph = many_edge_route_tile_graph();
-    let edge = graph.graph.raw_edges()[0].clone();
-    let node_id = graph.graph[edge.target()].id;
+    let edge = graph.graph.edge_references().next().unwrap();
+    let node_id = graph.graph.node(edge.target()).id;
     let (_dir, package) = persisted_package(&graph);
     let engine = RoutingEngine::from_package(package);
 
@@ -3373,8 +3373,10 @@ fn profile_access_filtering_rejects_motor_vehicle_only_for_foot() {
             RoadType::Residential,
         )],
     );
-    for edge in graph.graph.edge_weights_mut() {
-        edge.mobility_mode_mask = MobilityMode::WHEELED;
+    for edge in graph.graph.edge_indices() {
+        graph
+            .graph
+            .update_edge(edge, |edge| edge.mobility_mode_mask = MobilityMode::WHEELED);
     }
 
     let error = engine(&graph)

@@ -200,13 +200,13 @@ pub fn enhance_road_graph_with(
     // them. Their own nodes (none of whose edges is legal) get no component.
     let mut sar_only_node = vec![false; node_count];
     let mut legal_node = vec![false; node_count];
-    for edge_ref in graph.graph.edge_references() {
-        let source = edge_ref.source().index();
-        let target = edge_ref.target().index();
+    for edge in 0..graph.graph.edge_count() {
+        let source = graph.graph.source(edge).index();
+        let target = graph.graph.target(edge).index();
         if source >= node_count || target >= node_count {
             continue;
         }
-        if edge_ref.weight().is_sar_only() {
+        if graph.graph.edge_direction_osm_mode_mask(edge) == 0 {
             sar_only_node[source] = true;
             sar_only_node[target] = true;
             continue;
@@ -219,7 +219,7 @@ pub fn enhance_road_graph_with(
         if let Some(info) = shared_edge_info(
             graph,
             &info_index_by_id,
-            edge_ref.weight().shared_edge_info_id,
+            graph.graph.edge_shared_info_id(edge),
         ) {
             // `road_type_label` returns a `&'static str`; keying by it used to
             // allocate a `String` for every directed edge in the extract.
@@ -261,7 +261,7 @@ pub fn enhance_road_graph_with(
             // exactly what scanning `component_ids` for the first match used to
             // find — but without re-scanning every node per small component.
             if let Some(node_index) = component_first_nodes.get(component_id).copied() {
-                let node = &graph.graph[NodeIndex::new(node_index)];
+                let node = graph.graph.node(NodeIndex::new(node_index));
                 push_quality_example(
                     &mut report.warning_examples,
                     RoadGraphQualityExample {
@@ -310,7 +310,7 @@ pub fn enhance_road_graph_with(
             RoadJunctionKind::Complex
         };
 
-        let node = &mut graph.graph[node_index];
+        let mut node = graph.graph.node(node_index);
         node.component_id = component_ids.get(index).copied().flatten();
         node.incoming_edge_count = saturating_u16(incoming);
         node.outgoing_edge_count = saturating_u16(outgoing);
@@ -330,6 +330,7 @@ pub fn enhance_road_graph_with(
                 .unwrap_or_default() as usize,
         );
         node.is_complex_junction = junction_kind == RoadJunctionKind::Complex;
+        graph.graph.set_node(node_index, &node);
     }
 
     graph.node_road_type_counts = if options.node_road_type_counts {
@@ -360,15 +361,16 @@ pub fn enhance_road_graph_with(
         // the results come back in edge order and are applied sequentially
         // below, a chunk at a time, so they are held for one chunk only (a
         // record of some 40 bytes per edge, over 2 GB on Germany at once).
-        let edge_updates = graph.graph.raw_edges()[chunk_start..chunk_end]
-            .par_iter()
-            .enumerate()
-            .map(|(offset, edge_ref)| {
-                let edge_index = EdgeIndex::new(chunk_start + offset);
-                let edge = &edge_ref.weight;
-                let info = shared_edge_info(graph, &info_index_by_id, edge.shared_edge_info_id);
-                let source_index = edge_ref.source().index();
-                let target_index = edge_ref.target().index();
+        let edge_updates = (chunk_start..chunk_end)
+            .into_par_iter()
+            .map(|at| {
+                let edge_index: EdgeIndex = EdgeIndex::new(at);
+                let network = &graph.graph;
+                let traversal_direction = network.edge_traversal_direction(at);
+                let info =
+                    shared_edge_info(graph, &info_index_by_id, network.edge_shared_info_id(at));
+                let source_index = network.source(at).index();
+                let target_index = network.target(at).index();
                 let source_degree = if source_index < adjacency.len() {
                     adjacency.degree(source_index)
                 } else {
@@ -389,7 +391,7 @@ pub fn enhance_road_graph_with(
                     )
                 });
                 let (start_heading, end_heading) = info
-                    .and_then(|info| edge_headings_deg(info.geometry, edge.traversal_direction))
+                    .and_then(|info| edge_headings_deg(info.geometry, traversal_direction))
                     .unwrap_or((None, None));
                 let inferred_speed = info.map(|info| infer_speed_kph(info.attrs));
                 let minor_approach = info.is_some_and(|info| {
@@ -432,21 +434,24 @@ pub fn enhance_road_graph_with(
             if inferred_speed.is_some() {
                 report.edges_with_inferred_speed_count += 1;
             }
-            if let Some(edge) = graph.graph.edge_weight_mut(edge_index) {
-                edge.start_heading_deg = start_heading;
-                edge.end_heading_deg = end_heading;
-                edge.inferred_speed_kph = inferred_speed;
-                edge.hierarchy_tier = hierarchy_tier;
-                edge.end_minor_approach = minor_approach;
-                if let Some(tier) = hierarchy_tier {
-                    report.hierarchy_prepared_edge_count += 1;
-                    tier_edge_counts[tier as usize] += 1;
-                    if let Some(info_index) = info_index_by_id.get(edge.shared_edge_info_id) {
-                        shared_hierarchy_updates[info_index] = Some(tier);
-                    }
-                } else {
-                    report.missing_hierarchy_tier_edge_count += 1;
+            graph.graph.set_edge_enhancement(
+                edge_index.index(),
+                start_heading,
+                end_heading,
+                inferred_speed,
+                hierarchy_tier,
+                minor_approach,
+            );
+            if let Some(tier) = hierarchy_tier {
+                report.hierarchy_prepared_edge_count += 1;
+                tier_edge_counts[tier as usize] += 1;
+                if let Some(info_index) =
+                    info_index_by_id.get(graph.graph.edge_shared_info_id(edge_index.index()))
+                {
+                    shared_hierarchy_updates[info_index] = Some(tier);
                 }
+            } else {
+                report.missing_hierarchy_tier_edge_count += 1;
             }
         }
     }
@@ -531,13 +536,13 @@ pub fn enhance_road_graph_with(
     let opposing = opposing_edge_indices(graph);
     let opposing_edge_ids = opposing
         .iter()
-        .map(|&index| {
-            (index != u32::MAX).then(|| graph.graph.raw_edges()[index as usize].weight.edge_id)
-        })
+        .map(|&index| (index != u32::MAX).then(|| graph.graph.edge_id(index as usize)))
         .collect::<Vec<_>>();
     drop(opposing);
-    for (edge, opposing_edge_id) in graph.graph.edge_weights_mut().zip(opposing_edge_ids) {
-        edge.opposing_edge_id = opposing_edge_id;
+    for (edge, opposing_edge_id) in opposing_edge_ids.into_iter().enumerate() {
+        graph
+            .graph
+            .set_edge_opposing_edge_id(edge, opposing_edge_id);
     }
 
     // The two cluster scans only read the graph, so they run concurrently and
@@ -592,23 +597,29 @@ pub fn enhance_road_graph_with(
 /// The edges are found through their indices sorted by key (4 bytes an
 /// edge) rather than a map from key to edge (~40 bytes an edge).
 pub fn opposing_edge_indices(graph: &RoadGraph) -> Vec<u32> {
-    let edges = graph.graph.raw_edges();
-    let key = |edge: &RoadEdge, direction: TraversalDirection| {
-        (edge.shared_edge_info_id, edge.segment_index, direction)
+    let edges = &graph.graph;
+    let key = |edge: usize, direction: TraversalDirection| {
+        (
+            edges.edge_shared_info_id(edge),
+            edges.edge_segment_index(edge),
+            direction,
+        )
     };
     let edge_key = |index: u32| {
-        let edge = &edges[index as usize].weight;
-        key(edge, edge.traversal_direction)
+        let edge = index as usize;
+        key(edge, edges.edge_traversal_direction(edge))
     };
-    let mut by_key =
-        (0..u32::try_from(edges.len()).expect("fewer than 2^32 edges")).collect::<Vec<u32>>();
+    let mut by_key = (0..u32::try_from(edges.edge_count()).expect("fewer than 2^32 edges"))
+        .collect::<Vec<u32>>();
     // Ties stay in edge order, so a key's last position is its last edge.
     by_key.par_sort_unstable_by_key(|&index| (edge_key(index), index));
-    edges
-        .par_iter()
-        .map(|raw_edge| {
-            let edge = &raw_edge.weight;
-            let wanted = key(edge, opposite_traversal_direction(edge.traversal_direction));
+    (0..edges.edge_count())
+        .into_par_iter()
+        .map(|edge| {
+            let wanted = key(
+                edge,
+                opposite_traversal_direction(edges.edge_traversal_direction(edge)),
+            );
             let end = by_key.partition_point(|&index| edge_key(index) <= wanted);
             match by_key[..end].last() {
                 Some(&last) if edge_key(last) == wanted => last,
