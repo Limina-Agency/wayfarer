@@ -693,8 +693,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "osm-pbf-ingest"
-version = "0.4.0"
-source = "git+https://github.com/Limina-Agency/osm-pbf-ingest?branch=feat%2Flocate-nodes#43b78d51e56835f0e44de62f2d440177514898ea"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b9c1c3799747ae97fe8c6bff4c34a59ac35c0b98af3f5fa2c5c5f9342b1b330"
 dependencies = [
  "buffa",
  "compact_str",
