@@ -4,9 +4,21 @@
   "description": "The `k` targets cheapest to travel to from `source` (or from which to\ntravel to it), by route cost ([`crate::RoutingEngine::nearest`]).",
   "type": "object",
   "properties": {
+    "departureAtMs": {
+      "description": "The time overlay windows are evaluated at (UTC ms), unless the\ncosting options set `conditional_restriction_eval_at_ms`; absent\nboth, the time of the request.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
     "direction": {
       "$ref": "#/$defs/NearestDirection",
       "default": "from_source"
+    },
+    "includeEdgeIds": {
+      "description": "`false` leaves out the hits' `edge_ids` (the search is the same; the\noutput is smaller).",
+      "type": "boolean"
     },
     "k": {
       "description": "How many targets to return, at least 1 and at most `targets`' count.",
@@ -52,6 +64,13 @@
         "maxVisitedEdgeCount": null,
         "warningEdgeIds": [],
         "warningEdgeRanges": []
+      }
+    },
+    "overlays": {
+      "description": "Closures and other overlays, as geometry or package edges, applied as\na route applies them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteOverlay"
       }
     },
     "profile": {
@@ -787,6 +806,163 @@
           }
         }
       }
+    },
+    "RouteOverlay": {
+      "type": "object",
+      "properties": {
+        "costMultiplier": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "edges": {
+          "description": "Explicit edges (an overlay set bound to this package): used instead\nof projecting `points`, which may then be empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        },
+        "geometryKind": {
+          "$ref": "#/$defs/RouteOverlayGeometryKind"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/RouteOverlayPolicy"
+        },
+        "profiles": {
+          "description": "The profiles the overlay applies to; empty: every profile.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MobilityProfile"
+          }
+        },
+        "projectionDistanceM": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOverlaySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speedKph": {
+          "description": "`discount` and `open`: the speed (km/h) on the covered edges.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "validFromMs": {
+          "description": "The overlay is active from this time (UTC ms) on; absent: always.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "validToMs": {
+          "description": "The overlay is active before this time (UTC ms); absent: always.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "required": [
+        "geometryKind",
+        "points",
+        "policy",
+        "projectionDistanceM"
+      ]
+    },
+    "RouteOverlayGeometryKind": {
+      "description": "The shape of an overlay's geometry.",
+      "type": "string",
+      "enum": [
+        "point",
+        "line",
+        "polygon"
+      ]
+    },
+    "RouteOverlayPolicy": {
+      "description": "What an overlay does to the edges it covers.\nInside one request: a block wins over a discount and a slow-go; an\n`open` wins over legal closure and over a block whose `valid_from_ms` is\nearlier than its own (an absent one is earliest); overlapping discounts\nmultiply, slow-go factors take the largest, and of several speed\noverrides on one edge the slowest stands.",
+      "oneOf": [
+        {
+          "description": "Blocked.",
+          "type": "string",
+          "const": "no_go"
+        },
+        {
+          "description": "Dearer: `cost_multiplier` above 1 (default 2), cost only.",
+          "type": "string",
+          "const": "slow_go"
+        },
+        {
+          "description": "A hazard warning on the route; costs are unchanged.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Cheaper: `cost_multiplier` in (0, 1) scales cost and duration, and\n`speed_kph` sets the speed (cost follows the time). Costed exactly;\ngoal-directed bounds are scaled by the least cost ratio.",
+          "type": "string",
+          "const": "discount"
+        },
+        {
+          "description": "Usable by the request's profile (when `profiles` lists it, or lists\nnone) whatever its legal access says, at `speed_kph` if given. The\nedge must be in the package; endpoints do not snap onto it.",
+          "type": "string",
+          "const": "open"
+        }
+      ]
+    },
+    "RouteOverlaySource": {
+      "description": "Where an overlay came from, when it came from an overlay set.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "itemVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "setId": {
+          "type": "string"
+        },
+        "setVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "setId",
+        "setVersion",
+        "itemId",
+        "itemVersion"
+      ]
     },
     "RouteSarOptions": {
       "description": "The SAR option of a request (`RouteOptions::sar`). An absent relaxation\nis not relaxed. JSON names are snake_case with camelCase aliases.",

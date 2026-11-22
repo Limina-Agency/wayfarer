@@ -8789,3 +8789,224 @@ fn via_alternatives_are_valid_routes_within_the_policy() {
     }
     assert!(found > 20, "only {found} alternatives");
 }
+
+/// A no-go line across the primary road between columns 1 and 2, and a
+/// slow-go square around the grid's centre node.
+fn grid_overlays() -> Vec<crate::RouteOverlay> {
+    let mut slow = crate::RouteOverlay::new(
+        crate::RouteOverlayGeometryKind::Polygon,
+        vec![
+            GeoPoint::new(0.0027, 0.0025),
+            GeoPoint::new(0.0027, 0.0033),
+            GeoPoint::new(0.0019, 0.0033),
+            GeoPoint::new(0.0019, 0.0025),
+        ],
+        crate::RouteOverlayPolicy::SlowGo,
+        5,
+    );
+    slow.cost_multiplier = Some(4.0);
+    vec![
+        crate::RouteOverlay::new(
+            crate::RouteOverlayGeometryKind::Line,
+            vec![GeoPoint::new(0.0018, 0.0023), GeoPoint::new(0.0028, 0.0023)],
+            crate::RouteOverlayPolicy::NoGo,
+            5,
+        ),
+        slow,
+    ]
+}
+
+/// The options a host would set by projecting [`grid_overlays`] itself.
+fn grid_overlay_options(engine: &RoutingEngine, options: &mut crate::RouteOptions) {
+    let project = |overlay: &crate::RouteOverlay| {
+        engine.project(&crate::ProjectRequest {
+            geometry_kind: overlay.geometry_kind,
+            points: overlay.points.clone(),
+            projection_distance_m: overlay.projection_distance_m,
+        })
+    };
+    let [no_go, slow] = &grid_overlays()[..] else {
+        unreachable!()
+    };
+    let blocked = project(no_go);
+    assert!(!blocked.edge_ids.is_empty());
+    options.blocked_edge_ids.extend(blocked.edge_ids);
+    options.blocked_edge_ranges.extend(blocked.edge_ranges);
+    let slowed = project(slow);
+    assert!(!slowed.edge_ids.is_empty());
+    for edge_id in &slowed.edge_ids {
+        options.edge_cost_multipliers.insert(*edge_id, 4.0);
+    }
+    options
+        .edge_cost_multiplier_ranges
+        .extend(
+            slowed
+                .edge_ranges
+                .iter()
+                .map(|range| crate::RouteEdgeCostMultiplierRange {
+                    edge_id: range.edge_id,
+                    start_fraction: range.start_fraction,
+                    end_fraction: range.end_fraction,
+                    multiplier: 4.0,
+                }),
+        );
+}
+
+/// Overlays on matrix, isochrone and nearest requests: the same results as
+/// the options a host gets by projecting them itself, and as routes with the
+/// same overlays; windows and profiles leave them out as on a route.
+#[test]
+fn matrix_isochrone_and_nearest_overlays_apply_as_on_a_route() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_graph(), &dir.path().join("grid.mrt"));
+    let (_, compact) = engines(&reader);
+    let profile = MobilityProfile::Wheeled;
+    let points = grid_points();
+
+    let mut overlaid = crate::RouteMatrixRequest::new(points.clone(), points.clone(), profile);
+    overlaid.options.max_correlation_distance_m = 60;
+    let mut projected = overlaid.clone();
+    overlaid.overlays = grid_overlays();
+    grid_overlay_options(&compact, &mut projected.options);
+    let actual = compact.matrix(overlaid.clone());
+    assert_eq!(actual, compact.matrix(projected.clone()));
+    let plain = matrix(&compact, points.clone(), points.clone(), profile);
+    assert_ne!(actual.cells, plain.cells, "the overlays changed no cell");
+    for cell in &actual.cells {
+        let mut route = crate::RouteRequest::new(
+            points[cell.source_index],
+            points[cell.target_index],
+            profile,
+        );
+        route.options.max_correlation_distance_m = 60;
+        route.overlays = grid_overlays();
+        let Ok(route) = compact.route(route) else {
+            assert!(cell.cost.is_none(), "{cell:?}");
+            continue;
+        };
+        if cell.source_index == cell.target_index {
+            continue;
+        }
+        let cost = cell.cost.expect("a route, so a cell");
+        assert!(
+            (route.cost - cost).abs() <= 1e-3 * cost.max(1.0),
+            "cell {}->{}: matrix {cost} vs route {}",
+            cell.source_index,
+            cell.target_index,
+            route.cost
+        );
+    }
+
+    // Edge ids left out: the same cells otherwise.
+    let mut bare = overlaid.clone();
+    bare.include_edge_ids = false;
+    let bare = compact.matrix(bare);
+    assert!(bare.cells.iter().all(|cell| cell.edge_ids.is_empty()));
+    for (bare, full) in bare.cells.iter().zip(&actual.cells) {
+        assert_eq!(
+            *bare,
+            crate::RouteMatrixCell {
+                edge_ids: Vec::new(),
+                ..full.clone()
+            }
+        );
+    }
+
+    // Overlays out of their window or for another profile do nothing.
+    let mut expired = overlaid.clone();
+    for overlay in &mut expired.overlays {
+        overlay.valid_to_ms = Some(1_000);
+    }
+    expired.departure_at_ms = Some(2_000);
+    assert_eq!(compact.matrix(expired).cells, plain.cells);
+    let mut on_foot = overlaid.clone();
+    for overlay in &mut on_foot.overlays {
+        overlay.profiles = vec![MobilityProfile::OnFoot];
+    }
+    assert_eq!(compact.matrix(on_foot).cells, plain.cells);
+
+    // Isochrones.
+    let mut isochrone = grid_isochrone_request(profile, [20.0, 45.0, 90.0]);
+    let mut projected_isochrone = isochrone.clone();
+    grid_overlay_options(&compact, &mut projected_isochrone.options);
+    isochrone.overlays = grid_overlays();
+    let actual_isochrone = compact.isochrone(isochrone.clone()).unwrap();
+    assert_eq!(
+        actual_isochrone,
+        compact.isochrone(projected_isochrone).unwrap()
+    );
+    assert_ne!(
+        actual_isochrone.buckets,
+        compact
+            .isochrone(grid_isochrone_request(profile, [20.0, 45.0, 90.0]))
+            .unwrap()
+            .buckets
+    );
+    isochrone.include_edge_ids = false;
+    let bare = compact.isochrone(isochrone).unwrap();
+    for (bare, full) in bare.buckets.iter().zip(&actual_isochrone.buckets) {
+        assert!(!full.edge_ids.is_empty());
+        assert_eq!(
+            *bare,
+            crate::RouteIsochroneBucket {
+                edge_ids: Vec::new(),
+                ..full.clone()
+            }
+        );
+    }
+
+    // Nearest: the cheapest cells of the overlaid matrix.
+    let targets = grid_lattice();
+    for k in [1, 4] {
+        let mut nearest = crate::NearestRequest::new(points[2], targets.clone(), k, profile);
+        nearest.options.max_correlation_distance_m = 60;
+        nearest.overlays = grid_overlays();
+        let mut row = crate::RouteMatrixRequest::new(vec![points[2]], targets.clone(), profile);
+        row.options = projected.options.clone();
+        let row = compact.matrix(row);
+        let mut expected = row
+            .cells
+            .iter()
+            .filter_map(|cell| Some((cell.cost?, cell.target_index, cell.edge_ids.clone())))
+            .collect::<Vec<_>>();
+        expected.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        expected.truncate(k);
+        let hits = compact.nearest(nearest.clone()).unwrap().hits;
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.target_index, hit.edge_ids.clone()))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|(_, target, edges)| (*target, edges.clone()))
+                .collect::<Vec<_>>(),
+            "k={k}"
+        );
+        nearest.include_edge_ids = false;
+        let bare = compact.nearest(nearest).unwrap().hits;
+        assert_eq!(bare.len(), hits.len());
+        assert!(bare.iter().all(|hit| hit.edge_ids.is_empty()));
+    }
+
+    // Overlays are checked as a route's are.
+    let mut invalid = overlaid;
+    invalid.overlays[0].points.truncate(1);
+    assert_eq!(
+        invalid.validate(),
+        Err(crate::RouteError::InvalidRequest {
+            reason: "overlay geometry"
+        })
+    );
+    let mut invalid_isochrone = grid_isochrone_request(profile, [20.0, 45.0, 90.0]);
+    invalid_isochrone.overlays = invalid.overlays.clone();
+    assert!(matches!(
+        compact.isochrone(invalid_isochrone),
+        Err(crate::RouteError::InvalidRequest { .. })
+    ));
+    let mut invalid_nearest = crate::NearestRequest::new(points[2], targets, 1, profile);
+    invalid_nearest.overlays = invalid.overlays;
+    assert!(matches!(
+        compact.nearest(invalid_nearest),
+        Err(crate::RouteError::InvalidRequest { .. })
+    ));
+}
