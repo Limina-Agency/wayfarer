@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RouteWorkflowResult",
-  "description": "The engine's route (its fields at the top level of the JSON) with the\nsource it ran on and what the service added to the request.",
+  "description": "The engine's route (its fields at the top level of the JSON) with the\nsource it ran on and what the service added to the request.\n\nWith an `include` list, the parts it leaves out are empty, and its JSON\nhas no `costBreakdown` in edge attributions unless the list names it\n(the Rust result keeps them).",
   "type": "object",
   "properties": {
     "alternatives": {
@@ -49,11 +49,33 @@
         "$ref": "#/$defs/RouteExplanation"
       }
     },
+    "geojson": {
+      "description": "`geometry` as a GeoJSON `LineString`, when the request asks for\n`geometryFormat: \"geojson\"`; `geometry` is then empty.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GeoJsonLineString"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "geometry": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/GeoPoint"
       }
+    },
+    "include": {
+      "description": "The request's `include` list, when it has one.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/RouteResultPart"
+      },
+      "uniqueItems": true
     },
     "locationMatches": {
       "description": "How each of the request's locations snapped onto the road network,\nfrom the leg arriving at it and the leg leaving it.",
@@ -119,6 +141,13 @@
         }
       ]
     },
+    "polyline6": {
+      "description": "`geometry` as an encoded polyline at precision 6, when the request\nasks for `geometryFormat: \"polyline6\"`; `geometry` is then empty.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "qualifiedAccess": {
       "description": "Qualified legal access along every routed leg, in route order (see\n`LegResult::qualified_access`).",
       "type": "array",
@@ -145,6 +174,16 @@
           "type": "null"
         }
       ]
+    },
+    "segmentSummaries": {
+      "description": "Each leg in brief, when `include` leaves out `segments`.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/RouteSegmentSummary"
+      }
     },
     "segments": {
       "description": "One per leg, in order: a routed leg's full single-leg result, or a\ndirect leg.",
@@ -466,6 +505,17 @@
           "type": "number",
           "format": "double"
         },
+        "geojson": {
+          "description": "`geometry` as a GeoJSON `LineString`, when the request asks for\n`geometryFormat: \"geojson\"`; `geometry` is then empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoJsonLineString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "geometry": {
           "description": "Densified great-circle vertices, origin first and destination last.",
           "type": "array",
@@ -476,6 +526,13 @@
         "maneuver": {
           "description": "The single maneuver covering the whole leg.",
           "$ref": "#/$defs/RouteManeuver"
+        },
+        "polyline6": {
+          "description": "`geometry` as an encoded polyline at precision 6, when the request\nasks for `geometryFormat: \"polyline6\"`; `geometry` is then empty.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -483,6 +540,38 @@
         "distanceM",
         "durationS",
         "maneuver"
+      ]
+    },
+    "GeoJsonLineString": {
+      "description": "A GeoJSON `LineString` geometry (RFC 7946): `[longitude, latitude]`\npositions, rounded to 6 decimals.",
+      "type": "object",
+      "properties": {
+        "coordinates": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/GeoJsonLineStringType"
+        }
+      },
+      "required": [
+        "type",
+        "coordinates"
+      ]
+    },
+    "GeoJsonLineStringType": {
+      "description": "The type member of a GeoJSON geometry; always `LineString` here.",
+      "type": "string",
+      "enum": [
+        "LineString"
       ]
     },
     "GeoPoint": {
@@ -556,6 +645,17 @@
             "minimum": 0
           }
         },
+        "geojson": {
+          "description": "`geometry` as a GeoJSON `LineString`, when the request asks for\n`geometryFormat: \"geojson\"`; `geometry` is then empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoJsonLineString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "geometry": {
           "type": "array",
           "items": {
@@ -612,6 +712,13 @@
             "topSpeedKph": null,
             "warningEdgeCount": 0
           }
+        },
+        "polyline6": {
+          "description": "`geometry` as an encoded polyline at precision 6, when the request\nasks for `geometryFormat: \"polyline6\"`; `geometry` is then empty.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "qualifiedAccess": {
           "description": "Where the route's legal access is qualified (`destination`,\n`permissive`, …), on every route (see `crate::sar`).",
@@ -865,6 +972,17 @@
             "minimum": 0
           }
         },
+        "geojson": {
+          "description": "`geometry` as a GeoJSON `LineString`, when the request asks for\n`geometryFormat: \"geojson\"`; `geometry` is then empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoJsonLineString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "geometry": {
           "type": "array",
           "items": {
@@ -885,6 +1003,13 @@
           "items": {
             "$ref": "#/$defs/RouteManeuver"
           }
+        },
+        "polyline6": {
+          "description": "`geometry` as an encoded polyline at precision 6, when the request\nasks for `geometryFormat: \"polyline6\"`; `geometry` is then empty.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "qualityReasons": {
           "type": "array",
@@ -1622,6 +1747,7 @@
           "default": null
         },
         "costBreakdown": {
+          "description": "Left out of a service route's JSON when its `include` list does not\nname `costBreakdown`.",
           "$ref": "#/$defs/RouteCostBreakdown",
           "default": {
             "accessRestrictionPenalty": 1.0,
@@ -1698,6 +1824,16 @@
         },
         "hasWarningOverlay": {
           "type": "boolean"
+        },
+        "inclinePercent": {
+          "description": "The way's OSM `incline` in percent, positive uphill in the direction\nof travel; absent where the way has none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128
         },
         "inferredSpeedKph": {
           "type": [
@@ -1995,8 +2131,7 @@
         "distanceM",
         "durationS",
         "junctionDelayS",
-        "traversalDirection",
-        "costBreakdown"
+        "traversalDirection"
       ]
     },
     "RouteEdgeRange": {
@@ -2163,11 +2298,29 @@
             "$ref": "#/$defs/RouteEdgeAttribution"
           }
         },
+        "geojson": {
+          "description": "`geometry` as a GeoJSON `LineString`, when the request asks for\n`geometryFormat: \"geojson\"`; `geometry` is then empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoJsonLineString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "geometry": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/GeoPoint"
           }
+        },
+        "polyline6": {
+          "description": "`geometry` as an encoded polyline at precision 6, when the request\nasks for `geometryFormat: \"polyline6\"`; `geometry` is then empty.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "shapeSegments": {
           "type": "array",
@@ -2183,6 +2336,13 @@
         "geometry",
         "edges",
         "shapeSegments"
+      ]
+    },
+    "RouteLegMode": {
+      "type": "string",
+      "enum": [
+        "routed",
+        "direct"
       ]
     },
     "RouteLocationMatch": {
@@ -3162,6 +3322,41 @@
         "turnPenaltyTotal"
       ]
     },
+    "RouteResultPart": {
+      "description": "An optional part of a route result, named in a request's `include`.",
+      "oneOf": [
+        {
+          "description": "`segments`: each leg's full single-leg result. Left out, `segments`\nis empty and `segmentSummaries` has each leg's distance, duration and\ncost.",
+          "type": "string",
+          "const": "segments"
+        },
+        {
+          "description": "The `legs` of each segment and alternative: their geometry, edges\nand shape segments split at waypoints.",
+          "type": "string",
+          "const": "legs"
+        },
+        {
+          "description": "`edgeAttributions`, and every leg's `edges`.",
+          "type": "string",
+          "const": "edgeAttributions"
+        },
+        {
+          "description": "The `costBreakdown` of every edge attribution that is kept.",
+          "type": "string",
+          "const": "costBreakdown"
+        },
+        {
+          "description": "`shapeSegments`, and every leg's `shapeSegments`.",
+          "type": "string",
+          "const": "shapeSegments"
+        },
+        {
+          "description": "`recosts`, and each segment's.",
+          "type": "string",
+          "const": "recosts"
+        }
+      ]
+    },
     "RouteSarPolicy": {
       "description": "The effective SAR surcharges of a request (`RoutePolicySummary::sar`).",
       "type": "object",
@@ -3444,6 +3639,33 @@
       "required": [
         "routeSegmentIndex",
         "segment"
+      ]
+    },
+    "RouteSegmentSummary": {
+      "description": "One leg of a route in brief, for a result without `segments`.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "mode": {
+          "$ref": "#/$defs/RouteLegMode"
+        }
+      },
+      "required": [
+        "mode",
+        "distanceM",
+        "durationS",
+        "cost"
       ]
     },
     "RouteShapeDynamicOverlay": {

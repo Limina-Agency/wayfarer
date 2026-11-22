@@ -2,18 +2,21 @@
 //! routing package, from flags or from the request JSON the C ABI takes
 //! (`--request`), with the result as JSON (or GeoJSON) on stdout.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 use wayfarer::{
-    GeoPoint, MapMatchRequest, MobilityProfile, RouteIsochroneContour, RouteIsochroneMetric,
-    RouteIsochroneRequest, RouteMatrixRequest, RouteRequest, RoutingEngine, SnapRequest,
+    GeoPoint, GeometryFormat, MapMatchRequest, MobilityProfile, RouteIsochroneContour,
+    RouteIsochroneMetric, RouteIsochroneRequest, RouteMatrixRequest, RouteRequest, RoutingEngine,
+    SnapRequest,
 };
+use wayfarer_service::geojson::route_feature_collection;
 use wayfarer_service::{
-    RouteWorkflowRequest, RouteWorkflowResult, RouteWorkflowSourceContext, RoutingSourceId,
+    RouteResultPart, RouteWorkflowRequest, RouteWorkflowSourceContext, RoutingSourceId,
     compile_route_workflow,
 };
 
@@ -105,11 +108,43 @@ pub(crate) struct RouteArgs {
     /// locations) instead of the route JSON.
     #[arg(long)]
     geojson: bool,
+    /// How the route JSON carries its geometry: points, polyline6 or geojson
+    /// (overrides the request's `geometryFormat`).
+    #[arg(long, value_name = "FORMAT", value_parser = parse_geometry_format)]
+    geometry_format: Option<GeometryFormat>,
+    /// The optional parts of the route JSON to keep, comma-separated
+    /// (segments, legs, edgeAttributions, costBreakdown, shapeSegments,
+    /// recosts; empty for the core alone); overrides the request's
+    /// `include`. Without it, everything.
+    #[arg(long, value_name = "PARTS", value_parser = parse_include)]
+    include: Option<BTreeSet<RouteResultPart>>,
+}
+
+/// A geometry format by its JSON name.
+fn parse_geometry_format(text: &str) -> Result<GeometryFormat, String> {
+    serde_json::from_value(Value::String(text.to_string()))
+        .map_err(|_| format!("unknown geometry format `{text}` (points, polyline6, geojson)"))
+}
+
+/// Comma-separated result parts by their JSON names.
+fn parse_include(text: &str) -> Result<BTreeSet<RouteResultPart>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            serde_json::from_value(Value::String(part.to_string())).map_err(|_| {
+                format!(
+                    "unknown result part `{part}` (segments, legs, edgeAttributions, \
+                     costBreakdown, shapeSegments, recosts)"
+                )
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn route(args: RouteArgs) -> Result<(), Failure> {
     let engine = args.common.engine()?;
-    let request = match args.common.request::<RouteWorkflowRequest>()? {
+    let mut request = match args.common.request::<RouteWorkflowRequest>()? {
         Some(request) => request,
         None => {
             let points = args
@@ -120,6 +155,12 @@ pub(crate) fn route(args: RouteArgs) -> Result<(), Failure> {
             RouteRequest::through(points, args.common.profile).into()
         }
     };
+    if let Some(format) = args.geometry_format {
+        request.route.geometry_format = format;
+    }
+    if let Some(include) = args.include {
+        request.include = Some(include);
+    }
     let package = engine.package();
     let source = RouteWorkflowSourceContext {
         source_id: RoutingSourceId::new(package.graph_id())
@@ -131,42 +172,12 @@ pub(crate) fn route(args: RouteArgs) -> Result<(), Failure> {
     let result = compile_route_workflow(&engine, source, request)
         .map_err(|error| Failure::new(error.to_string()))?;
     if args.geojson {
-        print_json(&route_geojson(&result))
+        let collection = route_feature_collection(&result)
+            .map_err(|error| Failure::new(format!("route geometry: {error}")))?;
+        print_json(&collection)
     } else {
         print_json(&result)
     }
-}
-
-fn coordinates(point: GeoPoint) -> Value {
-    json!([point.lng, point.lat])
-}
-
-/// The route's line and its locations as GeoJSON (longitude first).
-fn route_geojson(result: &RouteWorkflowResult) -> Value {
-    let route = &result.route;
-    let mut features = vec![json!({
-        "type": "Feature",
-        "geometry": {
-            "type": "LineString",
-            "coordinates": route.geometry.iter().copied().map(coordinates).collect::<Vec<_>>(),
-        },
-        "properties": {
-            "distanceM": route.distance_m,
-            "durationS": route.duration_s,
-            "cost": route.cost,
-            "legs": route.segments.len(),
-        },
-    })];
-    for (index, matched) in route.location_matches.iter().enumerate() {
-        if let Some(location) = matched.preferred() {
-            features.push(json!({
-                "type": "Feature",
-                "geometry": { "type": "Point", "coordinates": coordinates(location.snapped_point) },
-                "properties": { "location": index, "edgeId": location.edge_id, "snapDistanceM": location.distance_m },
-            }));
-        }
-    }
-    json!({ "type": "FeatureCollection", "features": features })
 }
 
 /// Distances and durations from every `--source` to every `--target`.

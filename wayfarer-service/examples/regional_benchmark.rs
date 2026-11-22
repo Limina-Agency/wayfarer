@@ -346,6 +346,7 @@ fn percentile(values: &mut [f64], percentile: f64) -> Option<f64> {
 
 fn navigation_progress_bench(case: &Case, route: &Response) -> Value {
     let input = RouteNavigationInput {
+        polyline6: None,
         geometry: route.geometry.clone(),
         maneuvers: route.maneuvers.clone(),
         shape_segments: Vec::new(),

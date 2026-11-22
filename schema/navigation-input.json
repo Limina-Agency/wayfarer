@@ -18,7 +18,9 @@
       "format": "double"
     },
     "geometry": {
+      "description": "The route's points; or empty, with `polyline6`.",
       "type": "array",
+      "default": [],
       "items": {
         "$ref": "#/$defs/GeoPoint"
       }
@@ -29,6 +31,13 @@
       "items": {
         "$ref": "#/$defs/RouteManeuver"
       }
+    },
+    "polyline6": {
+      "description": "The route's points as an encoded polyline at precision 6 (as a route\nwith `geometryFormat: \"polyline6\"` returns it), in place of\n`geometry`.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "shapeSegmentDurationsSeconds": {
       "description": "The duration of each of `shape_segments`, for the remaining duration;\nwithout them it is the total duration in proportion to distance.",
@@ -46,9 +55,6 @@
       }
     }
   },
-  "required": [
-    "geometry"
-  ],
   "$defs": {
     "GeoPoint": {
       "type": "object",

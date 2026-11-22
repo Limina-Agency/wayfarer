@@ -433,6 +433,55 @@ fn navigation_progress_follows_a_prepared_route() {
     unsafe { wayfarer_navigation_route_free(ptr::null_mut()) };
 }
 
+/// `geometryFormat` and `include` through the C ABI, and navigation from
+/// the lean route as it came back.
+#[test]
+fn lean_routes_encode_geometry_and_still_navigate() {
+    let package = open();
+    let lean = ROUTE.replace(
+        r#""profile": "wheeled""#,
+        r#""profile": "wheeled", "geometryFormat": "polyline6", "include": []"#,
+    );
+    let (status, route) = call(wayfarer_route, package, &lean);
+    assert_eq!(status, WAYFARER_OK, "{route}");
+    assert_eq!(route["geometry"], serde_json::json!([]));
+    assert_eq!(route["segments"], serde_json::json!([]));
+    assert_eq!(route["edgeAttributions"], serde_json::json!([]));
+    assert_eq!(route["include"], serde_json::json!([]));
+    assert_eq!(route["segmentSummaries"][0]["mode"], "routed");
+    let points = wayfarer::decode_polyline6(route["polyline6"].as_str().unwrap()).unwrap();
+    assert!(points.len() >= 2);
+    let (status, error) = call(
+        wayfarer_route,
+        package,
+        &ROUTE.replace(
+            r#""profile": "wheeled""#,
+            r#""profile": "wheeled", "include": ["nope"]"#,
+        ),
+    );
+    assert_eq!(status, WAYFARER_INVALID_ARGUMENT, "{error}");
+    unsafe { wayfarer_close(package) };
+
+    let (status, prepared, info) = prepare(&serde_json::json!({ "route": route }).to_string());
+    assert_eq!(status, WAYFARER_OK, "{info}");
+    assert_eq!(info["geometryPointCount"], points.len());
+    let (status, first) = progress(
+        prepared,
+        r#"{"sample": {"position": {"lat": 52.0, "lng": 21.0006}, "sampledAtMs": 1000}}"#,
+    );
+    assert_eq!(status, WAYFARER_OK, "{first}");
+    assert_eq!(first["status"], "on_route");
+    unsafe { wayfarer_navigation_route_free(prepared) };
+
+    let (status, prepared, info) =
+        prepare(&serde_json::json!({ "input": { "polyline6": route["polyline6"] } }).to_string());
+    assert_eq!(status, WAYFARER_OK, "{info}");
+    unsafe { wayfarer_navigation_route_free(prepared) };
+    let (status, prepared, error) = prepare(r#"{"input": {"polyline6": "_izlh"}}"#);
+    assert_eq!(status, WAYFARER_INVALID_ARGUMENT, "{error}");
+    assert!(prepared.is_null());
+}
+
 /// SAR through the C ABI: the package info lists what is available and the
 /// minimum factors, an invalid surcharge is an invalid argument, and R1, R2,
 /// R3 and R5 route with their report; qualified access is on every route.

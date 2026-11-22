@@ -128,6 +128,8 @@ pub(crate) fn build_route_result(
         distance_m: route.distance_m,
         duration_s: route.duration_s,
         geometry: geometry.clone(),
+        polyline6: None,
+        geojson: None,
         edges,
         shape_segments,
     };
@@ -147,6 +149,8 @@ pub(crate) fn build_route_result(
         cost: route.cost,
         duration_s: route.duration_s,
         geometry,
+        polyline6: None,
+        geojson: None,
         legs: vec![leg],
         maneuvers,
         alternatives: Vec::new(),
@@ -384,6 +388,8 @@ fn build_route_result_from_steps(
         distance_m: route.distance_m,
         duration_s: route.duration_s,
         geometry: geometry.clone(),
+        polyline6: None,
+        geojson: None,
         edges,
         shape_segments,
     };
@@ -403,6 +409,8 @@ fn build_route_result_from_steps(
         cost: route.cost,
         duration_s: route.duration_s,
         geometry,
+        polyline6: None,
+        geojson: None,
         legs: vec![leg],
         maneuvers,
         alternatives: Vec::new(),
@@ -540,6 +548,12 @@ fn edge_attribution(
         opposing_edge_id: record.edge.opposing_edge_id,
         layer: record.shared_info.layer,
         level: record.shared_info.level.as_deref().map(str::to_string),
+        incline_percent: record.shared_info.incline_percent.map(|percent| {
+            match record.edge.traversal_direction {
+                wayfarer_package::TraversalDirection::Forward => percent,
+                wayfarer_package::TraversalDirection::Backward => percent.saturating_neg(),
+            }
+        }),
         destination: record
             .shared_info
             .destination

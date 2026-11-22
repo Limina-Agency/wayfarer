@@ -844,7 +844,7 @@ pub unsafe extern "C" fn wayfarer_navigation_route_new(
                 }
             };
             let info = json!({
-                "geometryPointCount": input.geometry.len(),
+                "geometryPointCount": prepared.geometry().len(),
                 "maneuverCount": input.maneuvers.len(),
             });
             // SAFETY: checked non-null; valid for one write per the contract.

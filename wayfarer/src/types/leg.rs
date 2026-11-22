@@ -49,6 +49,14 @@ pub struct LegResult {
     pub cost: f64,
     pub duration_s: f64,
     pub geometry: Vec<GeoPoint>,
+    /// `geometry` as an encoded polyline at precision 6, when the request
+    /// asks for `geometryFormat: "polyline6"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polyline6: Option<String>,
+    /// `geometry` as a GeoJSON `LineString`, when the request asks for
+    /// `geometryFormat: "geojson"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<GeoJsonLineString>,
     pub legs: Vec<RouteLeg>,
     pub maneuvers: Vec<RouteManeuver>,
     #[serde(default)]
@@ -317,6 +325,14 @@ pub struct RouteAlternative {
     #[serde(default)]
     pub quality_reasons: Vec<String>,
     pub geometry: Vec<GeoPoint>,
+    /// `geometry` as an encoded polyline at precision 6, when the request
+    /// asks for `geometryFormat: "polyline6"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polyline6: Option<String>,
+    /// `geometry` as a GeoJSON `LineString`, when the request asks for
+    /// `geometryFormat: "geojson"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<GeoJsonLineString>,
     pub legs: Vec<RouteLeg>,
     pub maneuvers: Vec<RouteManeuver>,
     pub diagnostics: RouteDiagnostics,
@@ -329,6 +345,14 @@ pub struct RouteLeg {
     pub distance_m: f64,
     pub duration_s: f64,
     pub geometry: Vec<GeoPoint>,
+    /// `geometry` as an encoded polyline at precision 6, when the request
+    /// asks for `geometryFormat: "polyline6"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polyline6: Option<String>,
+    /// `geometry` as a GeoJSON `LineString`, when the request asks for
+    /// `geometryFormat: "geojson"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<GeoJsonLineString>,
     pub edges: Vec<RouteEdgeAttribution>,
     #[serde(default)]
     pub shape_segments: Vec<RouteShapeSegment>,
@@ -461,6 +485,10 @@ pub struct RouteEdgeAttribution {
     pub layer: Option<i16>,
     #[serde(default)]
     pub level: Option<String>,
+    /// The way's OSM `incline` in percent, positive uphill in the direction
+    /// of travel; absent where the way has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incline_percent: Option<i8>,
     #[serde(default)]
     pub destination: Option<String>,
     #[serde(default)]
@@ -513,8 +541,21 @@ pub struct RouteEdgeAttribution {
     #[serde(default)]
     pub junction_delay_s: f64,
     pub traversal_direction: TraversalDirection,
+    /// Left out of a service route's JSON when its `include` list does not
+    /// name `costBreakdown`.
     #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(skip_serializing_if = "omitted_by_include")
+    )]
     pub cost_breakdown: RouteCostBreakdown,
+}
+
+/// For the schema only: the service leaves `costBreakdown` out of a route's
+/// JSON by its `include` list, never the engine.
+#[cfg(feature = "schema")]
+fn omitted_by_include(_: &RouteCostBreakdown) -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

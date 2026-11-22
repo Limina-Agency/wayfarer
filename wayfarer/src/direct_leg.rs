@@ -49,6 +49,14 @@ pub const MAX_DIRECT_LEG_SEGMENT_COUNT: usize = 512;
 pub struct DirectRouteLeg {
     /// Densified great-circle vertices, origin first and destination last.
     pub geometry: Vec<GeoPoint>,
+    /// `geometry` as an encoded polyline at precision 6, when the request
+    /// asks for `geometryFormat: "polyline6"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polyline6: Option<String>,
+    /// `geometry` as a GeoJSON `LineString`, when the request asks for
+    /// `geometryFormat: "geojson"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<crate::GeoJsonLineString>,
     /// Length of `geometry`, summed over its own vertices.
     pub distance_m: f64,
     /// Estimated traverse time at the profile's off-road speed.
@@ -69,6 +77,8 @@ pub fn direct_route_leg(
     let maneuver = direct_leg_maneuver(&geometry, distance_m, duration_s);
     DirectRouteLeg {
         geometry,
+        polyline6: None,
+        geojson: None,
         distance_m,
         duration_s,
         maneuver,

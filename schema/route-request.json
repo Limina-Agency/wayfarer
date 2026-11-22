@@ -12,6 +12,21 @@
       ],
       "format": "int64"
     },
+    "geometryFormat": {
+      "description": "How the result carries its geometry: as `points` (the default), or\nencoded as `polyline6` or `geojson` wherever the result has one\n(the route, each segment, leg, alternative and direct leg), with\n`geometry` left empty there.",
+      "$ref": "#/$defs/GeometryFormat"
+    },
+    "include": {
+      "description": "The optional parts of the result to keep ([`RouteResultPart`]);\nabsent, all of them. `[]` keeps the core alone.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/RouteResultPart"
+      },
+      "uniqueItems": true
+    },
     "legDynamicOverlays": {
       "description": "Dynamic overlays (split edges, connectors) for one routed leg only,\nkeyed by leg index, so a leg's connectors are not exposed to the\nothers' endpoints.",
       "type": "object",
@@ -145,6 +160,26 @@
       "required": [
         "lat",
         "lng"
+      ]
+    },
+    "GeometryFormat": {
+      "description": "How a route result carries its geometry.",
+      "oneOf": [
+        {
+          "description": "`geometry`: an array of `{lat, lng}` points.",
+          "type": "string",
+          "const": "points"
+        },
+        {
+          "description": "`polyline6`: an encoded polyline at precision 6; `geometry` is empty.",
+          "type": "string",
+          "const": "polyline6"
+        },
+        {
+          "description": "`geojson`: a GeoJSON `LineString` (longitude first, 6 decimals);\n`geometry` is empty.",
+          "type": "string",
+          "const": "geojson"
+        }
       ]
     },
     "MobilityProfile": {
@@ -1423,6 +1458,41 @@
         "setVersion",
         "itemId",
         "itemVersion"
+      ]
+    },
+    "RouteResultPart": {
+      "description": "An optional part of a route result, named in a request's `include`.",
+      "oneOf": [
+        {
+          "description": "`segments`: each leg's full single-leg result. Left out, `segments`\nis empty and `segmentSummaries` has each leg's distance, duration and\ncost.",
+          "type": "string",
+          "const": "segments"
+        },
+        {
+          "description": "The `legs` of each segment and alternative: their geometry, edges\nand shape segments split at waypoints.",
+          "type": "string",
+          "const": "legs"
+        },
+        {
+          "description": "`edgeAttributions`, and every leg's `edges`.",
+          "type": "string",
+          "const": "edgeAttributions"
+        },
+        {
+          "description": "The `costBreakdown` of every edge attribution that is kept.",
+          "type": "string",
+          "const": "costBreakdown"
+        },
+        {
+          "description": "`shapeSegments`, and every leg's `shapeSegments`.",
+          "type": "string",
+          "const": "shapeSegments"
+        },
+        {
+          "description": "`recosts`, and each segment's.",
+          "type": "string",
+          "const": "recosts"
+        }
       ]
     },
     "RouteSarOptions": {

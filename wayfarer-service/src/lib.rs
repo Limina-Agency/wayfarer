@@ -55,11 +55,15 @@ use wayfarer::{
     RoutingPackageError, RoutingPackageVerification,
 };
 
+pub mod geojson;
+pub mod include;
 pub mod overlay_set;
 mod source_cache;
 mod workflow;
 
 use source_cache::SourceCache;
+
+pub use include::{RouteResultPart, RouteSegmentSummary};
 
 pub use workflow::{
     MAX_WORKFLOW_MOBILITY_ADJUSTMENTS, MAX_WORKFLOW_OVERLAY_SETS, RouteWorkflowError,
@@ -1037,10 +1041,12 @@ mod tests {
                         overlays: Vec::new(),
                         departure_at_ms: None,
                         leg_dynamic_overlays: Default::default(),
+                        geometry_format: Default::default(),
                     },
                     overlay_provenance: RouteWorkflowOverlayProvenance::default(),
                     mobility: None,
                     overlay_sets: Vec::new(),
+                    include: None,
                 },
             )
             .unwrap();
@@ -1309,6 +1315,7 @@ mod tests {
                         )],
                         departure_at_ms: None,
                         leg_dynamic_overlays: Default::default(),
+                        geometry_format: Default::default(),
                     },
                     overlay_provenance: RouteWorkflowOverlayProvenance {
                         policy_version: Some("request-overlay-v2".to_string()),
@@ -1316,6 +1323,7 @@ mod tests {
                     },
                     mobility: None,
                     overlay_sets: Vec::new(),
+                    include: None,
                 },
             )
             .unwrap();
@@ -1384,10 +1392,12 @@ mod tests {
                         overlays: Vec::new(),
                         departure_at_ms: None,
                         leg_dynamic_overlays: Default::default(),
+                        geometry_format: Default::default(),
                     },
                     overlay_provenance: RouteWorkflowOverlayProvenance::default(),
                     mobility: None,
                     overlay_sets: Vec::new(),
+                    include: None,
                 },
             )
             .unwrap_err();

@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+
+use crate::geometry::{GeoJsonLineString, decode_polyline6};
 use crate::types::{
     GeoPoint, LegResult, RouteManeuver, RouteManeuverKind, RouteShapeDynamicOverlay,
     RouteShapeQualityFlag, RouteShapeSegment,
@@ -69,7 +72,14 @@ impl Default for RouteNavigationProgressOptions {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RouteNavigationInput {
+    /// The route's points; or empty, with `polyline6`.
+    #[serde(default)]
     pub geometry: Vec<GeoPoint>,
+    /// The route's points as an encoded polyline at precision 6 (as a route
+    /// with `geometryFormat: "polyline6"` returns it), in place of
+    /// `geometry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polyline6: Option<String>,
     #[serde(default)]
     pub maneuvers: Vec<RouteManeuver>,
     #[serde(default)]
@@ -108,7 +118,8 @@ impl RouteNavigationInput {
             shape_segment_durations_seconds.push(duration_s);
         }
         Self {
-            geometry: route.geometry.clone(),
+            geometry: carried_points(&route.geometry, route.geojson.as_ref()),
+            polyline6: route.polyline6.clone(),
             maneuvers: route.maneuvers.clone(),
             shape_segments,
             shape_segment_durations_seconds,
@@ -142,13 +153,23 @@ impl RouteNavigationInput {
             shape_offset += leg.geometry.len().saturating_sub(1);
         }
         Self {
-            geometry: route.geometry.clone(),
+            geometry: carried_points(&route.geometry, route.geojson.as_ref()),
+            polyline6: route.polyline6.clone(),
             maneuvers: route.maneuvers.clone(),
             shape_segments,
             shape_segment_durations_seconds,
             distance_meters: Some(route.distance_m),
             duration_seconds: Some(route.duration_s),
         }
+    }
+}
+
+/// A route's points, from its GeoJSON when they were moved there (a polyline
+/// is carried as it is, and decoded when the route is prepared).
+fn carried_points(geometry: &[GeoPoint], geojson: Option<&GeoJsonLineString>) -> Vec<GeoPoint> {
+    match geojson {
+        Some(line) if geometry.is_empty() => line.to_points(),
+        _ => geometry.to_vec(),
     }
 }
 
@@ -287,6 +308,8 @@ pub fn evaluate_route_navigation_progress(
 /// geometry, so each sample is snapped and timed without rebuilding them.
 pub struct PreparedNavigationRoute<'a> {
     input: &'a RouteNavigationInput,
+    /// `input.geometry`, or its decoded `polyline6`.
+    geometry: Cow<'a, [GeoPoint]>,
     cumulative_distances: Vec<f64>,
     total_distance_m: f64,
     /// Seconds from each shape index to the end of the route.
@@ -303,7 +326,15 @@ struct Carry {
 
 impl<'a> PreparedNavigationRoute<'a> {
     pub fn new(input: &'a RouteNavigationInput) -> Result<Self, String> {
-        let geometry = &input.geometry;
+        let geometry = match &input.polyline6 {
+            None => Cow::Borrowed(input.geometry.as_slice()),
+            Some(_) if !input.geometry.is_empty() => {
+                return Err("route has both geometry and polyline6; give one".to_string());
+            }
+            Some(encoded) => Cow::Owned(
+                decode_polyline6(encoded).map_err(|error| format!("route polyline6: {error}"))?,
+            ),
+        };
         if geometry.len() < 2 {
             return Err("route geometry must contain at least two points".to_string());
         }
@@ -334,11 +365,17 @@ impl<'a> PreparedNavigationRoute<'a> {
             .collect();
         Ok(Self {
             input,
+            geometry,
             cumulative_distances,
             total_distance_m: total,
             remaining_seconds,
             maneuver_distances,
         })
+    }
+
+    /// The route's points (decoded from `polyline6` when it came so).
+    pub fn geometry(&self) -> &[GeoPoint] {
+        &self.geometry
     }
 
     /// Progress for `sample`, following the route from `previous` (the last
@@ -498,7 +535,7 @@ impl<'a> PreparedNavigationRoute<'a> {
         previous_distance_along_m: Option<f64>,
         off_route_threshold_m: f64,
     ) -> Result<Snaps, String> {
-        let geometry = &self.input.geometry;
+        let geometry = &self.geometry;
         let point = sample.position;
         let meters_per_lat = 111_320.0;
         let meters_per_lng = 111_320.0 * point.lat.to_radians().cos().abs().max(0.01);
@@ -905,6 +942,7 @@ mod tests {
 
     fn route_input() -> RouteNavigationInput {
         RouteNavigationInput {
+            polyline6: None,
             geometry: vec![point(20.0), point(20.001), point(20.002)],
             maneuvers: vec![
                 maneuver(RouteManeuverKind::Start, 0, "Start"),
@@ -1189,6 +1227,7 @@ mod tests {
             20.0, 20.001, 20.002, 20.003, 20.004, 20.003, 20.002, 20.001, 20.0,
         ];
         RouteNavigationInput {
+            polyline6: None,
             geometry: lngs.iter().map(|lng| point(*lng)).collect(),
             maneuvers: vec![
                 maneuver(RouteManeuverKind::Start, 0, "Start"),
@@ -1267,6 +1306,7 @@ mod tests {
     fn progress_rejoins_the_route_away_from_the_window() {
         // East 143 m, then north 890 m.
         let input = RouteNavigationInput {
+            polyline6: None,
             geometry: vec![
                 point(20.0),
                 point(20.002),

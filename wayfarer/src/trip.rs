@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::direct_leg::{DirectRouteLeg, direct_route_leg};
+use crate::geometry::{
+    GeoJsonLineString, GeometryFormat, PolylineError, decode_polyline6, encode_into,
+};
 use crate::overlay::project_route_overlay_geometry;
 use crate::sar::{RouteQualifiedAccess, RouteSarReport};
 use crate::{
@@ -198,6 +201,8 @@ impl RouteSegment {
         }
     }
 
+    /// The leg's points; empty when the request asked for an encoded
+    /// `geometryFormat`.
     pub fn geometry(&self) -> &[GeoPoint] {
         match self {
             Self::Routed(route) => &route.geometry,
@@ -205,21 +210,24 @@ impl RouteSegment {
         }
     }
 
-    fn distance_m(&self) -> f64 {
+    /// The leg's length.
+    pub fn distance_m(&self) -> f64 {
         match self {
             Self::Routed(route) => route.distance_m,
             Self::Direct(leg) => leg.distance_m,
         }
     }
 
-    fn duration_s(&self) -> f64 {
+    /// The leg's travel time.
+    pub fn duration_s(&self) -> f64 {
         match self {
             Self::Routed(route) => route.duration_s,
             Self::Direct(leg) => leg.duration_s,
         }
     }
 
-    fn cost(&self) -> f64 {
+    /// The leg's cost (a direct leg's is its duration).
+    pub fn cost(&self) -> f64 {
         match self {
             Self::Routed(route) => route.cost,
             Self::Direct(leg) => leg.duration_s,
@@ -333,6 +341,14 @@ pub struct RouteResult {
     pub location_matches: Vec<RouteLocationMatch>,
     pub edge_ids: Vec<u64>,
     pub geometry: Vec<GeoPoint>,
+    /// `geometry` as an encoded polyline at precision 6, when the request
+    /// asks for `geometryFormat: "polyline6"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polyline6: Option<String>,
+    /// `geometry` as a GeoJSON `LineString`, when the request asks for
+    /// `geometryFormat: "geojson"`; `geometry` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<GeoJsonLineString>,
     pub distance_m: f64,
     pub duration_s: f64,
     pub cost: f64,
@@ -361,6 +377,18 @@ pub struct RouteResult {
     /// The SAR relaxations the routed legs used, merged; SAR requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sar: Option<RouteSarReport>,
+}
+
+impl RouteResult {
+    /// The route's points: `geometry`, or decoded from the `polyline6` or
+    /// `geojson` that replaced it.
+    pub fn points(&self) -> Result<Vec<GeoPoint>, PolylineError> {
+        match (&self.polyline6, &self.geojson) {
+            (Some(encoded), _) if self.geometry.is_empty() => decode_polyline6(encoded),
+            (None, Some(line)) if self.geometry.is_empty() => Ok(line.to_points()),
+            _ => Ok(self.geometry.clone()),
+        }
+    }
 }
 
 /// One overlay the route crosses.
@@ -443,6 +471,12 @@ pub struct RouteRequest {
     /// others' endpoints.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub leg_dynamic_overlays: BTreeMap<usize, RouteDynamicOverlay>,
+    /// How the result carries its geometry: as `points` (the default), or
+    /// encoded as `polyline6` or `geojson` wherever the result has one
+    /// (the route, each segment, leg, alternative and direct leg), with
+    /// `geometry` left empty there.
+    #[serde(default, skip_serializing_if = "GeometryFormat::is_points")]
+    pub geometry_format: GeometryFormat,
 }
 
 impl RouteRequest {
@@ -462,6 +496,7 @@ impl RouteRequest {
             overlays: Vec::new(),
             departure_at_ms: None,
             leg_dynamic_overlays: BTreeMap::new(),
+            geometry_format: GeometryFormat::Points,
         }
     }
 
@@ -498,6 +533,7 @@ pub(crate) fn route(
 ) -> Result<RouteResult, RouteFailure> {
     validate_request(&request)?;
     validate_sar(engine, &request.options, request.profile)?;
+    let geometry_format = request.geometry_format;
     let leg_count = request.locations.len() - 1;
     let legs = (0..leg_count)
         .map(|index| request.leg_mode(index))
@@ -629,6 +665,7 @@ pub(crate) fn route(
             ending_within_route,
         }
     });
+    encode_geometry(&mut result, geometry_format);
     Ok(result)
 }
 
@@ -1192,6 +1229,8 @@ fn assemble_result(
         location_matches,
         edge_ids,
         geometry,
+        polyline6: None,
+        geojson: None,
         distance_m,
         duration_s,
         cost,
@@ -1209,6 +1248,73 @@ fn assemble_result(
         qualified_access,
         sar,
     })
+}
+
+/// Moves every geometry of `result` into its `format` encoding, last, once
+/// nothing reads the points any more. Shape indexes stay valid: the
+/// encodings keep every vertex.
+fn encode_geometry(result: &mut RouteResult, format: GeometryFormat) {
+    if format.is_points() {
+        return;
+    }
+    fn alternative(format: GeometryFormat, alternative: &mut RouteAlternative) {
+        encode_into(
+            format,
+            &mut alternative.geometry,
+            &mut alternative.polyline6,
+            &mut alternative.geojson,
+        );
+        for leg in &mut alternative.legs {
+            encode_into(
+                format,
+                &mut leg.geometry,
+                &mut leg.polyline6,
+                &mut leg.geojson,
+            );
+        }
+    }
+    encode_into(
+        format,
+        &mut result.geometry,
+        &mut result.polyline6,
+        &mut result.geojson,
+    );
+    for segment in &mut result.segments {
+        match segment {
+            RouteSegment::Routed(route) => {
+                encode_into(
+                    format,
+                    &mut route.geometry,
+                    &mut route.polyline6,
+                    &mut route.geojson,
+                );
+                for leg in &mut route.legs {
+                    encode_into(
+                        format,
+                        &mut leg.geometry,
+                        &mut leg.polyline6,
+                        &mut leg.geojson,
+                    );
+                }
+                for each in &mut route.alternatives {
+                    alternative(format, each);
+                }
+            }
+            RouteSegment::Direct(leg) => {
+                encode_into(
+                    format,
+                    &mut leg.geometry,
+                    &mut leg.polyline6,
+                    &mut leg.geojson,
+                );
+            }
+        }
+    }
+    if let RouteAlternatives::Computed(alternatives) = &mut result.alternatives {
+        for each in alternatives {
+            alternative(format, each);
+        }
+    }
 }
 
 /// Turns a non-final leg's destination maneuver into the arrival at waypoint
