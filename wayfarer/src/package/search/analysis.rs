@@ -492,20 +492,74 @@ pub(crate) struct MatrixCell {
     pub budget_exceeded: bool,
 }
 
-/// One isochrone contour: a limit on cost or on duration.
+/// One isochrone contour: a limit on cost, duration or distance.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnalysisContour {
     pub limit: f64,
-    pub on_duration: bool,
+    pub metric: ContourMetric,
 }
 
-/// An edge reached within some contour, with the least cost and the least
-/// duration at its end over every relaxation that reached it.
+/// What an isochrone contour limits. Labels are ordered by cost whatever
+/// the metric: a duration or distance is the one along the cheapest path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContourMetric {
+    Cost,
+    Duration,
+    Distance,
+}
+
+impl ContourMetric {
+    /// This metric's value among a label's three.
+    pub(crate) fn of<T>(self, cost: T, duration_s: T, distance_m: T) -> T {
+        match self {
+            Self::Cost => cost,
+            Self::Duration => duration_s,
+            Self::Distance => distance_m,
+        }
+    }
+}
+
+/// How far an isochrone's contours reach, per metric (0: no contour).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ContourReach {
+    cost: f64,
+    duration_s: f64,
+    distance_m: f64,
+}
+
+impl ContourReach {
+    pub(crate) fn of(contours: &[AnalysisContour]) -> Self {
+        let max = |metric| {
+            contours
+                .iter()
+                .filter(|contour| contour.metric == metric)
+                .map(|contour| contour.limit)
+                .fold(0.0, f64::max)
+        };
+        Self {
+            cost: max(ContourMetric::Cost),
+            duration_s: max(ContourMetric::Duration),
+            distance_m: max(ContourMetric::Distance),
+        }
+    }
+
+    /// Whether a label at these metrics is within some contour.
+    pub(crate) fn within(&self, cost: f64, duration_s: f64, distance_m: f64) -> bool {
+        (self.cost > 0.0 && cost <= self.cost)
+            || (self.duration_s > 0.0 && duration_s <= self.duration_s)
+            || (self.distance_m > 0.0 && distance_m <= self.distance_m)
+    }
+}
+
+/// An edge reached within some contour, with the least cost, the least
+/// duration and the least distance at its end over every relaxation that
+/// reached it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReachedEdge {
     pub edge: u32,
     pub cost: f64,
     pub duration_s: f64,
+    pub distance_m: f64,
 }
 
 /// Where contour `contour` crosses a relaxed edge: the edge is reached from
@@ -1318,15 +1372,15 @@ fn matrix_row_with(
     row
 }
 
-/// Records that `edge` was reached at (`cost`, `duration_s`), keeping the least
-/// of each. `edge_aux` maps a reached edge to its entry; every reached edge is
-/// also labelled, so the state's touched list resets it.
+/// Records that `edge` was reached at (`cost`, `duration_s`, `distance_m`),
+/// keeping the least of each. `edge_aux` maps a reached edge to its entry;
+/// every reached edge is also labelled, so the state's touched list resets
+/// it.
 fn reach(
     state: &mut SearchState,
     reached: &mut Vec<ReachedEdge>,
     edge: u32,
-    cost: f64,
-    duration_s: f64,
+    (cost, duration_s, distance_m): (f64, f64, f64),
 ) {
     let slot = state.edge_aux.get_mut(edge);
     if *slot == NO_LABEL {
@@ -1335,11 +1389,13 @@ fn reach(
             edge,
             cost,
             duration_s,
+            distance_m,
         });
     } else {
         let entry = &mut reached[*slot as usize];
         entry.cost = entry.cost.min(cost);
         entry.duration_s = entry.duration_s.min(duration_s);
+        entry.distance_m = entry.distance_m.min(distance_m);
     }
 }
 
@@ -1352,18 +1408,9 @@ pub(crate) fn isochrone(
     origins: &[AnalysisPoint],
     contours: &[AnalysisContour],
 ) -> IsochroneOutcome {
-    let max_cost = contours
-        .iter()
-        .filter(|contour| !contour.on_duration)
-        .map(|contour| contour.limit)
-        .fold(0.0, f64::max);
-    let max_duration = contours
-        .iter()
-        .filter(|contour| contour.on_duration)
-        .map(|contour| contour.limit)
-        .fold(0.0, f64::max);
-    let within = |cost: f64, duration_s: f64| {
-        (max_cost > 0.0 && cost <= max_cost) || (max_duration > 0.0 && duration_s <= max_duration)
+    let contour_reach = ContourReach::of(contours);
+    let within = |cost: f64, duration_s: f64, distance_m: f64| {
+        contour_reach.within(cost, duration_s, distance_m)
     };
     state.edge_aux.ensure_len(state.edge_label.capacity());
     let mut search = Expansion {
@@ -1377,14 +1424,11 @@ pub(crate) fn isochrone(
     let cross = |crossings: &mut Vec<BoundaryCrossing>,
                  edge: u32,
                  start_fraction: f64,
-                 (start_cost, end_cost): (f64, f64),
-                 (start_duration, end_duration): (f64, f64)| {
+                 costs: (f64, f64),
+                 durations: (f64, f64),
+                 distances: (f64, f64)| {
         for (index, contour) in contours.iter().enumerate() {
-            let (start, end) = if contour.on_duration {
-                (start_duration, end_duration)
-            } else {
-                (start_cost, end_cost)
-            };
+            let (start, end) = contour.metric.of(costs, durations, distances);
             if !(start < contour.limit && contour.limit < end) || end - start <= f64::EPSILON {
                 continue;
             }
@@ -1409,24 +1453,33 @@ pub(crate) fn isochrone(
         let remaining = (1.0 - origin.fraction).clamp(0.0, 1.0);
         let cost = origin.approach + edge_cost * remaining;
         let duration_s = search.duration(origin.edge) * remaining;
+        let distance_m = f64::from(graph.edge_length[origin.edge as usize]) * remaining;
         cross(
             &mut outcome.crossings,
             origin.edge,
             origin.fraction,
             (origin.approach, cost),
             (0.0, duration_s),
+            (0.0, distance_m),
         );
         // A seed is labelled even beyond every contour (its successors are
         // then out of range too), but only reported when within one.
         let state = search.next_state(ROOT, origin.edge);
-        search.push(origin.edge, NO_LABEL, cost, duration_s, 0.0, cost, state);
-        if within(cost, duration_s) {
+        search.push(
+            origin.edge,
+            NO_LABEL,
+            cost,
+            duration_s,
+            distance_m,
+            cost,
+            state,
+        );
+        if within(cost, duration_s, distance_m) {
             reach(
                 search.state,
                 &mut outcome.reached,
                 origin.edge,
-                cost,
-                duration_s,
+                (cost, duration_s, distance_m),
             );
         }
     }
@@ -1465,16 +1518,18 @@ pub(crate) fn isochrone(
             // cost is.
             let entered_s = label.duration_s + search.junction_delay(label.edge, next);
             let duration_s = entered_s + search.duration(next);
+            let distance_m = label.distance_m + f64::from(graph.edge_length[next as usize]);
+            let metrics = (
+                (label.cost + turn, cost),
+                (entered_s, duration_s),
+                (label.distance_m, distance_m),
+            );
             // Re-entering an edge already on this path is never an
             // improvement (it was reached cheaper), so it only matters when it
             // would record a second boundary crossing on that edge, which the
             // tile-backed expansion never produced. Walk the path only then.
             let crosses = contours.iter().any(|contour| {
-                let (start, end) = if contour.on_duration {
-                    (entered_s, duration_s)
-                } else {
-                    (label.cost + turn, cost)
-                };
+                let (start, end) = contour.metric.of(metrics.0, metrics.1, metrics.2);
                 start < contour.limit && contour.limit < end && end - start > f64::EPSILON
             });
             if crosses && search.path_contains(label_index, next) {
@@ -1484,15 +1539,21 @@ pub(crate) fn isochrone(
                 &mut outcome.crossings,
                 next,
                 0.0,
-                (label.cost + turn, cost),
-                (entered_s, duration_s),
+                metrics.0,
+                metrics.1,
+                metrics.2,
             );
-            if !within(cost, duration_s) {
+            if !within(cost, duration_s, distance_m) {
                 continue;
             }
             let state = search.next_state(label_state, next);
-            search.push(next, label_index, cost, duration_s, 0.0, cost, state);
-            reach(search.state, &mut outcome.reached, next, cost, duration_s);
+            search.push(next, label_index, cost, duration_s, distance_m, cost, state);
+            reach(
+                search.state,
+                &mut outcome.reached,
+                next,
+                (cost, duration_s, distance_m),
+            );
         }
     }
     outcome

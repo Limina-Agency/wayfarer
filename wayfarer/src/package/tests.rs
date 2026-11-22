@@ -1127,14 +1127,92 @@ fn grid_isochrone_request(
                 contour: *limit,
                 metric: crate::RouteIsochroneMetric::TimeSeconds,
             })
-            .chain(std::iter::once(crate::RouteIsochroneContour {
-                contour: limits[1],
-                metric: crate::RouteIsochroneMetric::Cost,
-            }))
+            .chain([
+                crate::RouteIsochroneContour {
+                    contour: limits[1],
+                    metric: crate::RouteIsochroneMetric::Cost,
+                },
+                crate::RouteIsochroneContour {
+                    contour: 250.0,
+                    metric: crate::RouteIsochroneMetric::DistanceM,
+                },
+            ])
             .collect(),
     );
     request.options.max_correlation_distance_m = 60;
     request
+}
+
+/// Distance contours bound the length of the cheapest path to each point,
+/// on the package, the patch and the reference alike; a longer limit reaches
+/// more.
+#[test]
+fn package_isochrone_distance_contours_match_reference_on_grid() {
+    let dir = tempdir().unwrap();
+    let graph = grid_graph();
+    let reader = persist(&graph, &dir.path().join("grid.mrt"));
+    let (oracle, compact) = engines(&reader);
+    // A full block, and a connector no path can afford so that the patch
+    // searches: the reference blocks the same edge.
+    let blocked_edge = grid_edge(&graph, (2, 2), (2, 3));
+    let mut overlay = crate::RouteDynamicOverlay::from_blocked_ranges(&[crate::RouteEdgeRange {
+        edge_id: blocked_edge,
+        start_fraction: 0.0,
+        end_fraction: 1.0,
+    }]);
+    overlay.virtual_edges.push(edge_connector(
+        0,
+        crate::RouteDynamicVirtualEdgeKind::CrossCountry,
+        (grid_edge(&graph, (2, 3), (2, 4)), 0.35),
+        (grid_edge(&graph, (3, 2), (3, 3)), 0.6),
+        1e7,
+    ));
+    overlay.refresh_diagnostics();
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        let mut request = crate::RouteIsochroneRequest::new(
+            GeoPoint::new(0.0023, 0.0035),
+            profile,
+            [120.0, 250.0, 400.0]
+                .iter()
+                .map(|limit| crate::RouteIsochroneContour {
+                    contour: *limit,
+                    metric: crate::RouteIsochroneMetric::DistanceM,
+                })
+                .collect(),
+        );
+        request.options.max_correlation_distance_m = 60;
+        let expected = oracle.isochrone(request.clone()).unwrap();
+        let actual = compact.isochrone(request.clone()).unwrap();
+        assert_isochrone_parity(&expected, &actual, &format!("{profile:?}"));
+        for pair in actual.buckets.windows(2) {
+            assert!(
+                pair[0].edge_ids.len() < pair[1].edge_ids.len(),
+                "{profile:?}: {} m reaches no more than {} m",
+                pair[1].contour,
+                pair[0].contour
+            );
+            assert!(
+                pair[0]
+                    .edge_ids
+                    .iter()
+                    .all(|edge| pair[1].edge_ids.contains(edge))
+            );
+        }
+        // Each crossing ends exactly at its contour's distance.
+        for bucket in &actual.buckets {
+            assert!(!bucket.boundary_fragments.is_empty(), "{profile:?}");
+            for fragment in &bucket.boundary_fragments {
+                assert_eq!(fragment.end_metric, bucket.contour);
+                assert!(fragment.start_metric < bucket.contour);
+            }
+        }
+        let mut blocked = request.clone();
+        blocked.options.blocked_edge_ids.insert(blocked_edge);
+        let expected = oracle.isochrone(blocked).unwrap();
+        request.options.dynamic_overlay = Some(overlay.clone());
+        let actual = compact.isochrone(request).unwrap();
+        assert_isochrone_parity(&expected, &actual, &format!("{profile:?} patch"));
+    }
 }
 
 #[test]

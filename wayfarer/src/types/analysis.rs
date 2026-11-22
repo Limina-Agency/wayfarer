@@ -77,6 +77,9 @@ pub struct RouteMatrixResult {
 pub enum RouteIsochroneMetric {
     Cost,
     TimeSeconds,
+    /// Metres along the cheapest path (as time is: labels are ordered by
+    /// cost whatever the metric).
+    DistanceM,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

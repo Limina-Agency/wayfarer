@@ -2588,6 +2588,7 @@ struct IsochroneLabel {
     pred: u32,
     cost: f64,
     duration_s: f64,
+    distance_m: f64,
 }
 
 struct Crossing {
@@ -2613,24 +2614,25 @@ fn isochrone(
             .map(|contour| contour.contour)
             .fold(0.0, f64::max)
     };
-    let (max_cost, max_duration) = (
+    let (max_cost, max_duration, max_distance) = (
         limit(RouteIsochroneMetric::Cost),
         limit(RouteIsochroneMetric::TimeSeconds),
+        limit(RouteIsochroneMetric::DistanceM),
     );
-    let within = |cost: f64, duration_s: f64| {
-        (max_cost > 0.0 && cost <= max_cost) || (max_duration > 0.0 && duration_s <= max_duration)
+    let within = |cost: f64, duration_s: f64, distance_m: f64| {
+        (max_cost > 0.0 && cost <= max_cost)
+            || (max_duration > 0.0 && duration_s <= max_duration)
+            || (max_distance > 0.0 && distance_m <= max_distance)
     };
     let mut crossings = Vec::<Crossing>::new();
     let cross = |crossings: &mut Vec<Crossing>,
                  raw: usize,
                  start_fraction: f64,
-                 (start_cost, end_cost): (f64, f64),
-                 (start_duration, end_duration): (f64, f64)| {
+                 costs: (f64, f64),
+                 durations: (f64, f64),
+                 distances: (f64, f64)| {
         for (index, contour) in contours.iter().enumerate() {
-            let (start, end) = match contour.metric {
-                RouteIsochroneMetric::TimeSeconds => (start_duration, end_duration),
-                RouteIsochroneMetric::Cost => (start_cost, end_cost),
-            };
+            let (start, end) = pick(contour.metric, costs, durations, distances);
             if !(start < contour.contour && contour.contour < end) || end - start <= f64::EPSILON {
                 continue;
             }
@@ -2649,7 +2651,7 @@ fn isochrone(
     let mut labels = Vec::<IsochroneLabel>::new();
     let mut contexts = Vec::<Vec<u64>>::new();
     let mut slot = FxHashMap::<(usize, Vec<u64>), u32>::default();
-    let mut reached = FxHashMap::<usize, (f64, f64)>::default();
+    let mut reached = FxHashMap::<usize, (f64, f64, f64)>::default();
     let mut reached_order = Vec::<usize>::new();
     let mut queue = Queue::default();
     let context_of = |contexts: &[Vec<u64>], label: &IsochroneLabel| {
@@ -2682,13 +2684,14 @@ fn isochrone(
         labels.push(label);
         queue.push(label.cost, Item::Label(index));
     };
-    let mut reach = |raw: usize, cost: f64, duration_s: f64| {
+    let mut reach = |raw: usize, cost: f64, duration_s: f64, distance_m: f64| {
         let entry = reached.entry(raw).or_insert_with(|| {
             reached_order.push(raw);
-            (cost, duration_s)
+            (cost, duration_s, distance_m)
         });
         entry.0 = entry.0.min(cost);
         entry.1 = entry.1.min(duration_s);
+        entry.2 = entry.2.min(distance_m);
     };
     // A farther candidate starts at its approach cost. The approach is a
     // penalty, not travel, so time starts at zero (as in matrix rows).
@@ -2701,6 +2704,7 @@ fn isochrone(
         };
         let remaining = (1.0 - candidate.fraction_along_edge).clamp(0.0, 1.0);
         let (cost, duration_s) = (approach + edge_cost * remaining, edge_duration * remaining);
+        let distance_m = edge.length() * remaining;
         let raw = edge.record.raw_edge_index;
         cross(
             &mut crossings,
@@ -2708,6 +2712,7 @@ fn isochrone(
             candidate.fraction_along_edge,
             (approach, cost),
             (0.0, duration_s),
+            (0.0, distance_m),
         );
         push(
             &mut labels,
@@ -2719,10 +2724,11 @@ fn isochrone(
                 pred: NONE,
                 cost,
                 duration_s,
+                distance_m,
             },
         );
-        if within(cost, duration_s) {
-            reach(raw, cost, duration_s);
+        if within(cost, duration_s, distance_m) {
+            reach(raw, cost, duration_s, distance_m);
         }
     }
     let path_contains = |labels: &[IsochroneLabel], label: u32, raw: usize| {
@@ -2789,24 +2795,21 @@ fn isochrone(
             let cost = label.cost + edge_cost + turn;
             let entered_s = label.duration_s + records.delay(&edge, &next);
             let duration_s = entered_s + edge_duration;
+            let distance_m = label.distance_m + next.length();
+            let metrics = (
+                (label.cost + turn, cost),
+                (entered_s, duration_s),
+                (label.distance_m, distance_m),
+            );
             let crosses = contours.iter().any(|contour| {
-                let (start, end) = match contour.metric {
-                    RouteIsochroneMetric::TimeSeconds => (entered_s, duration_s),
-                    RouteIsochroneMetric::Cost => (label.cost + turn, cost),
-                };
+                let (start, end) = pick(contour.metric, metrics.0, metrics.1, metrics.2);
                 start < contour.contour && contour.contour < end && end - start > f64::EPSILON
             });
             if crosses && path_contains(&labels, index, raw) {
                 continue;
             }
-            cross(
-                &mut crossings,
-                raw,
-                0.0,
-                (label.cost + turn, cost),
-                (entered_s, duration_s),
-            );
-            if !within(cost, duration_s) {
+            cross(&mut crossings, raw, 0.0, metrics.0, metrics.1, metrics.2);
+            if !within(cost, duration_s, distance_m) {
                 continue;
             }
             push(
@@ -2819,9 +2822,10 @@ fn isochrone(
                     pred: index,
                     cost,
                     duration_s,
+                    distance_m,
                 },
             );
-            reach(raw, cost, duration_s);
+            reach(raw, cost, duration_s, distance_m);
         }
     }
 
@@ -2863,11 +2867,8 @@ fn isochrone(
             edge_ids: reached_order
                 .iter()
                 .filter(|raw| {
-                    let (cost, duration_s) = reached[*raw];
-                    match contour.metric {
-                        RouteIsochroneMetric::Cost => cost <= contour.contour,
-                        RouteIsochroneMetric::TimeSeconds => duration_s <= contour.contour,
-                    }
+                    let (cost, duration_s, distance_m) = reached[*raw];
+                    pick(contour.metric, cost, duration_s, distance_m) <= contour.contour
                 })
                 .filter_map(|raw| records.edge(*raw).map(|edge| edge.id()))
                 .collect::<BTreeSet<_>>()
@@ -2915,4 +2916,13 @@ fn point_at_fraction(record: &GraphViewEdge, fraction: f64) -> Option<GeoPoint> 
         before_m += segment_m;
     }
     geometry.last().copied()
+}
+
+/// The value of a contour's metric among a cost, a duration and a distance.
+fn pick<T>(metric: RouteIsochroneMetric, cost: T, duration_s: T, distance_m: T) -> T {
+    match metric {
+        RouteIsochroneMetric::Cost => cost,
+        RouteIsochroneMetric::TimeSeconds => duration_s,
+        RouteIsochroneMetric::DistanceM => distance_m,
+    }
 }

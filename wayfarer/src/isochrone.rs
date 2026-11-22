@@ -6,8 +6,8 @@ use crate::limits::MAX_ISOCHRONE_CONTOURS;
 use crate::package::destination::relax_split_costs;
 use crate::package::profile_bit;
 use crate::package::search::analysis::{
-    AnalysisContour, AnalysisPoint, AnalysisQuery, overlay_split_costs, request_cost_overrides,
-    request_duration_overrides, resolve_edge_id, resolve_location,
+    AnalysisContour, AnalysisPoint, AnalysisQuery, ContourMetric, overlay_split_costs,
+    request_cost_overrides, request_duration_overrides, resolve_edge_id, resolve_location,
 };
 use crate::package::search::patch::{PatchCosts, PatchGraph, PatchQuery, analysis_overlay};
 use crate::search::RoutingEngine;
@@ -188,7 +188,11 @@ impl RoutingEngine {
             .iter()
             .map(|contour| AnalysisContour {
                 limit: contour.contour,
-                on_duration: contour.metric == RouteIsochroneMetric::TimeSeconds,
+                metric: match contour.metric {
+                    RouteIsochroneMetric::Cost => ContourMetric::Cost,
+                    RouteIsochroneMetric::TimeSeconds => ContourMetric::Duration,
+                    RouteIsochroneMetric::DistanceM => ContourMetric::Distance,
+                },
             })
             .collect::<Vec<_>>();
         let costing = CostingPolicy::with_destination_only_policy(
@@ -342,9 +346,13 @@ impl RoutingEngine {
                 edge_ids: outcome
                     .reached
                     .iter()
-                    .filter(|edge| match contour.metric {
-                        RouteIsochroneMetric::Cost => edge.cost <= contour.contour,
-                        RouteIsochroneMetric::TimeSeconds => edge.duration_s <= contour.contour,
+                    .filter(|edge| {
+                        let value = match contour.metric {
+                            RouteIsochroneMetric::Cost => edge.cost,
+                            RouteIsochroneMetric::TimeSeconds => edge.duration_s,
+                            RouteIsochroneMetric::DistanceM => edge.distance_m,
+                        };
+                        value <= contour.contour
                     })
                     .map(|edge| view.edge_id(edge.edge as usize))
                     .collect::<BTreeSet<_>>()
