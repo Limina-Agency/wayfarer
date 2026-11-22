@@ -58,12 +58,79 @@ pub struct RoadGraphQualityManifest {
     pub restriction_report: RoadGraphRestrictionReport,
     #[serde(default)]
     pub enhancement_report: RoadGraphEnhancementReport,
+    /// What the compiler set aside in its input (repeated ways, node refs
+    /// the file does not hold). Left out of the JSON when the input had none
+    /// of it.
+    #[serde(default, skip_serializing_if = "RoadGraphInputReport::is_clean")]
+    pub input_report: RoadGraphInputReport,
     #[serde(default)]
     pub status: RoadGraphQualityStatus,
     #[serde(default)]
     pub reasons: Vec<String>,
     #[serde(default)]
     pub findings: Vec<RoadGraphQualityFinding>,
+}
+
+/// The input's road ways that the compiler could not take as they were.
+///
+/// - A way id that appears more than once (`osmium merge` of extracts from
+///   different dates, concatenated files): one copy is kept, the one with the
+///   most located nodes, then the earliest in the file.
+/// - A node ref the file does not hold (extracts cut without complete ways,
+///   such as `osmium extract -s simple` or `osmconvert -b`): the way is cut
+///   there instead of being bridged by a straight line, and a stretch left
+///   with fewer than two nodes is dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RoadGraphInputReport {
+    /// Way ids that appear more than once among the road ways.
+    pub duplicate_way_id_count: usize,
+    /// Copies of those ways dropped (all but one of each).
+    pub dropped_duplicate_way_count: usize,
+    /// Routable ways with at least one node ref the file does not hold.
+    pub way_with_missing_nodes_count: usize,
+    /// Node refs of those ways that the file does not hold.
+    pub missing_node_ref_count: usize,
+    /// Extra pieces made by cutting ways at missing nodes.
+    pub cut_piece_count: usize,
+    /// Ways with missing nodes left without two located nodes in a row,
+    /// and so without a line.
+    pub dropped_missing_node_way_count: usize,
+    /// The smallest duplicated way ids, at most
+    /// [`EXAMPLE_COUNT`](Self::EXAMPLE_COUNT).
+    pub duplicate_way_id_examples: Vec<i64>,
+    /// The smallest ids of ways with missing nodes, at most
+    /// [`EXAMPLE_COUNT`](Self::EXAMPLE_COUNT).
+    pub missing_node_way_id_examples: Vec<i64>,
+}
+
+impl RoadGraphInputReport {
+    /// The most example way ids kept of each kind.
+    pub const EXAMPLE_COUNT: usize = 10;
+
+    /// Whether the input had none of what the report counts.
+    pub fn is_clean(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// One line for each kind of problem the input had, for the quality
+    /// manifest's reasons.
+    pub fn reasons(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if self.duplicate_way_id_count > 0 {
+            reasons.push(format!(
+                "{} road way ids appear more than once in the input; one copy of each was kept",
+                self.duplicate_way_id_count
+            ));
+        }
+        if self.way_with_missing_nodes_count > 0 {
+            reasons.push(format!(
+                "{} road ways refer to {} nodes the input does not hold; they were cut there",
+                self.way_with_missing_nodes_count, self.missing_node_ref_count
+            ));
+        }
+        reasons
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

@@ -53,11 +53,11 @@ use wayfarer_line_network::{
 use wayfarer_package::{codec, math};
 use wayfarer_road_graph::{
     DirectionalAccess, EnhanceOptions, NodeBarrierTags, ROAD_GRAPH_SNAPSHOT_VERSION,
-    RelationMemberRefType, RoadGraph, RoadGraphBuilder, RoadGraphPackageManifest,
-    RoadGraphQualityManifest, RoadGraphTopologyRepairReport, RoadTurnRestriction, RoadType,
-    RoadWayFacts, RoutableWay, SharedInfoIndex, TagInterner, TemplateWay, TrafficControl,
-    TrafficControlDirection, TrafficControlPoint, WayTemplate, enhance_road_graph_with,
-    evaluate_road_graph_quality, resolve_turn_restrictions_with_report,
+    RelationMemberRefType, RoadGraph, RoadGraphBuilder, RoadGraphInputReport,
+    RoadGraphPackageManifest, RoadGraphQualityManifest, RoadGraphTopologyRepairReport,
+    RoadTurnRestriction, RoadType, RoadWayFacts, RoutableWay, SharedInfoIndex, TagInterner,
+    TemplateWay, TrafficControl, TrafficControlDirection, TrafficControlPoint, WayTemplate,
+    enhance_road_graph_with, evaluate_road_graph_quality, resolve_turn_restrictions_with_report,
     vehicle_access_is_destination_only,
 };
 
@@ -479,6 +479,15 @@ pub(crate) struct OsmRoadNetworkCollector {
     turn_restrictions: Vec<RoadTurnRestriction>,
     route_memberships: CollectedRouteMemberships,
     way_facts: EncodedWayFacts,
+    /// The last way id appended, and whether some way id was not above the
+    /// one before it: only then can a way id appear twice (a file sorted by
+    /// id, as PBF extracts are, never sets it).
+    last_way_id: Option<i64>,
+    way_ids_unordered: bool,
+    /// While `way_ids_unordered`: each line's position in the way facts'
+    /// index, by its position in `builder`, to keep the facts of the copy of
+    /// a repeated way whose line is kept.
+    line_facts: Vec<u32>,
 }
 
 /// A routable way as pass 2 saw it: its line without geometry, and
@@ -634,6 +643,7 @@ struct CollectedRoadInputs {
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
     traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
+    input_report: RoadGraphInputReport,
 }
 
 impl OsmRoadNetworkCollector {
@@ -654,9 +664,11 @@ impl OsmRoadNetworkCollector {
         Ok(node_ids)
     }
 
-    /// Gives every routable way the geometry of its located nodes and drops
-    /// the ways with fewer than two, as pass 2 used to when it looked each
-    /// node up as it went; takes the barrier and traffic-control nodes.
+    /// Gives every routable way the geometry of its located nodes, cut where
+    /// the file does not hold a node ([`place_line`]), and drops the lines
+    /// with fewer than two; keeps one copy of a way id the file repeats
+    /// ([`drop_repeated_ways`]); takes the barrier and traffic-control nodes.
+    /// What it cut or dropped goes in the [`RoadGraphInputReport`].
     fn place(mut self, located: LocatedNodes) -> Result<UnfinishedRoadInputs, String> {
         let mut barrier_node_tags = HashMap::new();
         let mut traffic_controls = Vec::new();
@@ -668,15 +680,30 @@ impl OsmRoadNetworkCollector {
         }
         let locations = &located.locations;
         let inputs = self.builder.inputs_mut();
-        inputs
+        // The lines with nodes the file does not hold, cut there, by position.
+        let cut_lines = inputs
             .par_iter_mut()
-            .for_each(|input| place_line(locations, input));
+            .enumerate()
+            .filter_map(|(position, input)| place_line(locations, input).map(|cut| (position, cut)))
+            .collect::<Vec<_>>();
+        let cut_line = |position: usize| {
+            cut_lines
+                .binary_search_by_key(&position, |(at, _)| *at)
+                .ok()
+                .map(|found| &cut_lines[found].1)
+        };
         for (position, mut ferry) in self.ferries {
             let input = &inputs[position];
-            let length_m = input
-                .geometry
-                .windows(2)
-                .map(|pair| haversine_m(pair[0], pair[1]))
+            let pieces = cut_line(position).map_or(&[][..], |cut| &cut.pieces[..]);
+            let length_m = std::iter::once(input)
+                .chain(pieces)
+                .map(|piece| {
+                    piece
+                        .geometry
+                        .windows(2)
+                        .map(|pair| haversine_m(pair[0], pair[1]))
+                        .sum::<f64>()
+                })
                 .sum::<f64>();
             if length_m > 0.0 {
                 ferry.facts.maxspeed = Some(format!("{:.1}", length_m / ferry.duration_s * 3.6));
@@ -684,8 +711,48 @@ impl OsmRoadNetworkCollector {
             let encoded = encode_way_facts(input.feature_id, &ferry.facts)?;
             self.way_facts.fill(ferry.slot, &encoded);
         }
-        self.builder
-            .retain_inputs(|input| input.geometry.len() >= 2);
+        let mut input_report = RoadGraphInputReport::default();
+        // The lines of repeated ways that are not kept, by position.
+        let dropped_lines = if self.way_ids_unordered {
+            let located_count = |position: usize| {
+                cut_line(position).map_or(inputs[position].node_chain.len(), |cut| cut.located)
+            };
+            drop_repeated_ways(
+                &mut self.way_facts,
+                &self.line_facts,
+                located_count,
+                &mut input_report,
+            )
+        } else {
+            Vec::new()
+        };
+        drop(std::mem::take(&mut self.line_facts));
+        let is_dropped = |position: usize| dropped_lines.binary_search(&position).is_ok();
+        let mut missing_node_way_ids = Vec::new();
+        let mut pieces = Vec::new();
+        for (position, cut) in cut_lines {
+            if is_dropped(position) {
+                continue;
+            }
+            input_report.way_with_missing_nodes_count += 1;
+            input_report.missing_node_ref_count += cut.missing;
+            input_report.cut_piece_count += cut.pieces.len();
+            if inputs[position].geometry.len() < 2 {
+                input_report.dropped_missing_node_way_count += 1;
+            }
+            missing_node_way_ids.push(inputs[position].feature_id);
+            pieces.extend(cut.pieces);
+        }
+        input_report.missing_node_way_id_examples = smallest_ids(missing_node_way_ids);
+        let mut position = 0;
+        self.builder.retain_inputs(|input| {
+            let keep = input.geometry.len() >= 2 && !is_dropped(position);
+            position += 1;
+            keep
+        });
+        // After the lines they were cut from: lines of the same way keep the
+        // order they were pushed in when the network sorts them.
+        self.builder.extend_inputs(pieces);
         Ok(UnfinishedRoadInputs {
             builder: self.builder,
             turn_restrictions: self.turn_restrictions,
@@ -693,8 +760,89 @@ impl OsmRoadNetworkCollector {
             barrier_node_tags,
             traffic_controls,
             way_facts: self.way_facts,
+            input_report,
         })
     }
+}
+
+/// `line_facts`' value for a line whose way has no facts.
+const NO_FACTS: u32 = u32::MAX;
+
+/// Keeps one copy of each way id that appears more than once: the copy
+/// whose line has the most located nodes (a copy that is no line has none),
+/// then the earliest in the file. Drops the other copies' facts from
+/// `way_facts` and returns the positions of their lines, ascending.
+fn drop_repeated_ways(
+    way_facts: &mut EncodedWayFacts,
+    line_facts: &[u32],
+    located_count: impl Fn(usize) -> usize,
+    report: &mut RoadGraphInputReport,
+) -> Vec<usize> {
+    let entries = &way_facts.index;
+    let mut line_of_entry = vec![u32::MAX; entries.len()];
+    for (line, &entry) in line_facts.iter().enumerate() {
+        if entry != NO_FACTS {
+            line_of_entry[entry as usize] = line as u32;
+        }
+    }
+    let line_of = |entry: u32| {
+        let line = line_of_entry[entry as usize];
+        (line != u32::MAX).then_some(line as usize)
+    };
+    let mut order = (0..entries.len() as u32).collect::<Vec<_>>();
+    order.par_sort_unstable_by_key(|&entry| (entries[entry as usize].0, entry));
+    let mut dropped_entries = Vec::new();
+    let mut dropped_lines = Vec::new();
+    let mut repeated_way_ids = Vec::new();
+    for copies in order.chunk_by(|&a, &b| entries[a as usize].0 == entries[b as usize].0) {
+        if copies.len() < 2 {
+            continue;
+        }
+        let score = |entry: u32| line_of(entry).map_or(0, &located_count);
+        // `copies` is in file order: the first of the highest scores wins.
+        let kept = copies
+            .iter()
+            .copied()
+            .reduce(|best, entry| {
+                if score(entry) > score(best) {
+                    entry
+                } else {
+                    best
+                }
+            })
+            .expect("a repeated way has copies");
+        for &entry in copies {
+            if entry != kept {
+                dropped_entries.push(entry as usize);
+                dropped_lines.extend(line_of(entry));
+            }
+        }
+        repeated_way_ids.push(entries[kept as usize].0);
+        report.duplicate_way_id_count += 1;
+        report.dropped_duplicate_way_count += copies.len() - 1;
+    }
+    drop(order);
+    drop(line_of_entry);
+    report.duplicate_way_id_examples = smallest_ids(repeated_way_ids);
+    if !dropped_entries.is_empty() {
+        dropped_entries.sort_unstable();
+        let mut entry = 0;
+        way_facts.index.retain(|_| {
+            let keep = dropped_entries.binary_search(&entry).is_err();
+            entry += 1;
+            keep
+        });
+    }
+    dropped_lines.sort_unstable();
+    dropped_lines
+}
+
+/// The [`RoadGraphInputReport::EXAMPLE_COUNT`] smallest of `ids`, ascending.
+fn smallest_ids(mut ids: Vec<i64>) -> Vec<i64> {
+    ids.sort_unstable();
+    ids.dedup();
+    ids.truncate(RoadGraphInputReport::EXAMPLE_COUNT);
+    ids
 }
 
 /// What pass 2 collected, before the line network is built from it.
@@ -705,6 +853,7 @@ struct UnfinishedRoadInputs {
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
     traffic_controls: Vec<TrafficControlPoint>,
     way_facts: EncodedWayFacts,
+    input_report: RoadGraphInputReport,
 }
 
 impl UnfinishedRoadInputs {
@@ -727,6 +876,7 @@ impl UnfinishedRoadInputs {
             barrier_node_tags: self.barrier_node_tags,
             traffic_controls: self.traffic_controls,
             way_facts: self.way_facts,
+            input_report: self.input_report,
         })
     }
 }
@@ -776,6 +926,11 @@ impl OsmRoadNetworkCollector {
     fn append(&mut self, collected: Vec<Result<CollectedWay, String>>) -> Result<(), String> {
         for way in collected {
             let way = way?;
+            if !self.way_ids_unordered && self.last_way_id.is_some_and(|last| way.way_id <= last) {
+                self.start_tracking_line_facts();
+            }
+            self.last_way_id = Some(way.way_id);
+            let facts_entry = self.way_facts.index.len();
             if let Some(facts) = way.encoded_facts {
                 self.way_facts.insert_encoded(way.way_id, &facts);
             }
@@ -784,11 +939,38 @@ impl OsmRoadNetworkCollector {
                     ferry.slot = self.way_facts.reserve(input.feature_id);
                     self.ferries.push((self.pushed, ferry));
                 }
+                if self.way_ids_unordered {
+                    self.line_facts
+                        .push(if self.way_facts.index.len() > facts_entry {
+                            facts_entry as u32
+                        } else {
+                            NO_FACTS
+                        });
+                }
                 self.builder.push_input(input);
                 self.pushed += 1;
             }
         }
         Ok(())
+    }
+
+    /// Records, from now on, where each line's facts are (`line_facts`),
+    /// starting with the lines already pushed. Their way ids are ascending,
+    /// as are those of the facts so far, each way's at most once, so a binary
+    /// search finds them.
+    fn start_tracking_line_facts(&mut self) {
+        self.way_ids_unordered = true;
+        let index = &self.way_facts.index;
+        self.line_facts = self
+            .builder
+            .inputs_mut()
+            .iter()
+            .map(|input| {
+                index
+                    .binary_search_by_key(&input.feature_id, |(way_id, _)| *way_id)
+                    .map_or(NO_FACTS, |entry| entry as u32)
+            })
+            .collect();
     }
 }
 
@@ -865,11 +1047,18 @@ fn encode_way_facts(way_id: i64, facts: &RoadWayFacts) -> Result<Vec<u8>, String
         .map_err(|error| format!("Failed to encode way facts for way {way_id}: {error}"))
 }
 
-/// Keeps the located nodes of a line, in order, with their positions as its
-/// geometry; a node the file does not hold is dropped from the line.
-fn place_line(locations: &NodeLocations, input: &mut SharedLineInput) {
+/// Gives a line its nodes' positions as its geometry. A node the file does not
+/// hold cuts the line there: the line keeps its first stretch of two or more
+/// located nodes in a row (or none, and is then dropped), and the later
+/// stretches come back as [`CutLine::pieces`]. `None` when every node was
+/// located.
+fn place_line(locations: &NodeLocations, input: &mut SharedLineInput) -> Option<CutLine> {
     let mut cursor = locations.cursor();
     let mut geometry = Vec::with_capacity(input.node_chain.len());
+    // Where the located nodes are cut: the number of located nodes before
+    // each missing one.
+    let mut cuts = Vec::new();
+    let mut missing = 0;
     input
         .node_chain
         .retain(|node_id| match cursor.get(*node_id) {
@@ -877,9 +1066,73 @@ fn place_line(locations: &NodeLocations, input: &mut SharedLineInput) {
                 geometry.push(position);
                 true
             }
-            None => false,
+            None => {
+                missing += 1;
+                if cuts.last() != Some(&geometry.len()) {
+                    cuts.push(geometry.len());
+                }
+                false
+            }
         });
-    input.geometry = geometry;
+    if missing == 0 {
+        input.geometry = geometry;
+        return None;
+    }
+    let located = geometry.len();
+    cuts.push(located);
+    let mut stretches = Vec::new();
+    let mut start = 0;
+    for end in cuts {
+        if end - start >= 2 {
+            stretches.push(start..end);
+        }
+        start = end;
+    }
+    let mut stretches = stretches.into_iter();
+    let first = stretches.next();
+    let pieces = stretches
+        .map(|stretch| SharedLineInput {
+            feature_id: input.feature_id,
+            layer: input.layer,
+            geometry: geometry[stretch.clone()].to_vec(),
+            node_chain: input.node_chain[stretch].to_vec(),
+            source_lineage_ids: input.source_lineage_ids.clone(),
+            attrs: Arc::clone(&input.attrs),
+            compile_inputs: Arc::clone(&input.compile_inputs),
+            min_zoom: input.min_zoom,
+            max_zoom: input.max_zoom,
+            sort_order: input.sort_order,
+            routing: input.routing.clone(),
+        })
+        .collect();
+    match first {
+        Some(first) => {
+            input.node_chain.truncate(first.end);
+            input.node_chain.drain(..first.start);
+            geometry.truncate(first.end);
+            geometry.drain(..first.start);
+            input.geometry = geometry;
+        }
+        None => {
+            input.node_chain.clear();
+            input.geometry = Vec::new();
+        }
+    }
+    Some(CutLine {
+        located,
+        missing,
+        pieces,
+    })
+}
+
+/// A line [`place_line`] cut at nodes the file does not hold.
+struct CutLine {
+    /// The line's located nodes, over every stretch.
+    located: usize,
+    /// Its node refs the file does not hold.
+    missing: usize,
+    /// Its stretches after the first, as lines of their own.
+    pieces: Vec<SharedLineInput>,
 }
 
 /// Takes a vector's items in order, a batch at a time, and gives its buffer
@@ -938,6 +1191,7 @@ fn build_road_graph(
         barrier_node_tags,
         traffic_controls,
         mut way_facts,
+        input_report,
     } = inputs;
     let phase = Phase::start("topology_to_graph_builder");
     let topology_repair_report = topology_repair_report(&network);
@@ -1095,6 +1349,7 @@ fn build_road_graph(
         topology_repair_report,
         restriction_report,
         enhancement_report,
+        input_report,
         ..Default::default()
     };
     quality.reasons = graph_quality_warning_reasons(&quality);
@@ -1174,6 +1429,7 @@ fn graph_quality_warning_reasons(quality: &RoadGraphQualityManifest) -> Vec<Stri
             quality.enhancement_report.warning_examples.len()
         ));
     }
+    reasons.extend(quality.input_report.reasons());
     reasons
 }
 
@@ -2664,6 +2920,183 @@ mod tests {
             masks(&[("route", "shuttle_train"), ("foot", "no")]),
             (OsmMode::ALL & !foot, OsmMode::ALL & !foot)
         );
+    }
+
+    /// The graph's edges between source nodes, as `(way, from, to)`, sorted.
+    fn way_edges(graph: &RoadGraph) -> Vec<(i64, i64, i64)> {
+        let mut edges = graph
+            .graph
+            .edge_references()
+            .map(|edge| {
+                let way_id = graph
+                    .shared_edge_info(edge.weight().shared_edge_info_id)
+                    .unwrap()
+                    .osm_way_id;
+                let node = |index: usize| graph.graph.node_source_node_id(index).unwrap();
+                (
+                    way_id,
+                    node(edge.source().index()),
+                    node(edge.target().index()),
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort_unstable();
+        edges
+    }
+
+    #[test]
+    fn ways_are_cut_at_nodes_the_file_does_not_hold() {
+        // Node 3 is missing: way 1 is two lines, 1-2 and 4-5, with nothing
+        // across the gap. Way 2 keeps no two located nodes in a row.
+        let compiled = compile_fixture_graph(
+            &[
+                (1, 52.0, 21.0),
+                (2, 52.0, 21.001),
+                (4, 52.0, 21.003),
+                (5, 52.0, 21.004),
+                (6, 52.001, 21.0),
+                (7, 52.001, 21.002),
+            ],
+            &[
+                FixtureWay {
+                    id: 1,
+                    nodes: &[1, 2, 3, 4, 5],
+                    tags: &[("highway", "residential"), ("name", "Cut")],
+                },
+                FixtureWay {
+                    id: 2,
+                    nodes: &[6, 3, 7, 8],
+                    tags: &[("highway", "residential")],
+                },
+            ],
+            &[],
+        );
+        assert_eq!(
+            way_edges(&compiled.road_graph),
+            [(1, 1, 2), (1, 2, 1), (1, 4, 5), (1, 5, 4)]
+        );
+        let quality = &compiled.road_graph_quality;
+        assert_eq!(
+            quality.input_report,
+            RoadGraphInputReport {
+                way_with_missing_nodes_count: 2,
+                missing_node_ref_count: 3,
+                cut_piece_count: 1,
+                dropped_missing_node_way_count: 1,
+                missing_node_way_id_examples: vec![1, 2],
+                ..Default::default()
+            }
+        );
+        assert!(
+            quality.reasons.contains(
+                &"2 road ways refer to 3 nodes the input does not hold; they were cut there"
+                    .to_string()
+            ),
+            "{:?}",
+            quality.reasons
+        );
+    }
+
+    #[test]
+    fn a_repeated_way_keeps_its_copy_with_the_most_located_nodes_then_the_first() {
+        let nodes = [
+            (1, 52.0, 21.0),
+            (2, 52.0, 21.001),
+            (3, 52.0, 21.002),
+            (4, 52.001, 21.0),
+            (5, 52.001, 21.001),
+            (6, 52.0015, 21.0005),
+        ];
+        let compiled = compile_fixture_graph(
+            &nodes,
+            &[
+                // Way 7: the second copy has more located nodes.
+                FixtureWay {
+                    id: 7,
+                    nodes: &[1, 2],
+                    tags: &[("highway", "residential"), ("name", "Old")],
+                },
+                FixtureWay {
+                    id: 3,
+                    nodes: &[4, 5],
+                    tags: &[("highway", "service"), ("name", "First")],
+                },
+                FixtureWay {
+                    id: 7,
+                    nodes: &[1, 2, 3],
+                    tags: &[("highway", "residential"), ("name", "New")],
+                },
+                // Way 3: as many located nodes, so the first copy stays; the
+                // last, an area and no line, has none.
+                FixtureWay {
+                    id: 3,
+                    nodes: &[4, 5],
+                    tags: &[("highway", "service"), ("name", "Second")],
+                },
+                FixtureWay {
+                    id: 3,
+                    nodes: &[4, 5, 6, 4],
+                    tags: &[("highway", "service"), ("area", "yes"), ("name", "Area")],
+                },
+            ],
+            &[],
+        );
+        let graph = &compiled.road_graph;
+        assert_eq!(
+            way_edges(graph),
+            [(3, 4, 5), (3, 5, 4), (7, 1, 3), (7, 3, 1)]
+        );
+        let names = graph
+            .shared_edge_infos
+            .iter()
+            .map(|info| {
+                (
+                    info.osm_way_id,
+                    info.attrs.name.as_deref().unwrap().to_string(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            names,
+            [(3, "First".to_string()), (7, "New".to_string())]
+                .into_iter()
+                .collect()
+        );
+        let quality = &compiled.road_graph_quality;
+        assert_eq!(
+            quality.input_report,
+            RoadGraphInputReport {
+                duplicate_way_id_count: 2,
+                dropped_duplicate_way_count: 3,
+                duplicate_way_id_examples: vec![3, 7],
+                ..Default::default()
+            }
+        );
+        assert!(
+            quality.reasons.contains(
+                &"2 road way ids appear more than once in the input; one copy of each was kept"
+                    .to_string()
+            ),
+            "{:?}",
+            quality.reasons
+        );
+    }
+
+    #[test]
+    fn a_clean_input_leaves_the_input_report_out_of_the_manifest() {
+        let compiled = compile_fixture_graph(
+            &[(1, 52.0, 21.0), (2, 52.0, 21.001)],
+            &[FixtureWay {
+                id: 1,
+                nodes: &[1, 2],
+                tags: &[("highway", "residential")],
+            }],
+            &[],
+        );
+        let quality = &compiled.road_graph_quality;
+        assert!(quality.input_report.is_clean());
+        let json = serde_json::to_value(quality).unwrap();
+        assert!(json.get("inputReport").is_none(), "{json}");
     }
 
     #[test]

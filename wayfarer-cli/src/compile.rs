@@ -118,6 +118,11 @@ pub(crate) fn run(args: CompileArgs) -> Result<(), Failure> {
     match compile(&request, &cancel, |progress| printer.print(progress)) {
         Ok(result) => {
             eprintln!("compiled in {:.1} s", started.elapsed().as_secs_f64());
+            // Ways the input repeats or cuts short (also in the package's
+            // quality reasons, `wayfarer info`).
+            for reason in result.graph_manifest.quality.input_report.reasons() {
+                eprintln!("warning: {reason}");
+            }
             print_json(&result)
         }
         Err(error) => Err(failure_of(error)),
