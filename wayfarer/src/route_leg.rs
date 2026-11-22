@@ -590,6 +590,65 @@ fn edge_attribution(
     }
 }
 
+/// The attribution of each traversed piece `(edge, start_fraction,
+/// end_fraction)` of a path that is not a route (a map match's sub-path), as a
+/// leg's `edges` are built, costed with `options`. A piece follows the one
+/// before through a junction only when it starts at its edge's start and the
+/// one before ends at its edge's end; otherwise (a U-turn mid-edge) it has no
+/// turn and no junction counts.
+pub(crate) fn path_edge_attributions(
+    access: &PackageGraphView,
+    profile: MobilityProfile,
+    options: &RouteOptions,
+    pieces: &[(u32, f64, f64)],
+) -> Result<Vec<RouteEdgeAttribution>, RouteError> {
+    let costing = CostingPolicy::new(profile, options);
+    let views = LegViews::of(access);
+    let indexes = pieces
+        .iter()
+        .map(|(edge, _, _)| Some(*edge as usize))
+        .collect::<Vec<_>>();
+    let edge_ids = pieces
+        .iter()
+        .map(|(edge, _, _)| access.package().view().edge_id(*edge as usize))
+        .collect::<Vec<_>>();
+    let records = access
+        .edge_records_for_path(&indexes, &edge_ids)
+        .into_iter()
+        .zip(&edge_ids)
+        .map(|(record, edge_id)| {
+            record.ok_or(RouteError::MissingEdgeMetadata { edge_id: *edge_id })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let classes = records
+        .iter()
+        .map(|record| EdgeCostClasses::from_shared_info(&record.shared_info))
+        .collect::<Vec<_>>();
+    let (mut previous_speed, mut speed) = (None::<f64>, None::<f64>);
+    let mut edges = Vec::with_capacity(pieces.len());
+    for (index, (record, &(_, start_fraction, end_fraction))) in
+        records.iter().zip(pieces).enumerate()
+    {
+        let through_junction = index > 0
+            && start_fraction <= f64::EPSILON
+            && pieces[index - 1].2 >= 1.0 - f64::EPSILON;
+        edges.push(edge_attribution(
+            access,
+            &views,
+            &costing,
+            profile,
+            options,
+            (record, classes[index]),
+            through_junction.then(|| (&records[index - 1], classes[index - 1])),
+            start_fraction,
+            end_fraction,
+            (&mut previous_speed, &mut speed),
+        ));
+        previous_speed = speed.take();
+    }
+    Ok(edges)
+}
+
 fn traversed_fraction(start_fraction: f64, end_fraction: f64) -> f64 {
     (end_fraction.clamp(0.0, 1.0) - start_fraction.clamp(0.0, 1.0))
         .abs()
