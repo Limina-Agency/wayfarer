@@ -11,8 +11,8 @@ reserved ids), REG-11 (global lattice), REG-13's hook (cell-major
 numbering), the format-3 rows of FEAT-P1/P2 (profile slots, wider masks),
 FEAT-G4b and W4 (versioned `LegAttrs`), and the width limits found by the
 Poland and Germany compiles (item 6 of the compile analysis' summary). Decisions D5 and
-D12 of the work plan are taken as recommended; section 13 lists what Anton
-still has to confirm.
+D12 of the work plan and the new decisions this design raises are confirmed
+as recommended (section 13).
 
 The analyses cited by name (regions, compile, features, profiles, terrain and
 performance, November 2026) are project notes kept outside the repository.
@@ -718,31 +718,31 @@ tree carry what a seam needs, so that a 1.x bundle doesn't need a format 4.
 
 ## 13. Decisions
 
-Taken as recommended in the work plan (Anton to confirm D5):
+Anton confirmed every recommendation below on 2026-11-22.
 
 - **D5, format 3 shape.** Optional sections addable after the bump, a
   per-section REQUIRED flag (no separate header bitset), an identity hash
   separate from the content hash, u16 profile access with a slot table.
 - **D12, regions scope.** Poland on a phone offline is a 1.x goal; its
   format-3 hooks (cell-major numbering, reserved cell ids) are in 1.0.
-
-New ones this design raises:
-
-1. **1.x policy on REQUIRED sections.** Recommended: a 1.x compiler writes a
-   REQUIRED section that 1.0 doesn't know only when the compile request asks
-   for the feature that needs it, and the release notes name the oldest
-   engine that reads such packages. The alternative, no new REQUIRED
-   sections in 1.x at all, is simpler to state but turns any feature that
-   changes how a core section is read into a format 4.
-2. **Numbering.** Node id = CCH rank with chains per cell (recommended), or
-   cell-major groups keeping `CchRank`. Both pass the fill check above;
-   G5 measures warm queries.
-3. **OSM node ids in every package** (`NodeSourceId`, +6.4 MB, 3.5 %).
-   Recommended, since API-5's resolver needs them in 1.0 packages.
-4. **OM-10 deltas in the bump**, if a prototype shows no slowdown, or never
-   in 1.x.
-5. **Cost tuple index**: u16 or u32, once Poland's and Germany's
-   `costTupleCount` are known.
+- **1.x policy on REQUIRED sections.** A 1.x compiler writes a REQUIRED
+  section that 1.0 doesn't know only when the compile request asks for the
+  feature that needs it, and the release notes name the oldest engine that
+  reads such packages. (Not chosen: no new REQUIRED sections in 1.x at all,
+  which would turn any feature that changes how a core section is read into a
+  format 4.)
+- **Numbering.** Node id = CCH rank with chains per cell (section 8.3, option
+  1); `CchRank` is retired. G5 still repeats the fill check on Poland and
+  measures warm queries on the Małopolskie gate; if those show a regression,
+  option 2 (cell-major groups keeping `CchRank`) is the fallback.
+- **OSM node ids in every package.** `NodeSourceId` is mandatory (+6.4 MB,
+  3.5 % on Małopolskie), so API-5's resolver works on every 1.0 package.
+- **OM-10 deltas.** 16-bit edge-target and twin deltas go into the bump only
+  if a prototype on the rank numbering shows no slowdown on the gate;
+  otherwise they wait for a format 4. The duration speed index stays out.
+- **Cost tuple index.** Stays u16 if Poland's and Germany's
+  `costTupleCount` are far below 65,536; otherwise u32. Decided once those
+  counts are in.
 
 ## Appendix: how the numbers were taken
 
