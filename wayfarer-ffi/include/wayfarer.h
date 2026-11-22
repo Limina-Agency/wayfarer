@@ -230,6 +230,21 @@ int32_t wayfarer_map_match(const WayfarerPackage *package,
                                    const WayfarerCancelToken *cancel,
                                    char **out_json);
 
+/* The k targets cheapest to travel to from a source, cheapest first:
+ * {"source", "targets", "k", "profile", "direction": "from_source" (default)
+ * | "to_source", "options": RouteOptions (optional)} gives a NearestResult,
+ * {"targetCount", "hits": [{"targetIndex", "cost", "distanceM",
+ * "durationS", "edgeIds"}], "noCandidateTargetIndexes", ...}: the cheapest
+ * reachable cells of the matrix between the source and every target. More
+ * than 10,000 targets is "request_too_large"; k outside 1..targets, or
+ * invalid coordinates or options, "invalid_request"; a source off the
+ * network "no_candidate". `cancel` (may be NULL) stops it with
+ * WAYFARER_CANCELLED. */
+int32_t wayfarer_nearest(const WayfarerPackage *package,
+                                 const char *request_json,
+                                 const WayfarerCancelToken *cancel,
+                                 char **out_json);
+
 /* Snaps a point onto the roads a profile may use: {"point", "profile",
  * "maxDistanceM" (optional), "candidateLimit" (optional), "options":
  * RouteEndpointOptions (optional)} gives a SnapResult, {"candidates",

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NearestResult",
+  "type": "object",
+  "properties": {
+    "hits": {
+      "description": "At most `k` targets, cheapest first (ties by target index): the `k`\ncheapest reachable cells of the matrix between the source and every\ntarget. Fewer when fewer targets are reachable.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NearestHit"
+      }
+    },
+    "noCandidateTargetIndexes": {
+      "description": "Targets with no road within the correlation radius.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0
+      }
+    },
+    "rowCount": {
+      "description": "Matrix rows searched (a row's cells may be searched one by one).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "targetCount": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "visitedEdgeCount": {
+      "description": "Out-edges examined, summed over every search.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "targetCount",
+    "hits",
+    "noCandidateTargetIndexes",
+    "rowCount",
+    "visitedEdgeCount"
+  ],
+  "$defs": {
+    "NearestHit": {
+      "description": "One of the nearest targets: its matrix cell's path between the source\nand the target, in the request's direction.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeIds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "targetIndex": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "targetIndex",
+        "cost",
+        "distanceM",
+        "durationS",
+        "edgeIds"
+      ]
+    }
+  }
+}

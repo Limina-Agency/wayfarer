@@ -11,6 +11,7 @@ result types from them (Swift, Kotlin, TypeScript, …).
 | `matrix-request.json`, `matrix-result.json` | `wayfarer_matrix` |
 | `isochrone-request.json`, `isochrone-result.json` | `wayfarer_isochrone` |
 | `map-match-request.json`, `map-match-result.json` | `wayfarer_map_match` |
+| `nearest-request.json`, `nearest-result.json` | `wayfarer_nearest` |
 | `snap-request.json`, `snap-result.json` | `wayfarer_snap` |
 | `project-request.json`, `project-result.json` | `wayfarer_project` |
 | `navigation-input.json` | `wayfarer_navigation_route_new` (`"input"`) |

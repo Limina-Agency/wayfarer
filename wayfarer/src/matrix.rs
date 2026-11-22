@@ -183,6 +183,7 @@ impl RoutingEngine {
                 !strict,
                 None,
                 None,
+                None,
             );
             // The strict pass opens the pockets of every source and target
             // for every cell; a cell whose path crossed the pocket of
@@ -220,6 +221,7 @@ impl RoutingEngine {
                     &mut relaxed,
                     true,
                     only_retried.then_some(retry.as_slice()),
+                    None,
                     None,
                 ) {
                     Ok((more_expansions, more_visited, more_settled)) => {
@@ -289,8 +291,13 @@ impl RoutingEngine {
     /// destination-only pockets the pass unblocks, in place of every
     /// source's and target's; the query then does not depend on the
     /// endpoints either, so `retry` may limit such a pass too.
+    ///
+    /// `stop` (no dynamic overlay patch): rows, each stopping once
+    /// `stop.after` of its targets have their final path (see
+    /// [`matrix_row`]). The cells of the targets a row left open keep what
+    /// `cells` held; their lower bounds go to `stop.bounds`.
     #[allow(clippy::too_many_arguments)]
-    fn matrix_cells(
+    pub(crate) fn matrix_cells(
         &self,
         request: &RouteMatrixRequest,
         source_candidates: &[&[CorrelatedLocation]],
@@ -299,8 +306,10 @@ impl RoutingEngine {
         allow_destination_only: bool,
         retry: Option<&[bool]>,
         confined: Option<&[u32]>,
+        mut stop: Option<&mut RowStop>,
     ) -> Result<(usize, usize, usize), RouteError> {
         debug_assert!(retry.is_none() || allow_destination_only || confined.is_some());
+        let stop_after = stop.as_ref().map(|stop| stop.after);
         let target_count = target_candidates.len();
         let retries = |source: usize, target: usize| {
             retry.is_none_or(|retry| retry[source * target_count + target])
@@ -345,7 +354,14 @@ impl RoutingEngine {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, RouteError>(AnalysisPoint::of_candidates(candidates, edges))
+            let mut points = AnalysisPoint::of_candidates(candidates, edges);
+            // Rows that stop early bound every candidate pair alike.
+            if stop_after.is_some() {
+                for point in &mut points {
+                    point.approach = 0.0;
+                }
+            }
+            Ok::<_, RouteError>(points)
         };
         let sources = source_candidates
             .iter()
@@ -580,11 +596,16 @@ impl RoutingEngine {
                 .flatten_iter()
                 .collect::<Vec<_>>()
         };
-        let mode = matrix_mode(
-            request.profile,
-            searchable_targets,
-            view.cch.is_some() && query.column.potential.is_some(),
-        );
+        debug_assert!(stop_after.is_none() || patch.is_none());
+        let mode = if stop_after.is_some() {
+            MatrixMode::Rows
+        } else {
+            matrix_mode(
+                request.profile,
+                searchable_targets,
+                view.cch.is_some() && query.column.potential.is_some(),
+            )
+        };
         let rows = if mode == MatrixMode::Pairwise {
             // Few targets: one bidirectional A* search per cell. Each explores
             // little beyond the corridor between its two points, where a shared
@@ -610,6 +631,7 @@ impl RoutingEngine {
                             budget_exceeded: vec![false; target_count],
                             visited_edge_count: 0,
                             settled_edge_count: 0,
+                            open_bounds: Vec::new(),
                         },
                     )
                 })
@@ -638,22 +660,28 @@ impl RoutingEngine {
             let prune = !test_mode::keep_unreachable_targets();
             #[cfg(not(test))]
             let prune = true;
-            let reaching =
-                if prune && patch.is_none() && request.options.max_visited_edge_count.is_none() {
-                    target_edges
-                        .par_iter()
-                        .map(|edges| {
-                            reaching_edges(
-                                view,
-                                edges,
-                                |edge| query.edge_cost(view, edge).is_finite(),
-                                &request.options.cancellation,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![None; target_count]
-                };
+            // Rows that stop early stop before any flood of theirs (weak
+            // components aside, which `connected` rules out) has a target to
+            // wait for once they have enough, so they skip the pruning.
+            let reaching = if prune
+                && stop_after.is_none()
+                && patch.is_none()
+                && request.options.max_visited_edge_count.is_none()
+            {
+                target_edges
+                    .par_iter()
+                    .map(|edges| {
+                        reaching_edges(
+                            view,
+                            edges,
+                            |edge| query.edge_cost(view, edge).is_finite(),
+                            &request.options.cancellation,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![None; target_count]
+            };
             let may_reach = |source: usize, target: usize| {
                 reaching[target].as_ref().is_none_or(|reaching| {
                     source_edges[source]
@@ -712,6 +740,7 @@ impl RoutingEngine {
                                 budget_exceeded: vec![row.budget_exceeded; target_count],
                                 visited_edge_count: row.counters.visited_edge_count,
                                 settled_edge_count: row.counters.settled_edge_count,
+                                open_bounds: Vec::new(),
                             }
                         }
                         None => {
@@ -732,6 +761,7 @@ impl RoutingEngine {
                                 origins,
                                 &candidates,
                                 target_count,
+                                stop_after,
                             );
                             MatrixRowCells {
                                 paths: row
@@ -742,6 +772,7 @@ impl RoutingEngine {
                                 budget_exceeded: vec![row.budget_exceeded; target_count],
                                 visited_edge_count: row.counters.visited_edge_count,
                                 settled_edge_count: row.counters.settled_edge_count,
+                                open_bounds: row.open_bounds,
                             }
                         }
                     };
@@ -761,9 +792,16 @@ impl RoutingEngine {
             expansions += 1;
             visited += row.visited_edge_count;
             settled += row.settled_edge_count;
+            let mut left_open = vec![false; target_count];
+            for (target, _) in &row.open_bounds {
+                left_open[*target] = true;
+            }
+            if let Some(stop) = stop.as_mut() {
+                stop.bounds.extend(&row.open_bounds);
+            }
             for (target_index, path) in row.paths.into_iter().enumerate() {
                 let budget_exceeded = row.budget_exceeded[target_index];
-                if target_candidates[target_index].is_empty() {
+                if target_candidates[target_index].is_empty() || left_open[target_index] {
                     continue;
                 }
                 let cell = cell_mut(cells, target_count, source_index, target_index);
@@ -882,6 +920,7 @@ impl RoutingEngine {
                 false,
                 Some(&retry),
                 Some(&endpoints),
+                None,
             )?;
             counts.0 += expansions;
             counts.1 += visited;
@@ -1043,6 +1082,20 @@ struct MatrixRowCells {
     budget_exceeded: Vec<bool>,
     visited_edge_count: usize,
     settled_edge_count: usize,
+    /// The targets a stopped row left open, with lower bounds on their costs.
+    open_bounds: Vec<(usize, f64)>,
+}
+
+/// Rows that stop early ([`RoutingEngine::matrix_cells`]' `stop`): after
+/// `after` targets each, with the open targets' lower bounds (target index,
+/// least cost) collected in `bounds`. They search without approach costs:
+/// a cell is then the cheapest path between any of its two points'
+/// candidates, and a bound holds for every pair, so both bound the matrix's
+/// cell between the same points on any pass whose edge costs are no lower.
+#[derive(Debug, Default)]
+pub(crate) struct RowStop {
+    pub(crate) after: usize,
+    pub(crate) bounds: Vec<(usize, f64)>,
 }
 
 #[derive(Debug, Clone)]

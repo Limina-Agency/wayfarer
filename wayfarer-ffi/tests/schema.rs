@@ -7,10 +7,10 @@ use std::path::Path;
 use schemars::generate::SchemaSettings;
 use schemars::{JsonSchema, Schema};
 use wayfarer::{
-    MapMatchRequest, MapMatchResult, NavigationPositionSample, ProjectRequest,
-    RouteIsochroneRequest, RouteIsochroneResult, RouteMatrixRequest, RouteMatrixResult,
-    RouteNavigationInput, RouteNavigationProgress, RouteNavigationProgressOptions,
-    RouteOverlayGeometryProjection, SnapRequest, SnapResult,
+    MapMatchRequest, MapMatchResult, NavigationPositionSample, NearestRequest, NearestResult,
+    ProjectRequest, RouteIsochroneRequest, RouteIsochroneResult, RouteMatrixRequest,
+    RouteMatrixResult, RouteNavigationInput, RouteNavigationProgress,
+    RouteNavigationProgressOptions, RouteOverlayGeometryProjection, SnapRequest, SnapResult,
 };
 use wayfarer_compiler::{CompileProgress, CompileRequest, CompileResult};
 use wayfarer_service::overlay_set::RouteOverlaySet;
@@ -41,6 +41,8 @@ fn schemas_match_the_types() {
         ("isochrone-result", result::<RouteIsochroneResult>()),
         ("map-match-request", request::<MapMatchRequest>()),
         ("map-match-result", result::<MapMatchResult>()),
+        ("nearest-request", request::<NearestRequest>()),
+        ("nearest-result", result::<NearestResult>()),
         ("snap-request", request::<SnapRequest>()),
         ("snap-result", result::<SnapResult>()),
         ("project-request", request::<ProjectRequest>()),

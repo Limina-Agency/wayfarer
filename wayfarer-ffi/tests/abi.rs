@@ -203,12 +203,15 @@ fn call_with_cancel(
     (status, take(out))
 }
 
-const CANCELLABLE: [(&str, CancellableCall, &str); 5] = [
+const NEAREST: &str = r#"{"source": {"lat": 52.0, "lng": 21.0002}, "targets": [{"lat": 52.0, "lng": 21.0018}, {"lat": 52.0, "lng": 21.0009}], "k": 1, "profile": "wheeled"}"#;
+
+const CANCELLABLE: [(&str, CancellableCall, &str); 6] = [
     ("route", wayfarer_route_with_cancel, ROUTE),
     ("matrix", wayfarer_matrix_with_cancel, MATRIX),
     ("isochrone", wayfarer_isochrone_with_cancel, ISOCHRONE),
     ("workflow", wayfarer_route_with_cancel, WORKFLOW),
     ("map match", wayfarer_map_match, MAP_MATCH),
+    ("nearest", wayfarer_nearest, NEAREST),
 ];
 
 #[test]

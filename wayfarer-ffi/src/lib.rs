@@ -55,7 +55,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wayfarer::{
-    CancelToken, MapMatchRequest, NavigationPositionSample, PackageQualityStatus,
+    CancelToken, MapMatchRequest, NavigationPositionSample, NearestRequest, PackageQualityStatus,
     PreparedNavigationRoute, ProjectRequest, RouteCancellation, RouteError, RouteIsochroneRequest,
     RouteMatrixRequest, RouteNavigationInput, RouteNavigationProgress,
     RouteNavigationProgressOptions, RoutePackageMemoryProfile, RouteResult, RoutingEngine,
@@ -688,6 +688,36 @@ pub unsafe extern "C" fn wayfarer_map_match(
             request.cancellation = cancellation(cancel);
             engine
                 .map_match(request)
+                .map_err(|error| Failure::route(&error))
+        })
+    }
+}
+
+/// Answers `request_json` (a `NearestRequest`: `{"source", "targets", "k",
+/// "profile", "direction", "options"}`) with a `NearestResult`: the `k`
+/// targets cheapest to travel to from the source (`"direction":
+/// "to_source"`: from which to travel to it), cheapest first, as the
+/// cheapest reachable cells of the matrix between the source and every
+/// target. A request beyond [`NearestRequest::validate`]'s limits fails with
+/// `request_too_large` or `invalid_request`, a source off the network with
+/// `no_candidate`, and a cancelled one with [`WAYFARER_CANCELLED`].
+///
+/// # Safety
+/// As for [`wayfarer_route`]; `cancel` is null or a live token.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wayfarer_nearest(
+    package: *const WayfarerPackage,
+    request_json: *const c_char,
+    cancel: *const WayfarerCancelToken,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    unsafe {
+        respond(out_json, || {
+            let engine = engine(package)?;
+            let mut request: NearestRequest = read_json(request_json, "request")?;
+            request.options.cancellation = cancellation(cancel);
+            engine
+                .nearest(request)
                 .map_err(|error| Failure::route(&error))
         })
     }
