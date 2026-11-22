@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use osm_pbf_ingest::IngestBuildProfile;
 use serde::{Deserialize, Serialize};
-use wayfarer_package::CancelToken;
+use wayfarer_package::format::profile_slot;
+use wayfarer_package::{CancelToken, MobilityProfile};
 use wayfarer_road_graph::RoadGraphPackageManifest;
 
 use crate::job::{self, Report};
 use crate::{
-    CompileStage, PackageBuildReport, RoadGraphCompileRequest, RouteArchiveCompileRequest,
-    compile_route_archive,
+    CompileStage, PackageBuildOptions, PackageBuildReport, RoadGraphCompileRequest,
+    RouteArchiveCompileRequest, compile_route_archive,
 };
 
 /// What to compile, where to, and how. The JSON form (camelCase, unknown
@@ -22,13 +23,17 @@ use crate::{
 ///
 /// ```json
 /// {"input": "monaco.osm.pbf", "output": "routing.mrt", "country": "MC",
-///  "memory": "low", "threads": 2}
+///  "memory": "low", "threads": 2, "profiles": ["wheeled", "on_foot", "legged"]}
 /// ```
 ///
-/// Only `input` and `output` are required.
+/// Only `input` and `output` are required. In Rust, start from
+/// [`CompileRequest::new`] and set the options with its builder methods (or
+/// the public fields): the struct is `#[non_exhaustive]`, so options added
+/// later don't break callers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct CompileRequest {
     /// The OpenStreetMap extract (`.osm.pbf`).
     pub input: PathBuf,
@@ -68,6 +73,15 @@ pub struct CompileRequest {
     /// thread count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<usize>,
+    /// The profiles whose costs the package stores, a column each
+    /// (`default` is `wheeled`'s); the engine derives the others' costs from
+    /// the package when a profile is first used. A stored column adds about
+    /// 8 bytes an edge to the package and is customized when the package
+    /// opens; a derived one is computed and held in memory on first use.
+    /// The order and repeats don't matter: the same set gives the same
+    /// bytes. Default: `["wheeled", "on_foot"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<Vec<MobilityProfile>>,
 }
 
 impl CompileRequest {
@@ -81,6 +95,7 @@ impl CompileRequest {
             country: None,
             memory: MemoryProfile::default(),
             threads: None,
+            profiles: None,
         }
     }
 
@@ -112,6 +127,25 @@ impl CompileRequest {
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = Some(threads);
         self
+    }
+
+    /// See [`CompileRequest::profiles`](#structfield.profiles).
+    pub fn profiles(mut self, profiles: impl IntoIterator<Item = MobilityProfile>) -> Self {
+        self.profiles = Some(profiles.into_iter().collect());
+        self
+    }
+
+    /// The package build's options: the profiles to store, in slot order
+    /// without repeats, so that the same set always gives the same columns.
+    pub(crate) fn package_build_options(&self) -> PackageBuildOptions {
+        let mut options = PackageBuildOptions::default();
+        if let Some(profiles) = &self.profiles {
+            let mut profiles = profiles.clone();
+            profiles.sort_by_key(|profile| profile_slot(*profile));
+            profiles.dedup();
+            options.profiles = profiles;
+        }
+        options
     }
 
     /// The graph id the package records: the request's, or one from the input
@@ -147,6 +181,9 @@ impl CompileRequest {
         }
         if self.country.as_deref().is_some_and(str::is_empty) {
             return invalid("the country code is empty");
+        }
+        if self.profiles.as_ref().is_some_and(Vec::is_empty) {
+            return invalid("the profile list is empty");
         }
         Ok(())
     }
@@ -219,10 +256,11 @@ impl CompileProgress {
     }
 }
 
-/// The package a compile wrote.
+/// The package a compile wrote. Later releases may add fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct CompileResult {
     /// The package's path (the request's `output`).
     pub package: PathBuf,
@@ -372,6 +410,7 @@ pub(crate) fn compile_reporting(
         },
         route_archive_path: request.output.clone(),
         threads: request.threads,
+        package_options: request.package_build_options(),
     };
     let result = compile_route_archive(&internal, should_cancel, on_report);
     // Deepest first, so a parent goes once its children have.

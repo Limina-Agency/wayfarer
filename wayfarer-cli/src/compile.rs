@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use wayfarer_compiler::{
     CancelToken, CompileError, CompileProgress, CompileRequest, CompileStage, MemoryProfile,
-    compile,
+    MobilityProfile, compile,
 };
 
+use crate::query::parse_profile;
 use crate::{Failure, print_json, protocol};
 
 /// The exit status of a cancelled compile (as for SIGINT).
@@ -29,10 +30,10 @@ pub(crate) const CANCELLED_STATUS: i32 = 130;
 ///
 /// Instead of paths and flags, `--request` takes the compile as JSON
 /// ({"input", "output", "scratchDir", "graphId", "country", "memory":
-/// "standard"|"low", "threads"}), the same JSON the C ABI takes. With
-/// `--protocol` the command speaks the host protocol (version 1): JSON events
-/// on stdout, for applications that run the compiler as a child process; see
-/// the wayfarer-cli README.
+/// "standard"|"low", "threads", "profiles"}), the same JSON the C ABI takes.
+/// With `--protocol` the command speaks the host protocol (version 1): JSON
+/// events on stdout, for applications that run the compiler as a child
+/// process; see the wayfarer-cli README.
 #[derive(Debug, Args)]
 pub(crate) struct CompileArgs {
     /// The OpenStreetMap extract.
@@ -69,6 +70,18 @@ pub(crate) struct CompileArgs {
     /// The package's bytes are the same for any count.
     #[arg(long, value_name = "N", conflicts_with = "request")]
     threads: Option<NonZeroUsize>,
+    /// The profiles whose costs the package stores, comma-separated
+    /// (wheeled, on_foot, tracked, emergency, legged); the engine derives the
+    /// others' on first use. Each stored profile adds about 8 bytes an edge
+    /// [default: wheeled,on_foot].
+    #[arg(
+        long,
+        value_name = "P,...",
+        value_delimiter = ',',
+        value_parser = parse_profile,
+        conflicts_with = "request"
+    )]
+    profiles: Option<Vec<MobilityProfile>>,
     /// Take the compile as JSON from FILE, or from stdin with `-`.
     #[arg(long, value_name = "FILE")]
     request: Option<PathBuf>,
@@ -84,19 +97,18 @@ impl CompileArgs {
     /// The request the paths and flags describe (`None` with `--request`).
     pub(crate) fn request_from_flags(&self) -> Option<CompileRequest> {
         let (input, output) = (self.input.clone()?, self.output.clone()?);
-        Some(CompileRequest {
-            input,
-            output,
-            scratch_dir: self.scratch_dir.clone(),
-            graph_id: self.graph_id.clone(),
-            country: self.country.clone(),
-            memory: if self.low_memory {
-                MemoryProfile::Low
-            } else {
-                MemoryProfile::Standard
-            },
-            threads: self.threads.map(NonZeroUsize::get),
-        })
+        let mut request = CompileRequest::new(input, output);
+        request.scratch_dir = self.scratch_dir.clone();
+        request.graph_id = self.graph_id.clone();
+        request.country = self.country.clone();
+        request.memory = if self.low_memory {
+            MemoryProfile::Low
+        } else {
+            MemoryProfile::Standard
+        };
+        request.threads = self.threads.map(NonZeroUsize::get);
+        request.profiles = self.profiles.clone();
+        Some(request)
     }
 }
 
@@ -137,7 +149,7 @@ pub(crate) fn failure_of(error: CompileError) -> Failure {
 }
 
 /// Reads a request from `source` (`-`: stdin): a `CompileRequest`, or the host
-/// protocol's request.
+/// protocol's own request (deprecated: a warning goes to stderr).
 pub(crate) fn read_request(source: &Path) -> Result<CompileRequest, Failure> {
     let bytes = if source == Path::new("-") {
         let mut bytes = Vec::new();
@@ -153,12 +165,16 @@ pub(crate) fn read_request(source: &Path) -> Result<CompileRequest, Failure> {
             )
         })?
     };
-    protocol::parse_request(&bytes).map_err(|error| {
+    let (request, deprecated) = protocol::parse_request(&bytes).map_err(|error| {
         Failure::new(format!(
             "Invalid compile request {}: {error}",
             source.display()
         ))
-    })
+    })?;
+    if deprecated {
+        eprintln!("warning: {}", protocol::DEPRECATED_REQUEST);
+    }
+    Ok(request)
 }
 
 /// SIGINT and SIGTERM cancel the compile (it then removes its scratch and

@@ -34,7 +34,7 @@ fn parse_point(text: &str) -> Result<GeoPoint, String> {
 }
 
 /// A mobility profile by its JSON name (`wheeled`, `on_foot`, …).
-fn parse_profile(text: &str) -> Result<MobilityProfile, String> {
+pub(crate) fn parse_profile(text: &str) -> Result<MobilityProfile, String> {
     serde_json::from_value(Value::String(text.to_string())).map_err(|_| {
         format!("unknown profile `{text}` (wheeled, on_foot, tracked, emergency, legged)")
     })

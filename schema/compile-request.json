@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "CompileRequest",
-  "description": "What to compile, where to, and how. The JSON form (camelCase, unknown\nfields rejected) is what the `wayfarer compile --request` command and the\nC ABI take:\n\n```json\n{\"input\": \"monaco.osm.pbf\", \"output\": \"routing.mrt\", \"country\": \"MC\",\n \"memory\": \"low\", \"threads\": 2}\n```\n\nOnly `input` and `output` are required.",
+  "description": "What to compile, where to, and how. The JSON form (camelCase, unknown\nfields rejected) is what the `wayfarer compile --request` command and the\nC ABI take:\n\n```json\n{\"input\": \"monaco.osm.pbf\", \"output\": \"routing.mrt\", \"country\": \"MC\",\n \"memory\": \"low\", \"threads\": 2, \"profiles\": [\"wheeled\", \"on_foot\", \"legged\"]}\n```\n\nOnly `input` and `output` are required. In Rust, start from\n[`CompileRequest::new`] and set the options with its builder methods (or\nthe public fields): the struct is `#[non_exhaustive]`, so options added\nlater don't break callers.",
   "type": "object",
   "properties": {
     "country": {
@@ -30,6 +30,16 @@
     "output": {
       "description": "Where the package (`routing.mrt`) is written. It is written to\n`<output>.tmp` and renamed into place at the very end, so a package\nalready there is replaced only by a complete one, and kept if the\ncompile fails or is cancelled. Missing parent directories are created\n(and removed again if the compile fails). On Windows a package that\nis open (memory-mapped by an engine in any process) can't be replaced:\nthe compile fails with access denied and leaves it intact, so compile\nto a new path and switch the engine over.",
       "type": "string"
+    },
+    "profiles": {
+      "description": "The profiles whose costs the package stores, a column each\n(`default` is `wheeled`'s); the engine derives the others' costs from\nthe package when a profile is first used. A stored column adds about\n8 bytes an edge to the package and is customized when the package\nopens; a derived one is computed and held in memory on first use.\nThe order and repeats don't matter: the same set gives the same\nbytes. Default: `[\"wheeled\", \"on_foot\"]`.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/MobilityProfile"
+      }
     },
     "scratchDir": {
       "description": "Where the compile keeps scratch files (the encoded way facts while the\ngraph is built). The compile works in a fresh directory of its own\ninside it and removes that directory when it ends, whatever the\noutcome; nothing else in `scratch_dir` is touched. Default: the\ndirectory of `output`.",
@@ -66,6 +76,40 @@
           "description": "Small batches and queues and at most two default decode workers: for\nphones and other memory-constrained devices.",
           "type": "string",
           "const": "low"
+        }
+      ]
+    },
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
         }
       ]
     }

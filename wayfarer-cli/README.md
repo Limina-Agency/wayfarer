@@ -21,7 +21,7 @@ wayfarer route routing.mrt --from 43.7397,7.4275 --to 43.7290,7.4160 --geojson >
 
 ```sh
 wayfarer compile <input.osm.pbf> -o <routing.mrt> [--country CC] [--graph-id ID]
-                 [--scratch-dir DIR] [--low-memory] [--threads N]
+                 [--scratch-dir DIR] [--low-memory] [--threads N] [--profiles P,...]
 wayfarer compile --request <request.json | ->
 ```
 
@@ -41,16 +41,23 @@ JSON (`CompileResult`: the package's path, `byteLen`, `datasetHash`,
 - `--threads N`: the compile's threads and the ingest's decode workers
   (default: all cores, at most two decode workers with `--low-memory`). The
   package's bytes are the same for any count.
+- `--profiles P,...`: the profiles whose costs the package stores, a column
+  each (`wheeled`, `on_foot`, `tracked`, `emergency`, `legged`; default
+  `wheeled,on_foot`). The engine derives the others' costs when a profile is
+  first used, so every profile routes on every package; storing one costs
+  about 8 bytes an edge and its customization when the package opens, and
+  saves computing and holding it on first use. The order doesn't matter.
 - `--request FILE` (or `-` for stdin): the compile as `CompileRequest` JSON
   instead of paths and flags, the same JSON the C ABI takes:
 
   ```json
   {"input": "monaco.osm.pbf", "output": "routing.mrt", "scratchDir": "/tmp",
-   "graphId": "monaco", "country": "MC", "memory": "low", "threads": 2}
+   "graphId": "monaco", "country": "MC", "memory": "low", "threads": 2,
+   "profiles": ["wheeled", "on_foot"]}
   ```
 
   Only `input` and `output` are required; `memory` is `"standard"` (default)
-  or `"low"`.
+  or `"low"`. `schema/compile-request.json` in the repository describes it.
 
 A package already at the output path is replaced only by a complete one.
 Ctrl-C (or SIGTERM) cancels: the compile removes its scratch and partial files
@@ -106,9 +113,17 @@ the library, uses the host protocol (version 1):
 wayfarer compile --protocol --request <request.json> [--parent-stdin]
 ```
 
-The request is a file of JSON: either a `CompileRequest` (above) or the
-protocol's own request, all fields required except `countryCode` (may be
-`null`) and `threads`:
+The request is a file of JSON, a `CompileRequest` (above), the same JSON the
+C ABI takes:
+
+```json
+{"input": "/data/monaco.osm.pbf", "output": "/data/routing.mrt",
+ "scratchDir": "/tmp/wayfarer", "graphId": "monaco", "country": "MC", "threads": 4}
+```
+
+The protocol's own request is deprecated and will be removed before 1.0. It is
+still read, with a warning on stderr, but takes none of the options added since
+(`profiles`, ...):
 
 ```json
 {"inputPbfPath": "/data/monaco.osm.pbf", "tempDir": "/tmp/wayfarer",
@@ -116,10 +131,10 @@ protocol's own request, all fields required except `countryCode` (may be
  "routeArchivePath": "/data/routing.mrt", "threads": 4}
 ```
 
-`buildProfile` is `"desktop_full"` (as `--low-memory` off) or
-`"mobile_operational"` (as `--low-memory`). `tempDir` is the scratch parent:
-the compile works in a fresh directory inside it and removes that, and removes
-`tempDir` too if it created it.
+Its fields map to the `CompileRequest`'s: `inputPbfPath` is `input`,
+`routeArchivePath` `output`, `tempDir` `scratchDir`, `countryCode` `country`,
+and `buildProfile` `"desktop_full"` / `"mobile_operational"` is `memory`
+`"standard"` / `"low"`.
 
 With `--parent-stdin` the host holds the child's stdin open for the life of
 the job; when it closes (the host quit or crashed) the compile is cancelled,
