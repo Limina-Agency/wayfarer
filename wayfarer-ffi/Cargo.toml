@@ -39,6 +39,10 @@ mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # The wayfarer_compile_* calls: compile packages on the device. A
 # separate build of the library, since it adds the compiler and OSM ingest.
 compiler = ["dep:wayfarer-compiler"]
+# The compiler's phase events and counting allocator for benchmark harnesses
+# (see wayfarer-compiler), in place of mimalloc: a program has one global
+# allocator, so this also turns the library's mimalloc off.
+benchmark-profiling = ["compiler", "wayfarer-compiler/benchmark-profiling"]
 
 [dev-dependencies]
 # Generates the JSON Schemas in `schema/` (tests/schema.rs).

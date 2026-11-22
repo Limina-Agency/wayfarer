@@ -95,7 +95,7 @@ pub unsafe extern "C" fn wayfarer_compile_start(
 /// threads, and with the delay much of it stays resident under the next phase
 /// (Małopolskie at 4 threads: peak RSS 1,796 -> 1,284 MiB, measured with the
 /// binary). It applies to the library's allocations from then on.
-#[cfg(feature = "mimalloc")]
+#[cfg(all(feature = "mimalloc", not(feature = "benchmark-profiling")))]
 fn purge_freed_memory_at_once() {
     // `mi_option_purge_delay` in mimalloc v2 and v3's `mi_option_e`; the
     // bindings do not name it.
@@ -104,7 +104,7 @@ fn purge_freed_memory_at_once() {
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
 }
 
-#[cfg(not(feature = "mimalloc"))]
+#[cfg(not(all(feature = "mimalloc", not(feature = "benchmark-profiling"))))]
 fn purge_freed_memory_at_once() {}
 
 /// Cancels `token` at `deadline`, unless `done` is cancelled first.
