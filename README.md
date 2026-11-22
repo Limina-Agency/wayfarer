@@ -16,10 +16,10 @@ connectivity, on roads that change by the hour.
   The compiler is a library: it runs inside your app's process (from Rust, or
   `wayfarer_compile_*` in the C library), with progress, cancellation, a
   thread budget and a low-memory profile. A region the size of Małopolskie
-  (194 MiB extract) compiles in about 17 s with a memory peak of about
-  1.2 GiB on an 8-core laptop (Ryzen 7 5800H, 16 GB: 16.8–17.5 s and
-  1.13 GiB peak working set on Windows, 18.4 s and 1.17 GiB peak RSS under
-  WSL).
+  (194 MiB extract) compiles in about 18 s with a memory peak of about
+  0.5 GiB on a 4-core cloud machine (0.2 took about 17 s and 1.2 GiB on an
+  8-core laptop), and a country the size of Poland in about 4 minutes with
+  4.5 GiB (see Limits).
 - **Everything in-process.** No routing server, no sidecar, no tile folder:
   one file, memory-mapped, and one library call per request. The same
   package works on every platform: packages are byte-identical wherever and
@@ -27,10 +27,11 @@ connectivity, on roads that change by the hour.
 - **A lean runtime.** The routing-only C library is about 4.6 MB with 29
   third-party crates, and the compiler library prints nothing, reads no
   environment and installs no allocator. Typical requests take a few
-  milliseconds: on Małopolskie, drives p95 9.3 ms, walks p95 25 ms and two
-  alternatives p95 74 ms, and a 100×100 vehicle matrix takes 2.2 s
-  (`benchmarks/gates`). Searches are bounded by CCH potentials built from a
-  node order stored in the package. Packages are compact: Małopolskie's is
+  milliseconds: on Małopolskie on a 4-core cloud machine, drives p95 6–7 ms,
+  walks p95 21–22 ms and two alternatives p95 37–40 ms (0.2.0 on the same
+  machine: 8–11, 23–29 and 79–87 ms), and a 100×100 vehicle matrix took
+  2.2 s on an 8-core laptop with 0.2 (`benchmarks/gates`). Searches are
+  bounded by CCH potentials built from a node order stored in the package. Packages are compact: Małopolskie's is
   176 MiB, 0.79× Valhalla's tiles for the same region.
 - **Change the roads per request.** Closures, blocked bridges, slow-go
   stretches, newly opened tracks and ad-hoc connectors are overlays on a
@@ -49,12 +50,22 @@ overlap 0.97.
 
 ## Limits
 
-- **Regions, not continents.** Wayfarer is built and measured on regional
-  extracts: a province or a small country. Małopolskie (194 MiB extract,
-  1.07 million nodes, 2.56 million edges) gives a 176 MiB package and needs about
-  1.2 GiB to compile (`--low-memory` barely changes that at this size).
-  Packages and compile memory grow with the road network. Larger extracts are
-  untested.
+- **Regions and countries, not continents.** Wayfarer is built and measured
+  on regional and country extracts. On a 4-core cloud machine with 15 GiB:
+
+  | Extract | Nodes, edges | Package | Compile | Peak memory |
+  |---|---|---|---|---|
+  | Małopolskie (194 MiB) | 1.07 M, 2.57 M | 176 MiB | about 18 s | 0.5 GiB |
+  | Poland (2.3 GiB) | 10.6 M, 27.3 M | 1.84 GiB | about 4 min | 4.5 GiB |
+  | Germany (5.5 GiB) | 23.6 M, 60.4 M | 4.26 GiB | about 11 min | 10.2 GiB |
+
+  Packages and compile memory grow with the road network, so a compile of
+  Germany needs about 11 GiB free; larger extracts (Europe) are untested
+  and need more than 16 GB. A country package opens in one or two seconds,
+  but its first route customizes the CCH potentials: about 9 s and 1.8 GiB
+  of heap on Poland, 30 s and 4.2 GiB on Germany (`prepare_potentials` does
+  it ahead of time). Routes after that take milliseconds (an 890 km drive
+  across either country: 14–17 ms).
 - **No elevation.** Costs and durations ignore climbs: there is no elevation
   model, and OSM `incline` tags are stored but not costed. A host that cares
   can add cost overlays.

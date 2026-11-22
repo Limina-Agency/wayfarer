@@ -29,9 +29,12 @@
 //! # Stability
 //!
 //! [`COSTING_MODEL_VERSION`] is bumped whenever a change here changes any cost
-//! or duration the compiler stores. The engine opens only packages of its own
-//! model, so such a change ships the compiler and the engine together and
-//! existing packages must be recompiled. Turn costs and junction delays
+//! or duration the compiler stores, and such a change ships the compiler and
+//! the engine together. The engine opens packages of its own model and of
+//! older ones: an older model's package is re-costed from its stored costing
+//! inputs with the engine's model (each column once, on first use) and routes
+//! like a recompiled one until it is recompiled. A newer model fails to open
+//! as too new. Turn costs and junction delays
 //! ([`junction`]) are not stored: the engine evaluates them at query time from
 //! stored inputs, and the search bounds ignore them, so a change that only
 //! raises them changes routes and durations on existing packages without a

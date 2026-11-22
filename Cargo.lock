@@ -1132,7 +1132,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "wayfarer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-compiler"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "memmap2",
  "osm-pbf-ingest",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-costing"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "schemars",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-line-network"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libm",
  "rayon",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-package"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-road-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "geo",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "schemars",
