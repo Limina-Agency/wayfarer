@@ -34,9 +34,9 @@ debug-env = ["wayfarer-compiler/debug-env"]
 clap = { version = "4.5", features = ["derive"] }
 # SIGINT and SIGTERM cancel a compile, so it removes its scratch on the way out.
 ctrlc = { version = "3.4", features = ["termination"] }
-mimalloc = { version = "0.1", default-features = false, optional = true }
+mimalloc = { workspace = true, optional = true }
 # mimalloc's options (`mi_option_set`), to purge freed pages at once in a compile.
-libmimalloc-sys = { version = "0.1", default-features = false, optional = true, features = ["extended"] }
+libmimalloc-sys = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

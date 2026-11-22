@@ -25,8 +25,17 @@ wayfarer-service.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 wayfarer-compiler = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
+libmimalloc-sys = { workspace = true, optional = true }
 
 [features]
+default = ["mimalloc"]
+# The library's global allocator: mimalloc instead of the platform's malloc,
+# for the engine's many small, short-lived allocations. It needs a C compiler
+# for the target. A Rust program
+# that links this crate gets the allocator too; turn off default features to
+# keep its own.
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # The wayfarer_compile_* calls: compile packages on the device. A
 # separate build of the library, since it adds the compiler and OSM ingest.
 compiler = ["dep:wayfarer-compiler"]

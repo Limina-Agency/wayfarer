@@ -15,7 +15,9 @@ serde_json = "1.0"
 tempfile = "3"
 wayfarer = { path = "../wayfarer" }
 wayfarer-compiler = { path = "../wayfarer-compiler" }
-wayfarer-ffi = { path = "../wayfarer-ffi" }
+# Without mimalloc: the sanitizers and libFuzzer's malloc hooks must see every
+# allocation.
+wayfarer-ffi = { path = "../wayfarer-ffi", default-features = false }
 wayfarer-package = { path = "../wayfarer-package" }
 wayfarer-service = { path = "../wayfarer-service" }
 

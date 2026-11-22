@@ -64,13 +64,23 @@ route.exe routing.mrt 43.7397 7.4275 43.7290 7.4160
 
 Link the static library with `/MD` (or `/MDd`), not `cl`'s default `/MT`:
 Rust's MSVC targets build against the DLL C runtime, so `/MT` puts two C
-runtimes in one program. A default build happens to link that way, but one
-that pulls in C code (zstd, through `wayfarer-road-graph`'s `snapshot`
-feature) fails with unresolved `__imp_clock`, `__imp__wassert` and
+runtimes in one program, and the library's C code (mimalloc, and zstd
+through `wayfarer-road-graph`'s `snapshot` feature) is built against the DLL
+runtime: zstd fails with unresolved `__imp_clock`, `__imp__wassert` and
 `__imp_qsort_s`. A host that has to use `/MT` builds the library with
 `RUSTFLAGS="-C target-feature=+crt-static"`. The system libraries a static
 link needs are printed by
 `cargo rustc --release -p wayfarer-ffi --crate-type staticlib -- --print native-static-libs`.
+
+**Allocator.** The library allocates with mimalloc (the default `mimalloc`
+feature), which serves the engine's many small allocations faster than the
+platform allocators; building it needs a C compiler for the target. Its
+allocations stay inside the library: strings it returns are freed with
+`wayfarer_string_free`, never with the host's `free`. A build with
+`--no-default-features` uses the system allocator. With the `compiler`
+feature, `wayfarer_compile_start` makes mimalloc return freed pages to the
+system at once, as the `wayfarer` binary does, so a compile's phases don't
+stack their peaks.
 
 **Paths are UTF-8, also on Windows.** A Windows C program gets `argv` and
 the Win32 "A" functions' strings in the ANSI code page, which can't spell
