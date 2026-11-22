@@ -490,15 +490,16 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "osm-pbf-ingest"
-version = "0.2.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4a999265759c9277dac7792b33e6ff9fbe354bc0bb253201a980c6a0956b86"
+checksum = "5b9c1c3799747ae97fe8c6bff4c34a59ac35c0b98af3f5fa2c5c5f9342b1b330"
 dependencies = [
  "buffa",
  "compact_str",
  "crossbeam-channel",
  "flate2",
  "memmap2",
+ "quick-xml",
  "rayon",
  "roaring",
  "rustc-hash",
@@ -533,6 +534,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -834,7 +844,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "wayfarer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rayon",
  "rustc-hash",
@@ -847,8 +857,9 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-compiler"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "memmap2",
  "osm-pbf-ingest",
  "petgraph",
  "rayon",
@@ -864,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-costing"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -873,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -900,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-line-network"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libm",
  "rayon",
@@ -910,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-package"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "libm",
@@ -924,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-road-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "geo",
  "petgraph",
@@ -937,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "serde",

@@ -5,7 +5,70 @@ engine, service and C ABI crates) and `wayfarer-compiler-v*` (the compiler, the
 `wayfarer` binary and their crates). Each entry names the package format, the
 costing model and the C ABI version a release reads or writes.
 
-## Unreleased
+## 0.3.0 (2026-11-22)
+
+Both lines. Package format 2 (reads 2 only), costing model 1, C ABI version 1,
+as 0.2.0. Compiler output changes: packages compiled by 0.3 have new edge ids
+and dataset hashes.
+
+### Migrating from 0.2
+
+- **Recompile to pick up the compiler fixes.** 0.2 packages open and route
+  as before (format 2 and costing model 1 are unchanged), but a recompile is
+  what brings the turn restriction fix (#27) and the tile-ready ids (#65).
+  A recompiled package has new edge ids and a new dataset hash: rebind
+  overlay sets bound by edge id, or they fall back to their geometry.
+- **Routes change after a recompile** where a turn restriction was tagged
+  only for trucks, buses, PSV, goods, emergency vehicles or bicycles (#27;
+  common in Germany, absent from Małopolskie), and where endpoint snapping
+  chose between equally good candidates by edge id (#65). Requests that set
+  `conditionalRestrictionEvalAtMs` route differently on any package (#28).
+- **Matrix cells that crossed another point's destination-only area** (a
+  pedestrian old town that a third point of the matrix lies in) now take
+  the route between their own two points, with its cost (#41; 58 of 10,000
+  cells of a Kraków 100×100 drive matrix change).
+- **Requests over the new limits are rejected** (#30): more than 250,000
+  matrix cells, more than 16 isochrone contours (or empty, non-positive,
+  non-finite or repeated ones), correlation radii over 10 km, snap and map
+  match `candidateLimit` over 64, and projections over 100 km or 100,000
+  points. Matrix and isochrone requests now run the route option checks.
+  The C ABI fails them with `request_too_large` or `invalid_request`;
+  `RoutingEngine::matrix` fails every cell, `snap` and `project` clamp.
+- **Walk matrices of 13 to 64 targets** (with potentials) search pairwise
+  and differ from 0.2 in the last bits of their costs, distances and
+  durations; statuses and paths are the same (#40).
+- **Isochrones reach a little farther** (time contours from a farther origin
+  candidate no longer start late), and origins off the road snap as routes
+  do instead of failing with `no_candidate` (#35).
+- **Lane guidance changes** (#42): `turn_lanes` and `lane_guidance*` now
+  describe the edge approaching the junction.
+- **Compile progress:** the `collect_roads` stage now comes before
+  `index_nodes` (#50), and the ingest message reads "Located N of M nodes
+  in K scanned".
+- **Rust API (breaking):**
+  - `wayfarer`: `RouteManeuver` gains `lanes` (`RouteLane`,
+    `RouteLaneIndication`), so struct literals need it (#42).
+  - `wayfarer-road-graph`: `RoadNetwork` is a columnar type of its own
+    (with `Adjacency`, `EdgeColumn`, `NodeColumn`, `RoadEdgeRef`) instead of
+    `petgraph::Graph<RoadNode, RoadEdge>` (#64). `SharedInfoRef::geometry`
+    is an `InfoGeometry` (#56) and `SharedInfoRef` gains
+    `source_lineage_ids` and `coverage_id`; `SharedEdgeInfos::geometry_mut`
+    is `set_geometry`, `push_with_class` takes `&[(f64, f64)]` and
+    `SharedEdge` has no public `geometry` (#46). `RoadGraph` gains
+    `node_road_type_counts` (#46). New: `WayTemplate`, `TemplateWay`,
+    `RoadGraphBuilder::way_template` and `push_template_ways` (#67),
+    `SharedInfoIndex` (#46).
+  - `wayfarer-package`: `RoadEdge` loses `source_lineage_ids`,
+    `coverage_id`, `component_id` and `estimated_travel_time_s` (now a
+    method; use the source node's `component_id`), and `RoadNode` loses its
+    road type counts (#46, #56). `PackageWriter::section_bytes` returns an
+    `Option` (`None` for a spilled section); new `PackageWriter::spilling`,
+    `in_memory`, `set_header` and `section_len` (#48).
+  - `wayfarer-line-network`: `SharedLineInput.routing` is
+    `Option<Arc<RoadRoutingAttrs>>`, and `SharedTopologyEdge`'s
+    `source_lineage_ids` and `routing` are `Arc`s (#47, #53).
+  - `wayfarer-compiler`: the package build request gains `segment_order`,
+    and `package_build::renumber_in_package_order` is public (#65).
 
 ### Changes
 
@@ -32,8 +95,97 @@ costing model and the C ABI version a release reads or writes.
   costs except where endpoint snapping chose between equally good
   candidates by edge id. The road graph's nodes, edges and shared infos are
   stored in the new order, so their ids take no space and the package
-  build reads them in place; Małopolskie compiles in about the same time
-  (20.4 s, 21.7 s before) and peak memory (0.50–0.52 GiB).
+  build reads them in place. The renumbering pass costs time in the graph
+  step that a faster package build only partly wins back: Małopolskie
+  compiles in 17–18 s against 16–17 s before (about +1.4 s, +8 %; five
+  alternating runs on a 4-core cloud machine), Poland within run-to-run
+  spread (224–233 s against 215–237 s). Peak memory is unchanged.
+- **Fixed: turn restrictions for trucks, buses and bicycles banned every
+  profile** (compiler). A restriction tagged only for trucks, buses, PSV,
+  goods vehicles, emergency vehicles or bicycles (`restriction:hgv` and
+  similar, or `except=motorcar`) banned the turn for cars and walkers too.
+  It now binds no current profile; the restriction report counts such rows
+  in `modeNotRoutedRestrictionCount` (left out when zero). Recompile to pick
+  this up. (#27)
+- **Fixed: conditional access binds the profiles it names** (engine, with an
+  evaluation time). `bicycle:conditional` no longer closes ways to walkers,
+  and `hgv:`, `goods:`, `bus:` and `psv:conditional` no longer close them to
+  cars. An active `destination`, `delivery`, `permit`, `private` or
+  `customers` makes the way destination-only for vehicles instead of closing
+  it, and `private`/`customers` close it to walkers. Conditions with `;`
+  inside parentheses, `AND` terms (every term must hold) and `24:00` parse
+  correctly. Conditions are still evaluated in UTC. (#28)
+- **Fixed: unbounded requests** (#30). Every request that takes JSON runs
+  the checks `wayfarer::limits` promises, with new limits
+  `MAX_MATRIX_CELLS`, `MAX_ISOCHRONE_CONTOURS` and
+  `MAX_CORRELATION_DISTANCE_M`, and new `validate()` on
+  `RouteMatrixRequest`, `SnapRequest`, `ProjectRequest` and
+  `MapMatchRequest` (see Migrating).
+- **Fixed: isochrone origins and time contours** (#35). An origin off the
+  road widens its snap search as route and matrix locations do, and time
+  contours no longer start a farther origin candidate's time at its
+  approach cost (Kraków 5-minute drive: +15 % edges).
+- **Fixed: matrix cells crossing another point's destination-only area**
+  (#41). A cell now opens only its own two points' destination-only areas,
+  as routes do.
+- **Fixed: lane guidance** (#42). Lanes come from `turn:lanes` on the edge
+  approaching the junction instead of the edge entered; unmarked lanes
+  count as through lanes, sharp turn lanes match, and the unsuffixed
+  `turn:lanes` no longer applies backward on two-way roads. Added: typed
+  `lanes` on route maneuvers (indications and `valid`, left to right;
+  skipped in JSON when empty).
+- **Fixed: maneuver distances on multi-leg routes** (#42). The Waypoint
+  maneuver covers the stretch to the next maneuver, so maneuver distances
+  and durations add up to the route's.
+- **Fixed: cancelled row matrices stop promptly** (#63), within a few
+  milliseconds instead of first finishing their reaching-edge pass over
+  every target.
+- **Faster leg building** (#43): building a route leg's geometry,
+  attributes and maneuvers takes about 30 % fewer instructions, with
+  identical results (Małopolskie warm median request −19 %).
+- **Faster alternatives** (#38): via candidates are listed about twice as
+  fast (Małopolskie p95 with two alternatives 96 → 41 ms drive, 43 → 32 ms
+  walk), with the same routes.
+- **Faster matrices** (#39, #40): pairwise cells of one source reuse the
+  CCH potential from it (Kraków 100×100 drive −26 % CPU), and on-foot
+  matrices with potentials stay pairwise up to 64 targets (Kraków 50×50
+  walk −30 % CPU).
+- **Search state is paged** (#44): edge labels, node bounds and potential
+  slots are allocated in pages as searches reach the graph, and pooled
+  states free pages beyond a per-profile limit (64 MiB desktop, 8 MiB
+  mobile). A Poland package's first-route heap is 442 MiB smaller, and a
+  matrix no longer leaves graph-sized states behind (8×8 Kraków matrix on
+  Poland: +1,350 → +20 MiB kept).
+- **Compiler: country-scale compiles in about a third of the memory.**
+  The road graph is columnar and drained into the package as it is
+  written (#64); the line network and road graph records are slimmer (#46,
+  #47, #56); route memberships, routing values and class tables are held
+  compactly and once (#51, #53, #57, #59); way facts and finished package
+  sections wait in the scratch directory (#48, #55, #58); and the line
+  network, graph builder intake and enhancement hold smaller temporaries
+  (#52, #54, #60). Packages are byte-identical through all of these. On a
+  4-core cloud machine with 15 GiB, Poland's peak goes from 10.7 GiB in
+  0.2.0 to 4.5 GiB, Małopolskie's from 1.1 to 0.5 GiB, and Germany (23.6 M
+  nodes, 60.4 M edges, 4.26 GiB package) now compiles, with a 10.2 GiB
+  peak; 0.2 ran out of memory.
+- **Compiler: faster at country scale.** The CCH node order runs ISAP on a
+  contracted flow network with the same separators (Poland 151 → 34 s,
+  #45); the ingest decodes on every core (#49) and reads the road ways
+  first, then only their nodes' locations in one sequential pass, with no
+  node store (#50); and the line network topology and the road graph are
+  built in parallel up to its emission (#66, #67). On the same machine
+  Poland compiles in 224–263 s (0.2.0: 414 s), Germany in 654 s, and
+  Małopolskie in 17–20 s (0.2.0: 26–31 s).
+- **CI** (#31 to #33, #36, #37): macOS (Apple silicon) and MSRV (1.95) jobs
+  and macOS arm64 release archives; API diffs on every pull request
+  (`cargo semver-checks`, schema, C header and ABI keys, and a check that
+  `wayfarer.h` matches the exported functions); a Kraków centre gate with
+  timings and time-boxed fuzzing, run by hand; every job on GitHub-hosted
+  runners.
+- `experimental-regions` (hidden, unstable) gains a prototype of a
+  bounds-guided search across a virtual seam (#29).
+- Gate baselines: Małopolskie re-recorded on the 2026-11-18 extract (#26),
+  Kraków centre on main (#34) and after the tile-ready ids (#65).
 
 ## 0.2.0 (2026-11-19)
 
