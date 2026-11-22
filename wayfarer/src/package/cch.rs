@@ -1,8 +1,10 @@
 //! CCH lower-bound potentials ("CH-potentials", Strasser and Zeitz) for the
 //! edge-based A* of `package::search`.
 //!
-//! Built from an open package on first use
-//! ([`RoutingPackage::prepare_potentials`](super::RoutingPackage::prepare_potentials)):
+//! Built from an open package on first use: the topology by the first search,
+//! each stored column's metric by the first search on that column
+//! ([`RoutingPackage::prepare_potentials`](super::RoutingPackage::prepare_potentials)
+//! builds all of them):
 //!
 //! 1. **Order.** The package stores the node order (`Section::CchRank`, by
 //!    nested dissection of the node graph; see `wayfarer_package::cch_order`,
@@ -10,7 +12,9 @@
 //! 2. **Topology.** For each node by rank, its lowest upward neighbour `u`
 //!    inherits its other upward neighbours; `u` is its elimination-tree
 //!    parent. Arcs are stored once (lower → higher rank) with a weight per
-//!    direction.
+//!    direction. Built in one pass in rank order: a node's upward list is
+//!    final once its children (lower ranks) have been eliminated, so it is
+//!    appended to the arc array directly.
 //! 3. **Customization** per stored cost column: arcs start at the least column
 //!    cost of the edges they stand for (turn costs left out, which keeps the
 //!    metric a lower bound: turn costs are never negative), then every lower
@@ -29,13 +33,13 @@
 
 use std::cell::RefCell;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use wayfarer_package::cch_order::{NodeGraph, is_permutation};
+use wayfarer_package::cch_order::is_permutation;
 
 use super::Sections;
 use super::columns::MetricKey;
@@ -57,7 +61,9 @@ pub struct PotentialStats {
     pub arc_count: usize,
     /// Elimination-tree height: the largest upward search space.
     pub elimination_tree_height: usize,
-    /// Stored cost columns customized.
+    /// Stored cost columns customized (all of them once
+    /// [`RoutingPackage::prepare_potentials`](super::RoutingPackage::prepare_potentials)
+    /// returns: searches customize a column on first use).
     pub column_count: usize,
     pub order_ms: f64,
     pub topology_ms: f64,
@@ -110,9 +116,10 @@ static NEXT_METRIC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// The topology and the metric of every stored column.
 pub(crate) struct CchPotentials {
     pub topology: CchTopology,
-    /// By stored column.
-    pub metrics: Vec<CchMetric>,
-    pub stats: PotentialStats,
+    /// By stored column, customized on first use (see [`Self::stored_metric`]).
+    metrics: Vec<StoredMetric>,
+    /// The topology's part of [`Self::stats`].
+    topology_stats: PotentialStats,
     /// Metrics of profiles' own costs (`columns::metric_costs`), customized
     /// on first use, least recently used first.
     own: Mutex<Vec<(MetricKey, Arc<OwnMetric>)>>,
@@ -126,6 +133,108 @@ const OWN_METRIC_CAPACITY: usize = 4;
 pub(crate) struct OwnMetric {
     pub costs: Vec<f32>,
     pub metric: CchMetric,
+}
+
+/// A stored column's metric, customized by the first search that needs it.
+///
+/// Customization runs in parallel on rayon. A thread that finds another one
+/// customizing waits for it. The customizing thread itself can come back
+/// here while it waits for its parallel work, when rayon runs another search
+/// on it (cells of a matrix): it then customizes a copy, since waiting would
+/// never end, and the first metric stored wins. The two are the same bits
+/// (customization does not depend on the order of its parallel work).
+#[derive(Default)]
+struct StoredMetric {
+    /// The metric and its customization time, milliseconds.
+    ready: OnceLock<(CchMetric, f64)>,
+    /// The thread customizing it, if any.
+    building: Mutex<Option<std::thread::ThreadId>>,
+    built: Condvar,
+}
+
+impl StoredMetric {
+    fn get_or_customize(&self, topology: &CchTopology, cost: &[f32]) -> &CchMetric {
+        if let Some((metric, _)) = self.ready.get() {
+            return metric;
+        }
+        let me = std::thread::current().id();
+        let owner = {
+            let mut building = self.building.lock().unwrap_or_else(PoisonError::into_inner);
+            loop {
+                if let Some((metric, _)) = self.ready.get() {
+                    return metric;
+                }
+                match *building {
+                    Some(other) if other != me => {
+                        building = self
+                            .built
+                            .wait(building)
+                            .unwrap_or_else(PoisonError::into_inner);
+                    }
+                    Some(_) => break false,
+                    None => {
+                        *building = Some(me);
+                        break true;
+                    }
+                }
+            }
+        };
+        // Clears `building` and wakes the waiters when this returns, or
+        // unwinds: one of them then customizes.
+        let _done = owner.then_some(Built(self));
+        let started = Instant::now();
+        let metric = topology.customize(cost);
+        let _ = self
+            .ready
+            .set((metric, started.elapsed().as_secs_f64() * 1e3));
+        &self.ready.get().expect("a metric is stored").0
+    }
+}
+
+/// See [`StoredMetric::get_or_customize`].
+struct Built<'a>(&'a StoredMetric);
+
+impl Drop for Built<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .building
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.0.built.notify_all();
+    }
+}
+
+impl CchPotentials {
+    /// The metric of stored column `column`, customized on first use;
+    /// `None` when the package has no such column.
+    pub(crate) fn stored_metric(&self, g: &Sections<'_>, column: usize) -> Option<&CchMetric> {
+        let cost = g
+            .edge_cost
+            .get(column * g.edge_count..(column + 1) * g.edge_count)?;
+        Some(
+            self.metrics
+                .get(column)?
+                .get_or_customize(&self.topology, cost),
+        )
+    }
+
+    /// The package's stored cost columns.
+    pub(crate) fn stored_column_count(&self) -> usize {
+        self.metrics.len()
+    }
+
+    /// The topology's statistics, and the stored columns' customized so far.
+    pub(crate) fn stats(&self) -> PotentialStats {
+        let mut stats = self.topology_stats.clone();
+        stats.heap_bytes = self.topology.heap_bytes();
+        for (metric, ms) in self.metrics.iter().filter_map(|m| m.ready.get()) {
+            stats.column_count += 1;
+            stats.customize_ms += ms;
+            stats.heap_bytes += 4 * (metric.up.len() + metric.down.len());
+        }
+        stats
+    }
 }
 
 impl CchPotentials {
@@ -168,36 +277,33 @@ pub(crate) struct CchCache {
 }
 
 impl CchCache {
-    /// Builds the potentials on the first call; later calls return them.
+    /// Builds the topology on the first call; later calls return it. Each
+    /// stored column's metric is customized on first use
+    /// ([`CchPotentials::stored_metric`]).
     pub(crate) fn prepare(&self, g: &Sections<'_>) -> Option<&Arc<CchPotentials>> {
         self.ready
             .get_or_init(|| CchPotentials::build(g).map(Arc::new))
             .as_ref()
     }
+
+    /// [`Self::prepare`], with every stored column's metric customized.
+    pub(crate) fn prepare_all(&self, g: &Sections<'_>) -> Option<&Arc<CchPotentials>> {
+        let potentials = self.prepare(g)?;
+        for column in 0..potentials.stored_column_count() {
+            potentials.stored_metric(g, column);
+        }
+        Some(potentials)
+    }
 }
 
 impl CchPotentials {
     fn build(g: &Sections<'_>) -> Option<Self> {
-        let (topology, mut stats) = CchTopology::build(g)?;
+        let (topology, topology_stats) = CchTopology::build(g)?;
         let columns = g.edge_cost.len().checked_div(g.edge_count).unwrap_or(0);
-        let started = Instant::now();
-        let metrics = (0..columns)
-            .map(|column| {
-                let range = column * g.edge_count..(column + 1) * g.edge_count;
-                topology.customize(&g.edge_cost[range])
-            })
-            .collect::<Vec<_>>();
-        stats.customize_ms = started.elapsed().as_secs_f64() * 1e3;
-        stats.column_count = columns;
-        stats.heap_bytes = topology.heap_bytes()
-            + metrics
-                .iter()
-                .map(|m| 4 * (m.up.len() + m.down.len()))
-                .sum::<usize>();
         Some(Self {
             topology,
-            metrics,
-            stats,
+            metrics: (0..columns).map(|_| StoredMetric::default()).collect(),
+            topology_stats,
             own: Mutex::new(Vec::new()),
         })
     }
@@ -216,8 +322,211 @@ impl CchTopology {
             node_count: g.node_count,
             ..Default::default()
         };
+        let n = g.node_count;
         let started = Instant::now();
-        let graph = NodeGraph::new(g.first_out, g.edge_target);
+        if g.cch_rank.len() != n || !is_permutation(g.cch_rank) {
+            return None;
+        }
+        let rank = g.cch_rank.to_vec();
+        let mut node = vec![0u32; n];
+        for (v, r) in rank.iter().enumerate() {
+            node[*r as usize] = v as u32;
+        }
+        stats.order_ms = started.elapsed().as_secs_f64() * 1e3;
+
+        let started = Instant::now();
+        // The node graph's upward neighbours by rank (lower → higher),
+        // grouped by a counting sort on the lower rank; repeats (an edge and
+        // its twin) are left for the elimination to drop.
+        let ends = |u: usize, e: u32| {
+            let v = g.edge_target[e as usize] as usize;
+            (v != u).then(|| {
+                let (ru, rv) = (rank[u], rank[v]);
+                if ru < rv { (ru, rv) } else { (rv, ru) }
+            })
+        };
+        let mut first_orig = vec![0u32; n + 1];
+        for u in 0..n {
+            for e in g.first_out[u]..g.first_out[u + 1] {
+                if let Some((lo, _)) = ends(u, e) {
+                    first_orig[lo as usize + 1] += 1;
+                }
+            }
+        }
+        for x in 0..n {
+            first_orig[x + 1] += first_orig[x];
+        }
+        let mut fill = first_orig.clone();
+        let mut orig_head = vec![0u32; first_orig[n] as usize];
+        for u in 0..n {
+            for e in g.first_out[u]..g.first_out[u + 1] {
+                if let Some((lo, hi)) = ends(u, e) {
+                    orig_head[fill[lo as usize] as usize] = hi;
+                    fill[lo as usize] += 1;
+                }
+            }
+        }
+        drop(fill);
+        // Elimination in rank order: a node's upward neighbours are its own
+        // and its children's but the child itself (each child's list starts
+        // with this node, its parent). Children have lower ranks, so their
+        // lists are final, and so is this node's once built: it goes to the
+        // arc array as it is.
+        let mut first_up = Vec::with_capacity(n + 1);
+        first_up.push(0u32);
+        let mut up_head: Vec<u32> = Vec::with_capacity(orig_head.len());
+        let mut parent = vec![NO_NODE; n];
+        let mut first_child = vec![NO_NODE; n];
+        let mut next_sibling = vec![NO_NODE; n];
+        let mut list: Vec<u32> = Vec::new();
+        for x in 0..n {
+            list.clear();
+            list.extend_from_slice(&orig_head[first_orig[x] as usize..first_orig[x + 1] as usize]);
+            let mut child = first_child[x];
+            while child != NO_NODE {
+                let c = child as usize;
+                list.extend_from_slice(
+                    &up_head[first_up[c] as usize + 1..first_up[c + 1] as usize],
+                );
+                child = next_sibling[c];
+            }
+            list.sort_unstable();
+            list.dedup();
+            if let Some(&p) = list.first() {
+                parent[x] = p;
+                next_sibling[x] = first_child[p as usize];
+                first_child[p as usize] = x as u32;
+            }
+            up_head.extend_from_slice(&list);
+            if up_head.len() as u64 >= u64::from(UP_BIT) {
+                return None;
+            }
+            first_up.push(up_head.len() as u32);
+        }
+        drop((orig_head, first_orig, first_child, next_sibling, list));
+        up_head.shrink_to_fit();
+        let arcs = up_head.len();
+        // Downward lists.
+        let mut first_down = vec![0u32; n + 1];
+        for head in &up_head {
+            first_down[*head as usize + 1] += 1;
+        }
+        for y in 0..n {
+            first_down[y + 1] += first_down[y];
+        }
+        let mut fill = first_down.clone();
+        let mut down_tail = vec![0u32; arcs];
+        let mut down_arc = vec![0u32; arcs];
+        for x in 0..n {
+            for a in first_up[x]..first_up[x + 1] {
+                let y = up_head[a as usize] as usize;
+                down_tail[fill[y] as usize] = x as u32;
+                down_arc[fill[y] as usize] = a;
+                fill[y] += 1;
+            }
+        }
+        drop(fill);
+        // Elimination-tree levels.
+        let mut level = vec![0u32; n];
+        for x in 0..n {
+            let p = parent[x];
+            if p != NO_NODE {
+                level[p as usize] = level[p as usize].max(level[x] + 1);
+            }
+        }
+        let level_count = level.iter().copied().max().map_or(0, |l| l as usize + 1);
+        let mut level_start = vec![0u32; level_count + 1];
+        for l in &level {
+            level_start[*l as usize + 1] += 1;
+        }
+        for l in 0..level_count {
+            level_start[l + 1] += level_start[l];
+        }
+        let mut fill = level_start.clone();
+        let mut level_order = vec![0u32; n];
+        for (x, l) in level.iter().enumerate() {
+            let l = *l as usize;
+            level_order[fill[l] as usize] = x as u32;
+            fill[l] += 1;
+        }
+        drop((level, fill));
+        // Package edges → arcs, by blocks of source nodes.
+        let mut edge_arc = vec![NO_NODE; g.edge_count];
+        const BLOCK: usize = 4096;
+        let blocks = (0..n.div_ceil(BLOCK))
+            .map(|block| g.first_out[(block * BLOCK).min(n)] as usize)
+            .chain(std::iter::once(g.edge_count))
+            .collect::<Vec<_>>();
+        let mut rest = edge_arc.as_mut_slice();
+        let mut chunks = Vec::with_capacity(blocks.len());
+        for pair in blocks.windows(2) {
+            let (chunk, tail) = rest.split_at_mut(pair[1] - pair[0]);
+            chunks.push(chunk);
+            rest = tail;
+        }
+        chunks
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(block, arcs_of)| {
+                let first_edge = g.first_out[block * BLOCK] as usize;
+                for u in block * BLOCK..((block + 1) * BLOCK).min(n) {
+                    for e in g.first_out[u]..g.first_out[u + 1] {
+                        let Some((lo, hi)) = ends(u, e) else {
+                            continue;
+                        };
+                        let list = &up_head
+                            [first_up[lo as usize] as usize..first_up[lo as usize + 1] as usize];
+                        let at = list.binary_search(&hi).expect("every edge has an arc");
+                        let arc = first_up[lo as usize] + at as u32;
+                        arcs_of[e as usize - first_edge] =
+                            if rank[u] < rank[g.edge_target[e as usize] as usize] {
+                                arc | UP_BIT
+                            } else {
+                                arc
+                            };
+                    }
+                }
+            });
+        // Statistics: elimination-tree depth = upward search space size.
+        let mut depth = vec![0u32; n];
+        for x in (0..n).rev() {
+            let p = parent[x];
+            depth[x] = if p == NO_NODE {
+                1
+            } else {
+                depth[p as usize] + 1
+            };
+        }
+        stats.elimination_tree_height = depth.iter().copied().max().unwrap_or(0) as usize;
+        stats.arc_count = arcs;
+        stats.topology_ms = started.elapsed().as_secs_f64() * 1e3;
+        let topology = Self {
+            rank,
+            node,
+            first_up,
+            up_head,
+            parent,
+            first_down,
+            down_tail,
+            down_arc,
+            level_order,
+            level_start,
+            edge_arc,
+        };
+        Some((topology, stats))
+    }
+
+    /// [`Self::build`] the way it was first written: from the node graph,
+    /// with per-node upward lists that a node's parent inherits. Kept to check
+    /// that `build` gives the same arrays.
+    #[cfg(test)]
+    pub(crate) fn build_reference(g: &Sections<'_>) -> Option<(Self, PotentialStats)> {
+        let mut stats = PotentialStats {
+            node_count: g.node_count,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let graph = wayfarer_package::cch_order::NodeGraph::new(g.first_out, g.edge_target);
         if g.cch_rank.len() != g.node_count || !is_permutation(g.cch_rank) {
             return None;
         }
@@ -367,6 +676,22 @@ impl CchTopology {
             edge_arc,
         };
         Some((topology, stats))
+    }
+
+    /// Whether `other` has the same arrays (tests).
+    #[cfg(test)]
+    pub(crate) fn same_arrays(&self, other: &Self) -> bool {
+        self.rank == other.rank
+            && self.node == other.node
+            && self.first_up == other.first_up
+            && self.up_head == other.up_head
+            && self.parent == other.parent
+            && self.first_down == other.first_down
+            && self.down_tail == other.down_tail
+            && self.down_arc == other.down_arc
+            && self.level_order == other.level_order
+            && self.level_start == other.level_start
+            && self.edge_arc == other.edge_arc
     }
 
     fn heap_bytes(&self) -> usize {
@@ -1700,8 +2025,11 @@ pub(crate) fn exactness_mismatches(g: &Sections<'_>, potentials: &CchPotentials)
     let n = g.node_count;
     let scratch = RefCell::new(PotentialScratch::default());
     let (mut pairs, mut mismatches) = (0usize, 0usize);
-    for (column, metric) in potentials.metrics.iter().enumerate() {
+    for column in 0..potentials.stored_column_count() {
         let cost = &g.edge_cost[column * g.edge_count..(column + 1) * g.edge_count];
+        let metric = potentials
+            .stored_metric(g, column)
+            .expect("a stored column");
         let mut forward = vec![Vec::new(); n];
         let mut reverse = vec![Vec::new(); n];
         for u in 0..n {

@@ -216,7 +216,21 @@ pub(crate) enum ColumnHandle {
 }
 
 impl ColumnHandle {
+    /// The column, with the metric of the stored column whose potentials
+    /// bound it customized: here, before a matrix fans its cells out over
+    /// the threads, the customization itself runs in parallel (see
+    /// `cch::StoredMetric`).
     pub(crate) fn column<'a>(&'a self, view: &SearchGraph<'a>) -> CostColumn<'a> {
+        let column = self.column_only(view);
+        if let (Some(potentials), Some((PotentialBase::Stored(stored), _))) =
+            (view.cch, column.potential)
+        {
+            potentials.stored_metric(view, stored);
+        }
+        column
+    }
+
+    fn column_only<'a>(&'a self, view: &SearchGraph<'a>) -> CostColumn<'a> {
         match self {
             Self::Stored {
                 column,
@@ -354,7 +368,7 @@ impl ColumnKey {
     }
 }
 
-fn canonical(profile: MobilityProfile) -> MobilityProfile {
+pub(super) fn canonical(profile: MobilityProfile) -> MobilityProfile {
     match profile {
         MobilityProfile::Default => MobilityProfile::Wheeled,
         other => other,
@@ -362,7 +376,7 @@ fn canonical(profile: MobilityProfile) -> MobilityProfile {
 }
 
 /// The profile whose stored column bounds a derived column of `profile`.
-fn bound_profile(profile: MobilityProfile) -> MobilityProfile {
+pub(super) fn bound_profile(profile: MobilityProfile) -> MobilityProfile {
     match canonical(profile) {
         MobilityProfile::OnFoot | MobilityProfile::Legged => MobilityProfile::OnFoot,
         _ => MobilityProfile::Wheeled,
@@ -421,7 +435,21 @@ impl RoutingPackage {
         if let Some(column) = self.derived_columns.get(&key) {
             return ColumnHandle::Derived(column);
         }
-        let derived = derive_column(&view, key, self.file().column_for(bound_profile(profile)));
+        // The strict column of a stored column's options is that column
+        // without its destination-only edges: the costing differs only in
+        // denying them.
+        let masked = (!allow_destination_only
+            && sar.is_none()
+            && !self.recost
+            && costing == RouteCostingOptions::default().normalized())
+        .then(|| self.file().column_for(profile))
+        .flatten();
+        let derived = derive_column_from(
+            &view,
+            key,
+            self.file().column_for(bound_profile(profile)),
+            masked,
+        );
         if crate::debug::trace() {
             eprintln!(
                 "compact: derived {:?} column in {:.1} ms (potentials {:?}, k={:.4})",
@@ -587,6 +615,19 @@ pub(super) fn derive_column(
     key: ColumnKey,
     bound_column: Option<usize>,
 ) -> DerivedColumn {
+    derive_column_from(view, key, bound_column, None)
+}
+
+/// [`derive_column`]; with `masked`, a stored column that has `key`'s
+/// costing except for allowing destination-only edges, which `key` does not:
+/// the column is then that column with its destination-only edges unusable,
+/// without costing every edge again.
+pub(super) fn derive_column_from(
+    view: &SearchGraph<'_>,
+    key: ColumnKey,
+    bound_column: Option<usize>,
+    masked: Option<usize>,
+) -> DerivedColumn {
     let started = Instant::now();
     let options = RouteOptions {
         costing: key.costing,
@@ -604,13 +645,29 @@ pub(super) fn derive_column(
     let mut cost = vec![f32::INFINITY; edge_count];
     let mut duration = vec![f32::INFINITY; edge_count];
     const CHUNK: usize = 1 << 14;
+    debug_assert!(masked.is_none() || (!key.allow_destination_only && key.sar.is_none()));
+    let stored = masked.map(|column| {
+        let range = column * edge_count..(column + 1) * edge_count;
+        (&view.edge_cost[range.clone()], &view.edge_duration[range])
+    });
     cost.par_chunks_mut(CHUNK)
         .zip(duration.par_chunks_mut(CHUNK))
         .enumerate()
         .for_each(|(chunk, (costs, durations))| {
             let first = chunk * CHUNK;
             for (offset, (cost, duration)) in costs.iter_mut().zip(durations).enumerate() {
-                let inputs = view.cost_inputs((first + offset) as u32, bit, mask);
+                let edge = first + offset;
+                if let Some((stored_cost, stored_duration)) = stored {
+                    let tuple = view.cost_tuple(view.edge_shared_info[edge] as usize);
+                    if !EdgeCostFlags(view.si_cost_flags[tuple])
+                        .has(EdgeCostFlags::DESTINATION_ONLY)
+                    {
+                        *cost = stored_cost[edge];
+                        *duration = stored_duration[edge];
+                    }
+                    continue;
+                }
+                let inputs = view.cost_inputs(edge as u32, bit, mask);
                 if let EdgeCostDecision::Allowed(costed) = policy.edge_cost_inputs(&inputs) {
                     *cost = costed.cost as f32;
                     *duration = costed.duration_s as f32;

@@ -1936,6 +1936,59 @@ fn derived_default_columns_equal_stored_columns() {
     }
 }
 
+/// A strict column (destination-only edges unusable) under default options
+/// is its stored column with the destination-only edges masked: the same
+/// bits as costing every edge again, and the same factor and potentials.
+#[test]
+fn strict_default_columns_mask_the_stored_columns() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&costing_grid_graph(), &dir.path().join("costing.mrt"));
+    let graph = reader.package.clone();
+    let view = graph.view();
+    let mut masked = 0;
+    for profile in ALL_TEST_PROFILES {
+        let strict = graph.request_column(profile, &Default::default(), false);
+        let columns::ColumnHandle::Derived(strict) = strict else {
+            panic!("{profile:?}: a strict column is derived");
+        };
+        let costed = columns::derive_column(
+            &view,
+            columns::ColumnKey {
+                profile: columns::canonical(profile),
+                costing: crate::RouteCostingOptions::default().normalized(),
+                allow_destination_only: false,
+                sar: None,
+            },
+            graph.file().column_for(columns::bound_profile(profile)),
+        );
+        let costed = columns::ColumnHandle::Derived(Arc::new(costed));
+        let strict = columns::ColumnHandle::Derived(strict);
+        let (strict, costed) = (strict.column(&view), costed.column(&view));
+        let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(strict.cost), bits(costed.cost), "{profile:?}");
+        assert_eq!(bits(strict.duration), bits(costed.duration), "{profile:?}");
+        assert_eq!(
+            strict.heuristic_cost_per_m.to_bits(),
+            costed.heuristic_cost_per_m.to_bits(),
+            "{profile:?}"
+        );
+        assert_eq!(
+            format!("{:?}", strict.potential),
+            format!("{:?}", costed.potential),
+            "{profile:?}"
+        );
+        if let Some(column) = graph.file().column_for(profile) {
+            let stored = &view.edge_cost[column * view.edge_count..(column + 1) * view.edge_count];
+            masked += stored
+                .iter()
+                .zip(strict.cost)
+                .filter(|(stored, strict)| stored.is_finite() && !strict.is_finite())
+                .count();
+        }
+    }
+    assert!(masked > 0, "the fixture has destination-only edges");
+}
+
 #[test]
 fn package_routes_match_reference_routes_for_every_costing_option_class() {
     let dir = tempdir().unwrap();
@@ -7899,6 +7952,75 @@ fn cch_potentials_are_exact_node_distances() {
     }
 }
 
+/// The topology built in one pass in rank order has the same arrays as the
+/// node graph's elimination with per-node lists.
+#[test]
+fn cch_topology_matches_the_reference_build() {
+    let dir = tempdir().unwrap();
+    let graphs = [
+        ("grid", grid_graph()),
+        ("costing", costing_grid_graph()),
+        ("junction", junction_graph()),
+        ("restricted", randomly_restricted_grid(7)),
+        ("restricted-2", randomly_restricted_grid(11)),
+    ];
+    for (name, graph) in graphs {
+        let fixture = persist(&graph, &dir.path().join(format!("{name}.mrt")));
+        let view = fixture.package.file.view();
+        let (built, stats) = cch::CchTopology::build(&view).expect("topology");
+        let (reference, reference_stats) =
+            cch::CchTopology::build_reference(&view).expect("topology");
+        assert!(built.same_arrays(&reference), "{name}");
+        assert_eq!(stats.arc_count, reference_stats.arc_count, "{name}");
+        assert_eq!(
+            stats.elimination_tree_height, reference_stats.elimination_tree_height,
+            "{name}"
+        );
+    }
+}
+
+/// Searches customize a stored column's metric on first use, and only the
+/// columns they use; `prepare_potentials` customizes all of them. Threads
+/// asking for a metric at once, from inside rayon, all get the one stored.
+#[test]
+fn cch_stored_metrics_are_customized_on_first_use() {
+    let dir = tempdir().unwrap();
+    let fixture = persist(&costing_grid_graph(), &dir.path().join("costing.mrt"));
+    let reader = &fixture.package;
+    let view = reader.view();
+    let potentials = view.cch.expect("potentials");
+    let columns = potentials.stored_column_count();
+    assert!(columns >= 2);
+    assert_eq!(potentials.stats().column_count, 0);
+    let wheeled = reader.file().column_for(MobilityProfile::Wheeled).unwrap();
+    let handle = reader.request_column(MobilityProfile::Wheeled, &Default::default(), true);
+    handle.column(&view);
+    assert_eq!(potentials.stats().column_count, 1);
+    let first = potentials.stored_metric(&view, wheeled).unwrap() as *const _;
+    let foot = reader.file().column_for(MobilityProfile::OnFoot).unwrap();
+    assert_ne!(foot, wheeled);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let all = pool.install(|| {
+        use rayon::prelude::*;
+        (0..64)
+            .into_par_iter()
+            .map(|_| potentials.stored_metric(&view, foot).unwrap() as *const _ as usize)
+            .collect::<Vec<_>>()
+    });
+    assert!(all.iter().all(|metric| *metric == all[0]));
+    assert_eq!(potentials.stats().column_count, 2);
+    assert_eq!(
+        potentials.stored_metric(&view, wheeled).unwrap() as *const _,
+        first
+    );
+    let stats = reader.prepare_potentials().unwrap();
+    assert_eq!(stats.column_count, columns);
+    assert!(stats.heap_bytes > 0);
+}
+
 /// A potential scratch keeps its memo for the next potential with the same
 /// metric, direction and targets, and only for it: each potential reads the
 /// same values, bit for bit, as one on a fresh scratch.
@@ -7911,8 +8033,7 @@ fn cch_potentials_reuse_a_memo_only_for_the_same_query() {
     let view = package.file.view();
     let potentials = package.cch.prepare(&view).expect("potentials").clone();
     let topology = &potentials.topology;
-    let metrics = &potentials.metrics;
-    assert!(metrics.len() >= 2);
+    assert!(potentials.stored_column_count() >= 2);
     let (a, b) = (0u32, view.node_count as u32 - 1);
     let queries = [
         (0, false, vec![(a, 0.0)]),
@@ -7926,7 +8047,7 @@ fn cch_potentials_reuse_a_memo_only_for_the_same_query() {
     ];
     let shared = RefCell::new(cch::PotentialScratch::default());
     for (metric, reversed, targets) in &queries {
-        let metric = &metrics[*metric];
+        let metric = potentials.stored_metric(&view, *metric).unwrap();
         let fresh = RefCell::new(cch::PotentialScratch::default());
         let expected = cch::CchPotential::new(topology, metric, targets, *reversed, 0.5, &fresh);
         let actual = cch::CchPotential::new(topology, metric, targets, *reversed, 0.5, &shared);
@@ -7952,7 +8073,7 @@ fn cch_paged_potential_slots_match_dense_and_forget_on_release() {
     let view = package.file.view();
     let potentials = package.cch.prepare(&view).expect("potentials").clone();
     let topology = &potentials.topology;
-    let metric = &potentials.metrics[0];
+    let metric = potentials.stored_metric(&view, 0).unwrap();
     let targets = vec![(0u32, 0.0)];
     let paged = RefCell::new(cch::PotentialScratch::paged());
     for release in [false, true, false] {
@@ -7990,7 +8111,8 @@ fn via_candidates_match_the_reference_listing() {
         let view = package.file.view();
         let potentials = package.cch.prepare(&view).expect("potentials").clone();
         let topology = &potentials.topology;
-        for (column, metric) in potentials.metrics.iter().enumerate() {
+        for column in 0..potentials.stored_column_count() {
+            let metric = potentials.stored_metric(&view, column).unwrap();
             let costs = &view.edge_cost[column * view.edge_count..(column + 1) * view.edge_count];
             for source in 0..view.node_count as u32 {
                 for target in 0..view.node_count as u32 {

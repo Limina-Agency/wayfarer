@@ -272,9 +272,12 @@ impl RoutingPackage {
         self.memory
     }
 
-    /// Faults the mapped file in, pools one search state and derives the
-    /// cost column a default drive starts on, as a service does in the
-    /// background after opening a source.
+    /// Faults the mapped file in, pools one search state, derives the cost
+    /// column a default drive starts on and builds the potentials it uses
+    /// (the topology and the drive column's metric; other columns' metrics
+    /// are customized by their first search, or by
+    /// [`Self::prepare_potentials`]), as a service does in the background
+    /// after opening a source.
     /// Returns the bytes touched.
     pub fn prefetch(&self) -> usize {
         let bytes = self.file.prefetch_pages();
@@ -284,9 +287,9 @@ impl RoutingPackage {
         // it is not derived on the first request.
         let options = crate::types::RouteOptions::default();
         let wheeled = crate::types::MobilityProfile::Wheeled;
-        if self.confines_destination_only(&options, wheeled) {
-            self.request_column_sar(wheeled, &options.costing, false, None);
-        }
+        let strict = self.confines_destination_only(&options, wheeled);
+        self.request_column_sar(wheeled, &options.costing, !strict, None)
+            .column(&self.view());
         bytes
     }
 
@@ -297,9 +300,13 @@ impl RoutingPackage {
     /// use). Hosts call it, or [`Self::prefetch`], after opening a package
     /// so that the first request does not wait for it.
     ///
-    /// This takes about 0.7 s on a regional package (Małopolskie, 1.07 M
-    /// nodes, on 16 threads) and holds the topology and metrics in memory
-    /// (about 135 MB there). Every pooled search state that uses them
+    /// Without it, searches build the topology on first use and each
+    /// stored column's metric on the first search on that column, so a
+    /// session that only drives never customizes the walking column.
+    ///
+    /// This takes about 0.45 s on a regional package (Małopolskie, 1.07 M
+    /// nodes, on 4 threads) and holds the topology and metrics in memory
+    /// (about 140 MB there; about 110 MB with one column customized). Every pooled search state that uses them
     /// allocates 8 bytes per node of scratch on first use (16 with discount
     /// gates; about 9 MB there). Later calls return at once. `None` when the
     /// package stores no node order (written without one) or the node graph
@@ -308,8 +315,8 @@ impl RoutingPackage {
     pub fn prepare_potentials(&self) -> Option<cch::PotentialStats> {
         let sections = self.file.view();
         self.cch
-            .prepare(&sections)
-            .map(|potentials| potentials.stats.clone())
+            .prepare_all(&sections)
+            .map(|potentials| potentials.stats())
     }
 
     /// The sections, with the complex-restriction automata the searches build.
