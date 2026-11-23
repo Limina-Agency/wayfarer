@@ -639,7 +639,11 @@ impl Drop for EncodedWayFacts {
 }
 
 struct CollectedRoadInputs {
+    /// The line network, its topology's edges taken out into
+    /// `topology_edges`.
     network: SharedLineNetwork,
+    /// The topology's edges, in edge id order, a batch at a time.
+    topology_edges: Vec<Vec<SharedTopologyEdge>>,
     turn_restrictions: Vec<RoadTurnRestriction>,
     route_memberships: CollectedRouteMemberships,
     barrier_node_tags: HashMap<i64, NodeBarrierTags>,
@@ -866,13 +870,14 @@ impl UnfinishedRoadInputs {
         // Routing consumes topology only: render products belong exclusively
         // to vector compilation and are never derived here.
         #[cfg(not(feature = "benchmark-profiling"))]
-        let network = self.builder.finish_topology_only();
+        let (network, topology_edges) = self.builder.finish_topology_batches();
         #[cfg(feature = "benchmark-profiling")]
-        let network = self
+        let (network, topology_edges) = self
             .builder
-            .finish_topology_only_with_observer(&mut |name| profiling::checkpoint(name));
+            .finish_topology_batches_with_observer(&mut |name| profiling::checkpoint(name));
         Ok(CollectedRoadInputs {
             network,
+            topology_edges,
             turn_restrictions: self.turn_restrictions,
             route_memberships: self.route_memberships,
             barrier_node_tags: self.barrier_node_tags,
@@ -1137,48 +1142,6 @@ struct CutLine {
     pieces: Vec<SharedLineInput>,
 }
 
-/// Takes a vector's items in order, a batch at a time, and gives its buffer
-/// back as it empties: whenever the remaining items fit in half the buffer
-/// they move to one that size. A large vector consumed into something that
-/// grows (the topology edges into the graph builder, 13.7 M on Poland) is
-/// then not held in full until its last item.
-struct ShrinkingBatches<T> {
-    /// The items not yet taken, last first.
-    rest: Vec<T>,
-    batch_len: usize,
-}
-
-impl<T> ShrinkingBatches<T> {
-    fn new(mut items: Vec<T>, batch_len: usize) -> Self {
-        items.reverse();
-        Self {
-            rest: items,
-            batch_len,
-        }
-    }
-}
-
-impl<T> Iterator for ShrinkingBatches<T> {
-    type Item = Vec<T>;
-
-    fn next(&mut self) -> Option<Vec<T>> {
-        if self.rest.is_empty() {
-            return None;
-        }
-        let mut batch = self
-            .rest
-            .split_off(self.rest.len().saturating_sub(self.batch_len));
-        batch.reverse();
-        if self.rest.capacity() > 1024 && self.rest.len() <= self.rest.capacity() / 2 {
-            self.rest.shrink_to_fit();
-        }
-        Some(batch)
-    }
-}
-
-/// Topology segments pushed to the graph builder at a time.
-const SEGMENT_BATCH_LEN: usize = 16 * 1024;
-
 fn build_road_graph(
     graph_id: &str,
     country_code: Option<&str>,
@@ -1188,6 +1151,7 @@ fn build_road_graph(
 ) -> Result<RoadGraphCompileResult, CompileError> {
     let CollectedRoadInputs {
         network,
+        topology_edges,
         turn_restrictions,
         route_memberships,
         barrier_node_tags,
@@ -1197,12 +1161,15 @@ fn build_road_graph(
     } = inputs;
     let phase = Phase::start("topology_to_graph_builder");
     let topology_repair_report = topology_repair_report(&network);
+    let SharedLineTopology { nodes, edges } = network.topology;
+    debug_assert!(edges.is_empty(), "the edges come in batches");
     #[cfg_attr(not(test), allow(unused_mut))]
-    let SharedLineTopology { nodes, mut edges } = network.topology;
+    let mut topology_edges = topology_edges;
     match segment_order {
         SegmentOrder::Topology => {}
         #[cfg(test)]
         SegmentOrder::Shuffled(seed) => {
+            let mut edges = topology_edges.into_iter().flatten().collect::<Vec<_>>();
             // Fisher–Yates with a splitmix64 stream.
             let mut state = seed;
             let mut next = || {
@@ -1215,6 +1182,7 @@ fn build_road_graph(
             for index in (1..edges.len()).rev() {
                 edges.swap(index, (next() % (index as u64 + 1)) as usize);
             }
+            topology_edges = vec![edges];
         }
     }
     // Topology node ids are small and dense, so they index a vector; a later
@@ -1246,9 +1214,9 @@ fn build_road_graph(
     let mut rows_written = 0;
     // The road segments (as `SharedLineTopology::road_segments` picks them),
     // consumed a batch at a time: each segment's geometry moves to the
-    // builder, and the rest of it, and the edge vector itself, is freed as
-    // the builder grows.
-    for mut batch in ShrinkingBatches::new(edges, SEGMENT_BATCH_LEN) {
+    // builder, and the rest of it, and each batch's vector, is freed as the
+    // builder grows.
+    for mut batch in topology_edges {
         batch.retain(|edge| edge.layer == SharedLineLayer::Roads && edge.routing.is_some());
         let segment_templates = batch
             .iter()

@@ -74,7 +74,27 @@ impl SharedLineNetworkBuilder {
     /// to [`finish`](Self::finish), without deriving render products. For
     /// consumers such as the routing compiler that would discard them.
     pub fn finish_topology_only(self) -> SharedLineNetwork {
-        self.finish_inner(&mut |_| {}, false)
+        self.finish_inner(&mut |_| {}, false, false).0
+    }
+
+    /// Build topology only, as [`finish_topology_only`](Self::finish_topology_only)
+    /// does, with the topology's edges handed back in batches, in edge id
+    /// order, instead of in `topology.edges` (left empty). A consumer that
+    /// takes the edges in order can free each batch as it goes, where one
+    /// vector of them all stays allocated, or is copied as it shrinks, until
+    /// the last edge is taken.
+    pub fn finish_topology_batches(self) -> (SharedLineNetwork, Vec<Vec<SharedTopologyEdge>>) {
+        self.finish_inner(&mut |_| {}, false, true)
+    }
+
+    /// [`finish_topology_batches`](Self::finish_topology_batches), reporting a
+    /// named checkpoint at each internal phase as
+    /// [`finish_with_observer`](Self::finish_with_observer) does.
+    pub fn finish_topology_batches_with_observer(
+        self,
+        observer: &mut dyn FnMut(&str),
+    ) -> (SharedLineNetwork, Vec<Vec<SharedTopologyEdge>>) {
+        self.finish_inner(observer, false, true)
     }
 
     /// Build the network, reporting a named checkpoint at each internal phase.
@@ -84,21 +104,22 @@ impl SharedLineNetworkBuilder {
     /// and the render products derived from it. A caller with allocation
     /// counters can attribute the peak to a phase instead of to the call.
     pub fn finish_with_observer(self, observer: &mut dyn FnMut(&str)) -> SharedLineNetwork {
-        self.finish_inner(observer, true)
+        self.finish_inner(observer, true, false).0
     }
 
     pub fn finish_topology_only_with_observer(
         self,
         observer: &mut dyn FnMut(&str),
     ) -> SharedLineNetwork {
-        self.finish_inner(observer, false)
+        self.finish_inner(observer, false, false).0
     }
 
     fn finish_inner(
         mut self,
         observer: &mut dyn FnMut(&str),
         render_products: bool,
-    ) -> SharedLineNetwork {
+        batched: bool,
+    ) -> (SharedLineNetwork, Vec<Vec<SharedTopologyEdge>>) {
         // Layer processing order decides topology id assignment; do not reorder.
         // Equal inputs keep their push order (the index breaks ties), as the
         // stable `sort_by` this replaces kept them. Sorting indices and
@@ -150,16 +171,24 @@ impl SharedLineNetworkBuilder {
         debug_assert!(self.inputs.is_empty());
 
         observer("inputs_bucketed");
+        let mut batches = Vec::new();
         for layer_inputs in buckets {
             if layer_inputs.is_empty() {
                 continue;
             }
-            append_layer_network(&mut network, layer_inputs, observer, render_products);
+            append_layer_network(
+                &mut network,
+                layer_inputs,
+                observer,
+                render_products,
+                batched.then_some(&mut batches),
+            );
         }
 
         observer("layers_appended");
         network.stats.topology_nodes = network.topology.nodes.len();
-        network.stats.topology_edges = network.topology.edges.len();
+        network.stats.topology_edges =
+            network.topology.edges.len() + batches.iter().map(Vec::len).sum::<usize>();
         network.stats.render_lines = network.render.render_lines.len();
         network.render.render_lines.sort_by(|left, right| {
             (
@@ -179,7 +208,7 @@ impl SharedLineNetworkBuilder {
                     right.end_node,
                 ))
         });
-        network
+        (network, batches)
     }
 }
 

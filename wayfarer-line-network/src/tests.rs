@@ -979,6 +979,53 @@ fn topology_only_finish_matches_full_finish_topology() {
 }
 
 #[test]
+fn batched_topology_finish_matches_topology_only_finish() {
+    let line = |layer: SharedLineLayer, feature_id: i64, row: i64| {
+        // Each line meets the next at its last node, so lines past the first
+        // get anchors in their middles too.
+        let lat = 50.0 + row as f64 * 1e-4;
+        SharedLineInput {
+            feature_id,
+            layer,
+            geometry: vec![(lat, 19.0), (lat, 19.001), (lat + 1e-4, 19.002)],
+            node_chain: vec![3 * row, 3 * row + 1, 3 * row + 3],
+            source_lineage_ids: vec![feature_id],
+            attrs: attrs(&[("class", "primary")]).into(),
+            compile_inputs: attrs(&[("class", "primary")]).into(),
+            min_zoom: 8,
+            max_zoom: 14,
+            sort_order: 1,
+            routing: None,
+        }
+    };
+    // More roads than one batch of lines, then the other layers, whose edge
+    // ids run on from the roads'.
+    let inputs = || {
+        let mut inputs = (0..20_000)
+            .map(|row| line(SharedLineLayer::Roads, row + 1, row))
+            .collect::<Vec<_>>();
+        inputs.extend((0..3).map(|row| line(SharedLineLayer::WaterLines, 100_000 + row, row)));
+        inputs.extend((0..3).map(|row| line(SharedLineLayer::Railways, 200_000 + row, row)));
+        inputs
+    };
+    let mut whole = SharedLineNetworkBuilder::default();
+    whole.extend_inputs(inputs());
+    let whole = whole.finish_topology_only();
+    let mut batched = SharedLineNetworkBuilder::default();
+    batched.extend_inputs(inputs());
+    let (batched, batches) = batched.finish_topology_batches();
+
+    assert!(batches.len() > 2);
+    assert!(batched.topology.edges.is_empty());
+    assert_eq!(batched.topology.nodes, whole.topology.nodes);
+    assert_eq!(
+        batches.into_iter().flatten().collect::<Vec<_>>(),
+        whole.topology.edges
+    );
+    assert_eq!(batched.stats, whole.stats);
+}
+
+#[test]
 fn collinearity_is_checked_in_mercator_space() {
     let point = |lng: f64| PointKey {
         lat: to_fixed(50.0),

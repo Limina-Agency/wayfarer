@@ -162,7 +162,12 @@ pub(crate) fn append_layer_network(
     inputs: Vec<SharedLineInput>,
     observer: &mut dyn FnMut(&str),
     render_products: bool,
+    batches: Option<&mut Vec<Vec<SharedTopologyEdge>>>,
 ) {
+    assert!(
+        !(render_products && batches.is_some()),
+        "render products read the topology's own edges"
+    );
     let layer = inputs.first().map(|input| input.layer);
     // Each input becomes its raw line on its own; the collect keeps them in
     // input order. `filter_map` then drops the empty ones in place (`flatten`
@@ -205,14 +210,20 @@ pub(crate) fn append_layer_network(
     drop(point_offsets);
     drop(line_snap_ids);
 
-    // Edges go straight into the topology, which is sized once for them: a
-    // line has an edge between each two consecutive anchors.
-    let appended_from = network.topology.edges.len();
+    // Edges go straight into the topology, which is sized once for them, or,
+    // when `batches` takes them, into one vector per batch of lines below: a
+    // line has an edge between each two consecutive anchors. Edge ids run on
+    // from the edges of the layers before, wherever those went.
+    let appended_from = network.topology.edges.len()
+        + batches
+            .as_deref()
+            .map_or(0, |batches| batches.iter().map(Vec::len).sum());
     let edge_count = anchors.points.len() - raw_lines.len();
     let node_offset = network.topology.nodes.len() as u32;
-    let edges = &mut network.topology.edges;
-    edges.reserve_exact(edge_count);
-    let slots = &mut edges.spare_capacity_mut()[..edge_count];
+    if batches.is_none() {
+        network.topology.edges.reserve_exact(edge_count);
+    }
+    let mut layer_batches = Vec::new();
     // The lines' edges are written into their places a batch of lines at a
     // time, from the last batch back: each batch is split off the raw lines
     // and consumed in parallel, so the raw lines shrink as the edges grow,
@@ -225,7 +236,14 @@ pub(crate) fn append_layer_network(
         }
         // Where a line's edges start among the layer's.
         let edge_offset = |line: usize| anchors.offsets[line] - line;
-        let mut rest = &mut slots[edge_offset(first_line)..edge_offset(first_line + batch.len())];
+        let range = edge_offset(first_line)..edge_offset(first_line + batch.len());
+        let mut own = Vec::new();
+        let mut rest = if batches.is_some() {
+            own.reserve_exact(range.len());
+            &mut own.spare_capacity_mut()[..range.len()]
+        } else {
+            &mut network.topology.edges.spare_capacity_mut()[range.clone()]
+        };
         let mut pieces = Vec::with_capacity(batch.len());
         for line in first_line..first_line + batch.len() {
             let (piece, tail) =
@@ -245,22 +263,37 @@ pub(crate) fn append_layer_network(
                     &anchors.points[anchor_range.clone()],
                     &anchor_nodes[anchor_range],
                     node_offset,
-                    // Edge ids run on from the topology's length, line by
-                    // line.
+                    // Edge ids run on line by line.
                     (appended_from + edge_offset(line)) as u32,
                     piece,
                 );
             });
+        if batches.is_some() {
+            // SAFETY: every line of the batch wrote each of its edges' slots
+            // (`write_line_edges` fills its piece), and the lines' pieces
+            // tile the vector's first `range.len()` spare slots.
+            unsafe { own.set_len(range.len()) };
+            layer_batches.push(own);
+        }
     }
-    // SAFETY: every line wrote each of its edges' slots (`write_line_edges`
-    // fills its piece), and the lines' pieces tile the first `edge_count`
-    // spare slots.
-    unsafe { edges.set_len(appended_from + edge_count) };
+    match batches {
+        Some(batches) => {
+            layer_batches.reverse();
+            batches.append(&mut layer_batches);
+        }
+        // SAFETY: every line wrote each of its edges' slots (`write_line_edges`
+        // fills its piece), and the lines' pieces tile the first `edge_count`
+        // spare slots.
+        None => unsafe {
+            let edges = &mut network.topology.edges;
+            edges.set_len(appended_from + edge_count)
+        },
+    }
     drop(raw_lines);
     drop(anchors);
     drop(anchor_nodes);
     observer(&format!("{layer_name}_topology_edges"));
-    if network.topology.edges.len() == appended_from {
+    if edge_count == 0 {
         return;
     }
     network
