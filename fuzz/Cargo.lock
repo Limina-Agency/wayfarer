@@ -844,7 +844,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "wayfarer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rayon",
  "rustc-hash",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-compiler"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "memmap2",
  "osm-pbf-ingest",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-costing"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "serde",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-ffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-line-network"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libm",
  "rayon",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-package"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "libm",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-road-graph"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "geo",
  "petgraph",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "wayfarer-service"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "serde",

@@ -5,6 +5,138 @@ engine, service and C ABI crates) and `wayfarer-compiler-v*` (the compiler, the
 `wayfarer` binary and their crates). Each entry names the package format, the
 costing model and the C ABI version a release reads or writes.
 
+## 0.4.0 (2026-11-23)
+
+Both lines. Package format 2 (reads 2 only), costing model 1, C ABI version 1,
+as 0.3.0. Compiler output is unchanged for complete, id-sorted extracts: they
+compile to the same bytes as with 0.3.0, so there is no need to recompile.
+
+### Migrating from 0.3
+
+- **No recompile.** 0.3 packages open, route and give the same results as
+  before, and the 0.4 compiler writes the same bytes for them. Only extracts
+  with missing node refs or repeated way ids compile differently (#75; see
+  Changes), and those now say so in their quality report. Extracts clipped
+  at a border can have a few: openstreetmap.fr's Poland extract has 50 ways
+  that refer to 265 nodes it does not hold, so its package changes.
+- **Results are unchanged, and so is default output, with one addition:**
+  route edge attributions gain `inclinePercent` where the way has an OSM
+  `incline` (#71; 44 of 2,324 Małopolskie gate responses). Every new
+  request field is optional and off by default: route `geometryFormat` and
+  `include` (#71), map match `options.attributes` (#73), and matrix,
+  isochrone and nearest `overlays`, `departureAtMs` and `includeEdgeIds`
+  (#77).
+- **The compiler's host protocol request is deprecated** (#76). The old
+  request (`inputPbfPath`, `tempDir`, `routeArchivePath`, `buildProfile`) is
+  still read, with a warning on stderr, and will be removed before 1.0.
+  Send a `CompileRequest`, the JSON the C ABI takes; the CLI README maps the
+  old fields.
+- **The C library allocates with mimalloc** (#70). Strings it returns are
+  still freed with `wayfarer_string_free`, so hosts don't change. A host that
+  builds `wayfarer-ffi` from source with its own Rust allocator, or wants the
+  system allocator, builds it with `--no-default-features` (and `compiler`
+  if it compiles packages). On Windows with `/MT`, the default build also
+  links mimalloc's C code against the static CRT.
+- **`prefetch()` builds less** (#72): the CCH topology and the default drive
+  profile's metric, not the walking one. Call `prepare_potentials()` to
+  build every column ahead of time, as before.
+- **Release builds of this workspace take about twice as long** (#70: fat
+  LTO, one codegen unit). Crates used as dependencies follow the dependent's
+  own profile.
+- **Rust API (breaking):**
+  - `wayfarer-compiler`: `CompileRequest` and `CompileResult` are
+    `#[non_exhaustive]`. Build a request with `CompileRequest::new` and its
+    builder methods (`.profiles(...)` is new), or set its public fields;
+    struct literals no longer compile. `MobilityProfile` is re-exported for
+    `.profiles(...)` (#76).
+  - `wayfarer`: `RouteMatrixRequest` and `RouteIsochroneRequest` gain
+    `overlays`, `departure_at_ms` and `include_edge_ids`;
+    `RouteIsochroneMetric` gains `DistanceM`, so
+    exhaustive matches need an arm (#77). `RouteRequest` gains
+    `geometry_format`, route results gain `polyline6` and `geojson` on every
+    geometry, `RouteEdgeAttribution` gains `incline_percent`, and
+    `RouteNavigationInput` gains `polyline6` (#71). `MapMatchOptions` gains
+    `attributes`, `MapMatchSubPath` gains `edges` and `duration_s`, and
+    `MatchedTraceSample` gains `edge_index` and `observed_speed_mps` (#73).
+    Struct literals need the new fields; `::new` and `Default` are
+    unchanged.
+  - `wayfarer-service`: `RouteWorkflowRequest` gains `include` and
+    `RouteWorkflowResult` gains `segment_summaries` and `include` (#71).
+
+### Changes
+
+- **Faster release builds of the engine** (#70; perf.md SC-1, SC-2). Release
+  builds use fat LTO with one codegen unit, so the engine's hot paths inline
+  across `wayfarer-package` and `wayfarer-costing`, and the C library
+  allocates with mimalloc (new default feature `mimalloc` on
+  `wayfarer-ffi`; `--no-default-features` keeps the system allocator; a
+  compile through the C ABI returns freed pages at once, as the binary
+  does). Random drives take about 16 % fewer instructions and 12 % less
+  time on Linux, where glibc's allocator is already close to mimalloc; the
+  gain against the macOS and Windows allocators should be larger. The
+  `wayfarer` binary is 7.8 MB instead of 11.6 MB and the C library about
+  4.0 MB stripped instead of 4.3 MB. The fuzz targets build the C library
+  without mimalloc, so the sanitizers see every allocation.
+- **Faster open to first route** (#72; PERF-16, perf.md OM-1 to OM-3). The
+  CCH topology is built in one pass, each stored cost column's potentials
+  are customized the first time a search needs them, and the strict drive
+  column is masked from the stored column instead of costed again. On
+  Małopolskie (4 vCPU) the first drive after opening takes 0.34–0.39 s
+  instead of 0.74–0.95 s, at about half the CPU, and a drive-only session
+  holds about 28 MiB less heap. On Poland the first 892 km drive takes
+  6.1–6.9 s and 1,506 MiB of heap instead of 8.9 s and 1,871 MiB.
+  `prepare_potentials()` still builds everything and is about a third
+  faster. Results are unchanged.
+- **Added: nearest targets by route cost** (#74; FEAT-A4).
+  `RoutingEngine::nearest` and `wayfarer_nearest` (C ABI 1, additive,
+  cancellable) return the k targets cheapest to reach from a source, or to
+  reach it from, equal to the k cheapest cells of the full matrix. From the
+  source the search stops early (on foot with 1,500 Kraków targets and
+  k = 1, about 1,000 times fewer edges; never slower than the full row).
+  At most `MAX_NEAREST_TARGETS` (10,000) targets.
+- **Added: compact route output** (#71; FFI-6, the first slice of API-8).
+  `geometryFormat` on route requests (`points`, the default, `polyline6`
+  or `geojson`) puts every route geometry in `polyline6` or `geojson` and
+  leaves `geometry` empty; shape indexes point into the decoded vertices
+  as before. `include` keeps only the listed optional parts (`segments`,
+  `legs`, `edgeAttributions`, `costBreakdown`, `shapeSegments`,
+  `recosts`); without `segments` the result has `segmentSummaries`, and the
+  result echoes `include`. On Monaco a 3-point route with `include: []` and
+  `polyline6` is 17 times smaller. New public `wayfarer::geometry`
+  (polyline6 encode and decode, `GeoJsonLineString`), navigation input
+  from `polyline6`, `inclinePercent` on edge attributions (OSM `incline`,
+  signed by the direction of travel), `wayfarer route --geometry-format`
+  and `--include`, and the route GeoJSON FeatureCollection in
+  `wayfarer_service::geojson`.
+- **Added: road attributes in map matches** (#73; FEAT-A7). With
+  `options.attributes: true`, each sub-path lists its edges' attributes as a
+  route leg's `edges` (clipped to the matched positions) and its expected
+  duration, and each matched sample gives its edge index and the observed
+  speed since the previous sample.
+- **Added: distance contours, overlays and lean output on analysis
+  requests** (#77; FEAT-A9, FEAT-A11). Isochrone contours can be on
+  `"distance_m"`, metres along the cheapest path. Matrix, isochrone and
+  nearest requests take `overlays` and `departureAtMs`, applied as on a
+  route, and `includeEdgeIds: false` to leave out the cells', buckets' and
+  hits' edge ids.
+- **Added: stored profiles** (#76; K2, P4). `CompileRequest::profiles` and
+  `wayfarer compile --profiles` choose the profiles whose costs a package
+  stores, one column each (default `wheeled` and `on_foot`; the engine
+  derives the others on first use, as before). The same set gives the same
+  bytes in any order. On Monaco a third stored profile (legged) adds 71 KB.
+- **Fixed: ways with missing nodes and repeated way ids** (#75; K1, bug 15).
+  The compiler cuts a way at node refs the input does not hold instead of
+  bridging the gap with a straight line (extracts cut with
+  `osmium extract -s simple` or `osmconvert -b`), and keeps one copy of a
+  way id that appears more than once (merged extracts) instead of building
+  overlapping edges. Both are counted in the quality manifest's new
+  `inputReport` and reported as quality warnings, which `wayfarer info` and
+  `wayfarer compile` show. Packages from complete, id-sorted extracts are
+  unchanged.
+- **Docs:** the design of package format 3, the one format bump left before
+  1.0, with its confirmed decisions (#69, `docs/design/format-3.md`). Format
+  3 is not written yet.
+
 ## 0.3.0 (2026-11-22)
 
 Both lines. Package format 2 (reads 2 only), costing model 1, C ABI version 1,
