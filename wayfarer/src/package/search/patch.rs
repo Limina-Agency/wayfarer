@@ -2992,12 +2992,13 @@ pub(crate) fn isochrone(
             continue;
         }
         // A farther candidate starts at its approach cost (already in the
-        // seed arc's cost), on both metrics.
+        // seed arc's cost). The approach is a penalty, not travel, so time
+        // starts at zero (as in matrix rows and `analysis::isochrone`).
         let approach = origin_approach
             .get(*origin as usize)
             .copied()
             .unwrap_or(0.0);
-        let duration_s = approach + info.duration_s;
+        let duration_s = info.duration_s;
         let (start, end) = span(arcs.arc(*arc));
         cross(
             &mut outcome.crossings,
@@ -3005,7 +3006,7 @@ pub(crate) fn isochrone(
             (start, end),
             (
                 (approach, info.cost),
-                (approach, duration_s),
+                (0.0, duration_s),
                 (0.0, info.distance_m),
             ),
         );
