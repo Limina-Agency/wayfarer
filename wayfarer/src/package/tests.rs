@@ -7736,18 +7736,15 @@ fn assert_profile_walks_match_per_edge(
                     continue;
                 };
                 found += 1;
-                assert!(
-                    (walked.cost - per_edge.cost).abs() <= search::tie_window(per_edge.cost),
+                assert_eq!(walked.edge_ids, per_edge.edge_ids, "{case}");
+                // The walks move where the two halves meet; a path's sums
+                // are taken in path order, so they keep every bit.
+                assert_eq!(
+                    [walked.cost, walked.duration_s, walked.distance_m].map(f64::to_bits),
+                    [per_edge.cost, per_edge.duration_s, per_edge.distance_m].map(f64::to_bits),
                     "{case}: walks {} vs per edge {}",
                     walked.cost,
                     per_edge.cost
-                );
-                assert_eq!(walked.edge_ids, per_edge.edge_ids, "{case}");
-                assert!(
-                    (walked.duration_s - per_edge.duration_s).abs() <= 1e-9 * walked.duration_s
-                );
-                assert!(
-                    (walked.distance_m - per_edge.distance_m).abs() <= 1e-9 * walked.distance_m
                 );
                 assert!(
                     (walked.cost - reference.cost).abs() <= 1e-3 * reference.cost.max(1.0),
@@ -7855,6 +7852,73 @@ fn walks_match_the_per_edge_search_with_blocked_edges() {
         request.options.blocked_edge_ids.extend(blocked);
     });
     assert!(found > 200 && walked > 0, "{found} routes, {walked} walked");
+}
+
+/// Matrix cells keep every bit whichever mode searched them: a pairwise cell
+/// joins two search halves, a row sums one forward search's labels, and both
+/// report a path's sums in path order. Points inside pieces (where the
+/// pairwise search walks), around junctions and restrictions, walkers and
+/// drivers.
+#[test]
+fn matrix_modes_agree_to_the_bit() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    // SAR turn penalties on random restrictions: both halves charge them.
+    let graphs = [
+        (
+            "pieces",
+            piece_graph(false, &[13, 21]),
+            piece_points(),
+            None,
+        ),
+        ("grid", grid_with_private_block(), grid_points(), None),
+        (
+            "restricted",
+            randomly_restricted_grid(7),
+            grid_points(),
+            Some(45.0),
+        ),
+    ];
+    for (name, graph, points, penalty) in graphs {
+        let reader = persist(&graph, &dir.path().join(format!("{name}.mrt")));
+        let (_, compact) = engines(&reader);
+        // SAR serves vehicles only.
+        let profiles = match penalty {
+            Some(_) => &[MobilityProfile::Wheeled][..],
+            None => &[MobilityProfile::Wheeled, MobilityProfile::OnFoot],
+        };
+        for profile in profiles.iter().copied() {
+            let [pairwise, rows] = [MatrixMode::Pairwise, MatrixMode::Rows].map(|mode| {
+                let mut request =
+                    crate::RouteMatrixRequest::new(points.clone(), points.clone(), profile);
+                request.options.max_correlation_distance_m = 60;
+                request.options.sar = penalty.map(sar_turn_restrictions);
+                test_mode::set(Some(mode));
+                let result = compact.matrix(request);
+                test_mode::set(None);
+                result
+            });
+            let mut reachable = 0;
+            for (p, r) in pairwise.cells.iter().zip(&rows.cells) {
+                let cell = format!(
+                    "{name} {profile:?} {} -> {}",
+                    p.source_index, p.target_index
+                );
+                assert_eq!(p.status, r.status, "{cell}");
+                assert_eq!(p.edge_ids, r.edge_ids, "{cell}");
+                let bits = |cell: &crate::RouteMatrixCell| {
+                    [cell.cost, cell.duration_s, cell.distance_m]
+                        .map(|value| value.map(f64::to_bits))
+                };
+                assert_eq!(bits(p), bits(r), "{cell}: {:?} vs {:?}", p.cost, r.cost);
+                reachable += usize::from(p.cost.is_some());
+            }
+            assert!(
+                reachable >= points.len() * 2,
+                "{name} {profile:?}: {reachable} cells"
+            );
+        }
+    }
 }
 
 /// The incoming adjacency, sources and end headings derive from edge twins.
