@@ -729,11 +729,60 @@ impl<'a> ReferenceEngine<'a> {
         if !strict_destination_only(&request.options, request.profile) {
             return Ok(pass(true));
         }
+        if origins.snapped.len() > 1 {
+            return Ok(self.multi_origin_isochrone(&request, &origins, context));
+        }
         let strict = pass(false);
         if !crate::isochrone::trapped(&strict) {
             return Ok(strict);
         }
         Ok(crate::isochrone::pick_relaxed(strict, pass(true)))
+    }
+
+    /// Several origins with destination-only roads confined: as the engine
+    /// does (`crate::isochrone::origin_fallbacks`), each trapped origin's
+    /// relaxed isochrone merged with the strict isochrone of the others.
+    fn multi_origin_isochrone(
+        &self,
+        request: &RouteIsochroneRequest,
+        origins: &crate::isochrone::OriginCandidates,
+        context: bool,
+    ) -> RouteIsochroneResult {
+        let records = |set: &crate::isochrone::OriginCandidates, allow_destination_only| {
+            self.records(
+                request.profile,
+                &request.options,
+                allow_destination_only,
+                set.candidates.iter().map(|location| location.edge_id),
+            )
+        };
+        let mut pass = |set: &[usize], allow_destination_only: bool, budget: Option<usize>| {
+            let set = origins.only(set);
+            let records = records(&set, allow_destination_only);
+            let pass = isochrone_pass(&records, request, &set, context, budget);
+            let reach = crate::isochrone::outcome_reach(
+                pass.reached_order.iter().filter_map(|raw| {
+                    let (cost, duration_s, distance_m) = pass.reached[raw];
+                    records
+                        .edge(*raw)
+                        .map(|edge| (edge.id(), cost, duration_s, distance_m))
+                }),
+                request,
+            );
+            Ok((reach, pass))
+        };
+        let (strict, relaxed) =
+            crate::isochrone::origin_fallbacks(origins.snapped.len(), &mut pass)
+                .expect("reference passes do not fail");
+        let mut merged = None::<IsochronePass>;
+        for pass in strict.into_iter().chain(relaxed) {
+            merged = Some(match merged {
+                None => pass,
+                Some(merged) => merged.merge(pass, &request.contours),
+            });
+        }
+        let merged = merged.expect("at least one pass");
+        isochrone_result(&records(origins, true), request, origins, merged)
     }
 }
 
@@ -2593,12 +2642,76 @@ struct Crossing {
     start_metric: f64,
 }
 
+/// One isochrone search's reached edges (each with its least cost,
+/// duration and distance), in the order first reached, and its boundary
+/// crossings and counters.
+struct IsochronePass {
+    reached: FxHashMap<usize, (f64, f64, f64)>,
+    reached_order: Vec<usize>,
+    crossings: Vec<Crossing>,
+    visited: usize,
+    settled: usize,
+    truncated: bool,
+}
+
+impl crate::isochrone::Truncation for IsochronePass {
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl IsochronePass {
+    /// Two searches of different origins as one (as the engine's
+    /// `merge_outcomes`): each edge at its least value on each metric, and
+    /// the crossings of both except on edges reached in full within that
+    /// contour.
+    fn merge(mut self, other: Self, contours: &[crate::RouteIsochroneContour]) -> Self {
+        for raw in other.reached_order {
+            let (cost, duration_s, distance_m) = other.reached[&raw];
+            let entry = self.reached.entry(raw).or_insert_with(|| {
+                self.reached_order.push(raw);
+                (cost, duration_s, distance_m)
+            });
+            entry.0 = entry.0.min(cost);
+            entry.1 = entry.1.min(duration_s);
+            entry.2 = entry.2.min(distance_m);
+        }
+        self.crossings.extend(other.crossings);
+        let reached = &self.reached;
+        self.crossings.retain(|crossing| {
+            let contour = &contours[crossing.contour];
+            reached
+                .get(&crossing.raw)
+                .is_none_or(|(cost, duration_s, distance_m)| {
+                    pick(contour.metric, *cost, *duration_s, *distance_m) > contour.contour
+                })
+        });
+        self.visited += other.visited;
+        self.settled += other.settled;
+        self.truncated |= other.truncated;
+        self
+    }
+}
+
 fn isochrone(
     records: &Records<'_>,
     request: &RouteIsochroneRequest,
     origins: &crate::isochrone::OriginCandidates,
     restriction_contexts: bool,
 ) -> RouteIsochroneResult {
+    let pass = isochrone_pass(records, request, origins, restriction_contexts, None);
+    isochrone_result(records, request, origins, pass)
+}
+
+/// One isochrone search from `origins`, stopping at `budget` visited edges
+/// too when given.
+fn isochrone_pass(
+    records: &Records<'_>,
+    request: &RouteIsochroneRequest,
+    origins: &crate::isochrone::OriginCandidates,
+    restriction_contexts: bool,
+    budget: Option<usize>,
+) -> IsochronePass {
     let candidates = &origins.candidates;
     let contours = &request.contours;
     let limit = |metric| {
@@ -2775,7 +2888,9 @@ fn isochrone(
             visited += 1;
             if request
                 .max_expansion_edge_count
-                .is_some_and(|max| visited > max)
+                .into_iter()
+                .chain(budget)
+                .any(|max| visited > max)
             {
                 truncated = true;
                 break 'search;
@@ -2831,7 +2946,32 @@ fn isochrone(
             reach(raw, cost, duration_s, distance_m);
         }
     }
+    IsochronePass {
+        reached,
+        reached_order,
+        crossings,
+        visited,
+        settled,
+        truncated,
+    }
+}
 
+/// The result of an isochrone search of `origins`.
+fn isochrone_result(
+    records: &Records<'_>,
+    request: &RouteIsochroneRequest,
+    origins: &crate::isochrone::OriginCandidates,
+    pass: IsochronePass,
+) -> RouteIsochroneResult {
+    let contours = &request.contours;
+    let IsochronePass {
+        reached,
+        reached_order,
+        crossings,
+        visited,
+        settled,
+        truncated,
+    } = pass;
     let mut fragments = Vec::with_capacity(crossings.len());
     for crossing in &crossings {
         let Some(record) = records
