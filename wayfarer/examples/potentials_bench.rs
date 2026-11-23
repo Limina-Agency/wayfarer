@@ -2,15 +2,18 @@
 //! every stored column's customization, on fresh opens.
 //!
 //! ```sh
-//! cargo run --release -p wayfarer --example potentials_bench -- <routing.mrt> [runs=5]
+//! cargo run --release -p wayfarer --example potentials_bench -- \
+//!   <routing.mrt> [runs=5] [desktop|mobile]
 //! ```
 //!
-//! `RAYON_NUM_THREADS` sets the threads. Prints each run's stats and the
-//! minimum topology and customization times.
+//! `RAYON_NUM_THREADS` sets the threads. Prints each run's stats (the heap
+//! the potentials keep afterwards: on the Mobile profile without the arrays
+//! only customization reads) and the minimum topology and customization
+//! times.
 
 use std::path::Path;
 
-use wayfarer::RoutingPackage;
+use wayfarer::{RoutePackageMemoryProfile, RoutingPackage};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -18,9 +21,14 @@ fn main() {
         .next()
         .expect("usage: potentials_bench <routing.mrt> [runs]");
     let runs = args.next().and_then(|runs| runs.parse().ok()).unwrap_or(5);
+    let profile = match args.next().as_deref() {
+        Some("mobile") => RoutePackageMemoryProfile::Mobile,
+        _ => RoutePackageMemoryProfile::Desktop,
+    };
     let (mut topology_ms, mut customize_ms) = (f64::INFINITY, f64::INFINITY);
     for run in 0..runs {
-        let package = RoutingPackage::open(Path::new(&path)).expect("a routing package");
+        let package = RoutingPackage::open_with_profile(Path::new(&path), profile)
+            .expect("a routing package");
         let started = std::time::Instant::now();
         let stats = package
             .prepare_potentials()

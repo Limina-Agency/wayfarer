@@ -109,7 +109,7 @@ impl RegionBounds {
                     }
                 })
                 .collect::<Vec<_>>();
-            topology.customize(&restricted)
+            topology.customize(g, &restricted)
         };
         let metrics = [metric(0), metric(1)];
 
