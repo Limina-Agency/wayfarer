@@ -63,9 +63,9 @@ overlap 0.97.
   Packages and compile memory grow with the road network, so a compile of
   Germany needs about 11 GiB free; larger extracts (Europe) are untested
   and need more than 16 GB. A country package opens in one or two seconds,
-  but its first route customizes the CCH potentials: about 9 s and 1.8 GiB
-  of heap on Poland, 30 s and 4.2 GiB on Germany (`prepare_potentials` does
-  it ahead of time). Routes after that take milliseconds (an 890 km drive
+  but its first route customizes the CCH potentials: about 6–7 s and
+  1.5 GiB of heap on Poland, and 30 s and 4.2 GiB on Germany as 0.3.0
+  measured it (`prepare_potentials` does it ahead of time). Routes after that take milliseconds (an 890 km drive
   across either country: 14–17 ms).
 - **No elevation.** Costs and durations ignore climbs: there is no elevation
   model, and OSM `incline` tags are stored but not costed. A host that cares
