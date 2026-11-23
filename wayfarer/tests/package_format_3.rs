@@ -259,12 +259,14 @@ fn verify_hashes_every_section_and_the_table_wherever_it_is() {
                 .iter()
                 .any(|section| section.name == "unknown" && section.id == 600)
         );
-        // A flipped byte in a section, or in the padding, is caught.
+        // A flipped byte in a section, or in the padding, is caught. It goes
+        // to another file: Windows refuses to rewrite one `package` maps.
         let mut bytes = std::fs::read(&path).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
-        std::fs::write(&path, &bytes).unwrap();
-        assert!(PackageFile::verify(&path).is_err());
+        let flipped = dir.path().join(format!("flipped-{table_first}.mrt"));
+        std::fs::write(&flipped, &bytes).unwrap();
+        assert!(PackageFile::verify(&flipped).is_err());
     }
 }
 
