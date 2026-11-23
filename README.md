@@ -24,9 +24,10 @@ connectivity, on roads that change by the hour.
   one file, memory-mapped, and one library call per request. The same
   package works on every platform: packages are byte-identical wherever and
   however they're compiled, so a team can check them by hash.
-- **A lean runtime.** The routing-only C library is about 4.6 MB with 29
-  third-party crates, and the compiler library prints nothing, reads no
-  environment and installs no allocator. Typical requests take a few
+- **A lean runtime.** The routing-only C library is about 4 MB (stripped,
+  Linux x86-64) with 32 third-party crates, mimalloc as its allocator among
+  them, and the compiler library prints nothing, reads no environment and
+  installs no allocator. Typical requests take a few
   milliseconds: on Małopolskie on a 4-core cloud machine, drives p95 6–7 ms,
   walks p95 21–22 ms and two alternatives p95 37–40 ms (0.2.0 on the same
   machine: 8–11, 23–29 and 79–87 ms), and a 100×100 vehicle matrix took

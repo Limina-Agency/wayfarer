@@ -25,11 +25,24 @@ wayfarer-service.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 wayfarer-compiler = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
+libmimalloc-sys = { workspace = true, optional = true }
 
 [features]
+default = ["mimalloc"]
+# The library's global allocator: mimalloc instead of the platform's malloc,
+# for the engine's many small, short-lived allocations. It needs a C compiler
+# for the target. A Rust program
+# that links this crate gets the allocator too; turn off default features to
+# keep its own.
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # The wayfarer_compile_* calls: compile packages on the device. A
 # separate build of the library, since it adds the compiler and OSM ingest.
 compiler = ["dep:wayfarer-compiler"]
+# The compiler's phase events and counting allocator for benchmark harnesses
+# (see wayfarer-compiler), in place of mimalloc: a program has one global
+# allocator, so this also turns the library's mimalloc off.
+benchmark-profiling = ["compiler", "wayfarer-compiler/benchmark-profiling"]
 
 [dev-dependencies]
 # Generates the JSON Schemas in `schema/` (tests/schema.rs).

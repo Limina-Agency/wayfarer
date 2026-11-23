@@ -1203,6 +1203,8 @@ dependencies = [
 name = "wayfarer-ffi"
 version = "0.3.0"
 dependencies = [
+ "libmimalloc-sys",
+ "mimalloc",
  "schemars",
  "serde",
  "serde_json",

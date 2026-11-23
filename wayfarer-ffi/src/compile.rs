@@ -74,6 +74,7 @@ pub unsafe extern "C" fn wayfarer_compile_start(
             if let Some(deadline) = deadline {
                 watch_deadline(deadline, token.clone(), done.clone());
             }
+            purge_freed_memory_at_once();
             let started = CompileJob::start(request, token);
             let progress = started.progress();
             // SAFETY: checked non-null; valid for one write per the contract.
@@ -87,6 +88,24 @@ pub unsafe extern "C" fn wayfarer_compile_start(
         })
     }
 }
+
+/// Makes the library's mimalloc return freed pages to the system at once
+/// rather than after its default 10 ms, as the `wayfarer` binary does for its
+/// compiles: a compile frees each phase's working set in bursts on several
+/// threads, and with the delay much of it stays resident under the next phase
+/// (Małopolskie at 4 threads: peak RSS 1,796 -> 1,284 MiB, measured with the
+/// binary). It applies to the library's allocations from then on.
+#[cfg(all(feature = "mimalloc", not(feature = "benchmark-profiling")))]
+fn purge_freed_memory_at_once() {
+    // `mi_option_purge_delay` in mimalloc v2 and v3's `mi_option_e`; the
+    // bindings do not name it.
+    const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+    // SAFETY: setting an option is thread safe and takes any value.
+    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
+}
+
+#[cfg(not(all(feature = "mimalloc", not(feature = "benchmark-profiling"))))]
+fn purge_freed_memory_at_once() {}
 
 /// Cancels `token` at `deadline`, unless `done` is cancelled first.
 fn watch_deadline(deadline: Instant, token: CancelToken, done: CancelToken) {
