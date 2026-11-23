@@ -3405,9 +3405,28 @@ fn a_trapped_origin_of_several_leaves_its_ring_as_it_would_alone() {
     }
     let expected = oracle.isochrone(request.clone()).unwrap();
     assert_isochrone_parity(&expected, &both, "both");
+    let mut patched = request.clone();
+    patched.options.dynamic_overlay = Some(overlay.clone());
+    let patched = compact.isochrone(patched).unwrap();
+    assert_isochrone_parity(&both, &patched, "both patch");
+
+    // Ordered by time, with a later start outside and each edge's origin
+    // named, the trapped origin's relaxed search merges the same way.
+    request.order = crate::RouteIsochroneOrder::Time;
+    request.include_origins = true;
+    request.origins[0].start_offset_s = Some(5.0);
+    let timed = compact.isochrone(request.clone()).unwrap();
+    let named = timed
+        .buckets
+        .iter()
+        .flat_map(|bucket| &bucket.edge_origins)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(named.len(), 2, "{named:?}");
+    let expected = oracle.isochrone(request.clone()).unwrap();
+    assert_isochrone_origin_parity(&expected, &timed, "timed");
     request.options.dynamic_overlay = Some(overlay);
     let patched = compact.isochrone(request).unwrap();
-    assert_isochrone_parity(&both, &patched, "both patch");
+    assert_isochrone_origin_parity(&timed, &patched, "timed patch");
 }
 
 /// A connector far costlier than any grid contour: it sends an isochrone
@@ -3423,6 +3442,167 @@ fn unused_connector_overlay(graph: &RoadGraph) -> crate::RouteDynamicOverlay {
     ));
     overlay.refresh_diagnostics();
     overlay
+}
+
+/// [`assert_isochrone_parity`], and the same origin for every edge.
+fn assert_isochrone_origin_parity(
+    expected: &crate::RouteIsochroneResult,
+    actual: &crate::RouteIsochroneResult,
+    context: &str,
+) {
+    assert_isochrone_parity(expected, actual, context);
+    for (expected, actual) in expected.buckets.iter().zip(&actual.buckets) {
+        assert_eq!(
+            expected.edge_origins, actual.edge_origins,
+            "{context} {:?} {}",
+            expected.metric, expected.contour
+        );
+    }
+}
+
+/// Ordered by time, the package, the patch and the reference agree, and
+/// every time contour reaches at least what the cost-ordered one does (each
+/// edge along its fastest path is no slower than along its cheapest).
+#[test]
+fn time_ordered_isochrones_match_reference_and_reach_at_least_as_far() {
+    let dir = tempdir().unwrap();
+    let graph = grid_graph();
+    let reader = persist(&graph, &dir.path().join("grid.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let overlay = unused_connector_overlay(&graph);
+    for (profile, limits) in [
+        (MobilityProfile::Wheeled, [20.0, 45.0, 90.0]),
+        (MobilityProfile::OnFoot, [60.0, 150.0, 300.0]),
+    ] {
+        let by_cost = compact
+            .isochrone(grid_isochrone_request(profile, limits))
+            .unwrap();
+        let mut request = grid_isochrone_request(profile, limits);
+        request.order = crate::RouteIsochroneOrder::Time;
+        let by_time = compact.isochrone(request.clone()).unwrap();
+        for (cost, time) in by_cost.buckets.iter().zip(&by_time.buckets) {
+            if time.metric != crate::RouteIsochroneMetric::TimeSeconds {
+                continue;
+            }
+            for edge in &cost.edge_ids {
+                assert!(
+                    time.edge_ids.contains(edge),
+                    "{profile:?} {}: {edge} only by cost",
+                    time.contour
+                );
+            }
+        }
+        let expected = oracle.isochrone(request.clone()).unwrap();
+        assert_isochrone_parity(&expected, &by_time, &format!("{profile:?} time"));
+        request.options.dynamic_overlay = Some(overlay.clone());
+        let patched = compact.isochrone(request).unwrap();
+        assert_isochrone_parity(&by_time, &patched, &format!("{profile:?} time patch"));
+    }
+}
+
+/// Ordered by time, an origin that starts `offset` seconds later reaches
+/// within a time contour `T` what it reaches alone within `T - offset`; the
+/// isochrone of several origins is the union of those, and each edge is
+/// attributed to an origin that reaches it within its share.
+#[test]
+fn start_offsets_shorten_an_origins_time_contours_and_edges_name_their_origin() {
+    let dir = tempdir().unwrap();
+    let graph = grid_graph();
+    let reader = persist(&graph, &dir.path().join("grid.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let overlay = unused_connector_overlay(&graph);
+    let more = [GeoPoint::new(0.0003, 0.0008), GeoPoint::new(0.0041, 0.0046)];
+    for (profile, limits, offset) in [
+        (MobilityProfile::Wheeled, [20.0, 45.0, 90.0], 10.0),
+        (MobilityProfile::OnFoot, [60.0, 150.0, 300.0], 30.0),
+    ] {
+        let offsets = [0.0, offset, 0.0];
+        let mut request = grid_isochrone_request(profile, limits);
+        request.order = crate::RouteIsochroneOrder::Time;
+        request.include_origins = true;
+        // Each origin alone, its time contours shortened by its offset.
+        let singles = std::iter::once(request.origin)
+            .chain(more)
+            .zip(offsets)
+            .map(|(origin, offset)| {
+                let mut single = request.clone();
+                single.origin = origin;
+                for contour in &mut single.contours {
+                    if contour.metric == crate::RouteIsochroneMetric::TimeSeconds {
+                        contour.contour -= offset;
+                    }
+                }
+                compact.isochrone(single).unwrap()
+            })
+            .collect::<Vec<_>>();
+        request.origins = more
+            .iter()
+            .zip(&offsets[1..])
+            .map(|(point, offset)| crate::RouteIsochroneOrigin {
+                point: *point,
+                start_offset_s: Some(*offset),
+            })
+            .collect();
+        let multi = compact.isochrone(request.clone()).unwrap();
+        for (index, bucket) in multi.buckets.iter().enumerate() {
+            let context = format!("{profile:?} {:?} {}", bucket.metric, bucket.contour);
+            assert_eq!(
+                bucket.edge_origins.len(),
+                bucket.edge_ids.len(),
+                "{context}"
+            );
+            for (edge, origin) in bucket.edge_ids.iter().zip(&bucket.edge_origins) {
+                assert!(
+                    singles[*origin as usize].buckets[index]
+                        .edge_ids
+                        .contains(edge),
+                    "{context}: {edge} named origin {origin}, which does not reach it"
+                );
+            }
+            for fragment in &bucket.boundary_fragments {
+                assert!(
+                    fragment.origin.is_some_and(|origin| origin < 3),
+                    "{context}"
+                );
+            }
+            if bucket.metric != crate::RouteIsochroneMetric::TimeSeconds {
+                continue;
+            }
+            let union = singles
+                .iter()
+                .flat_map(|single| single.buckets[index].edge_ids.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                bucket.edge_ids,
+                union.into_iter().collect::<Vec<_>>(),
+                "{context}"
+            );
+            // Within the widest time contour, every origin reaches some
+            // edge first.
+            if index == 2 {
+                let named = bucket
+                    .edge_origins
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(named.len(), 3, "{context}: {named:?}");
+            }
+        }
+        let expected = oracle.isochrone(request.clone()).unwrap();
+        assert_isochrone_origin_parity(&expected, &multi, &format!("{profile:?}"));
+        let mut patched = request.clone();
+        patched.options.dynamic_overlay = Some(overlay.clone());
+        let patched = compact.isochrone(patched).unwrap();
+        assert_isochrone_origin_parity(&multi, &patched, &format!("{profile:?} patch"));
+
+        // Without `includeOrigins`, nothing names an origin.
+        request.include_origins = false;
+        let plain = compact.isochrone(request).unwrap();
+        for (plain, named) in plain.buckets.iter().zip(&multi.buckets) {
+            assert!(plain.edge_origins.is_empty());
+            assert_eq!(plain.edge_ids, named.edge_ids);
+            assert!(plain.boundary_fragments.iter().all(|f| f.origin.is_none()));
+        }
+    }
 }
 
 /// Streets around the corner of four detail tiles (lat 0, lng 0): curved

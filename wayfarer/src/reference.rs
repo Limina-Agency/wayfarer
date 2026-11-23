@@ -782,7 +782,7 @@ impl<'a> ReferenceEngine<'a> {
             let pass = isochrone_pass(&records, request, &set, context, budget);
             let reach = crate::isochrone::outcome_reach(
                 pass.reached_order.iter().filter_map(|raw| {
-                    let (cost, duration_s, distance_m) = pass.reached[raw];
+                    let [(cost, _), (duration_s, _), (distance_m, _)] = pass.reached[raw];
                     records
                         .edge(*raw)
                         .map(|edge| (edge.id(), cost, duration_s, distance_m))
@@ -2652,6 +2652,7 @@ struct IsochroneLabel {
     cost: f64,
     duration_s: f64,
     distance_m: f64,
+    origin: u16,
 }
 
 struct Crossing {
@@ -2660,13 +2661,15 @@ struct Crossing {
     start_fraction: f64,
     end_fraction: f64,
     start_metric: f64,
+    origin: u16,
 }
 
 /// One isochrone search's reached edges (each with its least cost,
 /// duration and distance), in the order first reached, and its boundary
 /// crossings and counters.
 struct IsochronePass {
-    reached: FxHashMap<usize, (f64, f64, f64)>,
+    /// The least cost, duration and distance, each with its origin.
+    reached: FxHashMap<usize, [(f64, u16); 3]>,
     reached_order: Vec<usize>,
     crossings: Vec<Crossing>,
     visited: usize,
@@ -2687,24 +2690,25 @@ impl IsochronePass {
     /// contour.
     fn merge(mut self, other: Self, contours: &[crate::RouteIsochroneContour]) -> Self {
         for raw in other.reached_order {
-            let (cost, duration_s, distance_m) = other.reached[&raw];
+            let values = other.reached[&raw];
             let entry = self.reached.entry(raw).or_insert_with(|| {
                 self.reached_order.push(raw);
-                (cost, duration_s, distance_m)
+                values
             });
-            entry.0 = entry.0.min(cost);
-            entry.1 = entry.1.min(duration_s);
-            entry.2 = entry.2.min(distance_m);
+            for (kept, value) in entry.iter_mut().zip(values) {
+                if value < *kept {
+                    *kept = value;
+                }
+            }
         }
         self.crossings.extend(other.crossings);
         let reached = &self.reached;
         self.crossings.retain(|crossing| {
             let contour = &contours[crossing.contour];
-            reached
-                .get(&crossing.raw)
-                .is_none_or(|(cost, duration_s, distance_m)| {
-                    pick(contour.metric, *cost, *duration_s, *distance_m) > contour.contour
-                })
+            reached.get(&crossing.raw).is_none_or(|values| {
+                let [(cost, _), (duration_s, _), (distance_m, _)] = *values;
+                pick(contour.metric, cost, duration_s, distance_m) > contour.contour
+            })
         });
         self.visited += other.visited;
         self.settled += other.settled;
@@ -2757,7 +2761,8 @@ fn isochrone_pass(
                  start_fraction: f64,
                  costs: (f64, f64),
                  durations: (f64, f64),
-                 distances: (f64, f64)| {
+                 distances: (f64, f64),
+                 origin: u16| {
         for (index, contour) in contours.iter().enumerate() {
             let (start, end) = pick(contour.metric, costs, durations, distances);
             if !(start < contour.contour && contour.contour < end) || end - start <= f64::EPSILON {
@@ -2770,6 +2775,7 @@ fn isochrone_pass(
                 start_fraction,
                 end_fraction: start_fraction + (1.0 - start_fraction) * ratio,
                 start_metric: start,
+                origin,
             });
         }
     };
@@ -2778,7 +2784,19 @@ fn isochrone_pass(
     let mut labels = Vec::<IsochroneLabel>::new();
     let mut contexts = Vec::<Vec<u64>>::new();
     let mut slot = FxHashMap::<(usize, Vec<u64>), u32>::default();
-    let mut reached = FxHashMap::<usize, (f64, f64, f64)>::default();
+    // Each reached edge's least cost, duration and distance, each with the
+    // origin it came from (the lowest on a tie).
+    let mut reached = FxHashMap::<usize, [(f64, u16); 3]>::default();
+    // Labels are ordered and dominated by cost, or by duration (fastest
+    // time).
+    let by_duration = request.order == crate::RouteIsochroneOrder::Time;
+    let order = |label: &IsochroneLabel| {
+        if by_duration {
+            label.duration_s
+        } else {
+            label.cost
+        }
+    };
     let mut reached_order = Vec::<usize>::new();
     let mut queue = Queue::default();
     let context_of = |contexts: &[Vec<u64>], label: &IsochroneLabel| {
@@ -2801,7 +2819,7 @@ fn isochrone_pass(
                 label: IsochroneLabel| {
         let key = (label.raw, context_of(contexts, &label));
         if let Some(existing) = slot.get(&key)
-            && labels[*existing as usize].cost <= label.cost
+            && order(&labels[*existing as usize]) <= order(&label)
         {
             return;
         }
@@ -2809,16 +2827,18 @@ fn isochrone_pass(
         contexts.push(key.1.clone());
         slot.insert(key, index);
         labels.push(label);
-        queue.push(label.cost, Item::Label(index));
+        queue.push(order(&label), Item::Label(index));
     };
-    let mut reach = |raw: usize, cost: f64, duration_s: f64, distance_m: f64| {
+    let mut reach = |raw: usize, cost: f64, duration_s: f64, distance_m: f64, origin: u16| {
         let entry = reached.entry(raw).or_insert_with(|| {
             reached_order.push(raw);
-            (cost, duration_s, distance_m)
+            [(cost, origin), (duration_s, origin), (distance_m, origin)]
         });
-        entry.0 = entry.0.min(cost);
-        entry.1 = entry.1.min(duration_s);
-        entry.2 = entry.2.min(distance_m);
+        for (kept, value) in entry.iter_mut().zip([cost, duration_s, distance_m]) {
+            if (value, origin) < *kept {
+                *kept = (value, origin);
+            }
+        }
     };
     // A farther candidate starts at its approach cost, relative to its own
     // origin's nearest one. The approach is a penalty, not travel, so time
@@ -2831,7 +2851,10 @@ fn isochrone_pass(
             .zip(candidates)
             .collect::<Vec<_>>(),
     );
-    for (candidate, approach) in candidates.iter().zip(approach) {
+    let offsets_s = crate::isochrone::OriginCandidates::offsets_s(request);
+    for ((candidate, approach), origin) in candidates.iter().zip(approach).zip(&origins.targets) {
+        let offset_s = offsets_s[*origin];
+        let origin = *origin as u16;
         let Some(edge) = records.edge_by_id(candidate.edge_id) else {
             continue;
         };
@@ -2839,7 +2862,10 @@ fn isochrone_pass(
             continue;
         };
         let remaining = (1.0 - candidate.fraction_along_edge).clamp(0.0, 1.0);
-        let (cost, duration_s) = (approach + edge_cost * remaining, edge_duration * remaining);
+        let (cost, duration_s) = (
+            approach + edge_cost * remaining,
+            offset_s + edge_duration * remaining,
+        );
         let distance_m = edge.length() * remaining;
         let raw = edge.record.raw_edge_index;
         cross(
@@ -2847,8 +2873,9 @@ fn isochrone_pass(
             raw,
             candidate.fraction_along_edge,
             (approach, cost),
-            (0.0, duration_s),
+            (offset_s, duration_s),
             (0.0, distance_m),
+            origin,
         );
         push(
             &mut labels,
@@ -2861,10 +2888,11 @@ fn isochrone_pass(
                 cost,
                 duration_s,
                 distance_m,
+                origin,
             },
         );
         if within(cost, duration_s, distance_m) {
-            reach(raw, cost, duration_s, distance_m);
+            reach(raw, cost, duration_s, distance_m, origin);
         }
     }
     let path_contains = |labels: &[IsochroneLabel], label: u32, raw: usize| {
@@ -2946,7 +2974,15 @@ fn isochrone_pass(
             if crosses && path_contains(&labels, index, raw) {
                 continue;
             }
-            cross(&mut crossings, raw, 0.0, metrics.0, metrics.1, metrics.2);
+            cross(
+                &mut crossings,
+                raw,
+                0.0,
+                metrics.0,
+                metrics.1,
+                metrics.2,
+                label.origin,
+            );
             if !within(cost, duration_s, distance_m) {
                 continue;
             }
@@ -2961,9 +2997,10 @@ fn isochrone_pass(
                     cost,
                     duration_s,
                     distance_m,
+                    origin: label.origin,
                 },
             );
-            reach(raw, cost, duration_s, distance_m);
+            reach(raw, cost, duration_s, distance_m, label.origin);
         }
     }
     IsochronePass {
@@ -3019,25 +3056,32 @@ fn isochrone_result(
                 end_fraction: crossing.end_fraction.clamp(0.0, 1.0),
                 start_metric: crossing.start_metric,
                 end_metric: contour.contour,
+                origin: Some(crossing.origin),
             },
         });
     }
     let buckets = contours
         .iter()
-        .map(|contour| RouteIsochroneBucket {
-            contour: contour.contour,
-            metric: contour.metric,
-            edge_ids: reached_order
-                .iter()
-                .filter(|raw| {
-                    let (cost, duration_s, distance_m) = reached[*raw];
-                    pick(contour.metric, cost, duration_s, distance_m) <= contour.contour
-                })
-                .filter_map(|raw| records.edge(*raw).map(|edge| edge.id()))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-            boundary_fragments: boundary_fragments_for_contour(&fragments, contour),
+        .map(|contour| {
+            let index = match contour.metric {
+                RouteIsochroneMetric::Cost => 0,
+                RouteIsochroneMetric::TimeSeconds => 1,
+                RouteIsochroneMetric::DistanceM => 2,
+            };
+            let (edge_ids, edge_origins) = crate::isochrone::bucket_edges(
+                reached_order.iter().filter_map(|raw| {
+                    let (value, origin) = reached[raw][index];
+                    records.edge(*raw).map(|edge| (edge.id(), value, origin))
+                }),
+                contour,
+            );
+            RouteIsochroneBucket {
+                contour: contour.contour,
+                metric: contour.metric,
+                edge_ids,
+                edge_origins,
+                boundary_fragments: boundary_fragments_for_contour(&fragments, contour),
+            }
         })
         .collect();
     RouteIsochroneResult {

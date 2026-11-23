@@ -21,6 +21,10 @@
       "description": "`false` leaves out the buckets' `edge_ids`; boundary fragments keep\ntheirs (the search is the same; the output is smaller).",
       "type": "boolean"
     },
+    "includeOrigins": {
+      "description": "`true` reports which origin reaches each edge first on each bucket's\nmetric (`edgeOrigins`, parallel to `edgeIds`) and which origin's\npath each boundary fragment ends (`origin`); 0 is `origin`, 1 the\nfirst of `origins`, and so on.",
+      "type": "boolean"
+    },
     "maxExpansionEdgeCount": {
       "description": "Expansion budget: the most out-edges the search may examine (the\nresult's `visited_edge_count`). When the next edge would exceed it, the\nsearch stops and the result is marked `truncated`; its buckets then hold\nonly what was reached so far. `options.max_visited_edge_count` does not\napply to isochrones.",
       "type": [
@@ -70,6 +74,10 @@
         "warningEdgeIds": [],
         "warningEdgeRanges": []
       }
+    },
+    "order": {
+      "description": "How the expansion orders paths: by cost (default) or by travel time\n(fastest-time contours, which start offsets need).",
+      "$ref": "#/$defs/RouteIsochroneOrder"
     },
     "origin": {
       "description": "The first origin. With `origins`, it is origin 0 of several.",
@@ -653,12 +661,35 @@
         }
       ]
     },
+    "RouteIsochroneOrder": {
+      "description": "How an isochrone expansion orders the paths it extends.",
+      "oneOf": [
+        {
+          "description": "By cost, as routes choose: each edge is reached along its cheapest\npath, and time and distance contours measure that path.",
+          "type": "string",
+          "const": "cost"
+        },
+        {
+          "description": "By travel time (fastest-time contours): each edge is reached along\nits fastest path, and cost and distance contours measure that path.\nTime starts at each origin's nearest road (farther candidates are\nnot seeded), plus the origin's `startOffsetS`.",
+          "type": "string",
+          "const": "time"
+        }
+      ]
+    },
     "RouteIsochroneOrigin": {
       "description": "One more origin of a multi-origin isochrone (see\n`RouteIsochroneRequest::origins`).",
       "type": "object",
       "properties": {
         "point": {
           "$ref": "#/$defs/GeoPoint"
+        },
+        "startOffsetS": {
+          "description": "Seconds after the other origins' start that this one starts (\"team 3\nleaves in 10 minutes\"): its time contours are that much shorter.\nNeeds `order: time`; finite and not negative.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
       },
       "required": [
