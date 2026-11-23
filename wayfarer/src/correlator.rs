@@ -1,9 +1,10 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use wayfarer_package::{RoadType, SharedEdgeInfo};
 
 use crate::graph_view::PackageGraphView;
-use crate::package::request::ReachCounter;
+use crate::package::request::{CorrelationEdge, ReachCounter};
 use crate::types::{
     CorrelatedLocation, CorrelationMode, CorrelationPolicy, CorrelationRejectReason,
     CorrelationScoreBreakdown, CorrelationSide, GeoPoint, MobilityProfile, PreferredRoadSide,
@@ -39,6 +40,16 @@ impl<'a> Correlator<'a> {
             .candidates)
     }
 
+    /// The candidates for `point`, best first, and every rejected edge in the
+    /// radius with its reason.
+    ///
+    /// Two phases. Every edge in the radius gets the checks that need no edge
+    /// record (access, snap distance, component, heading, layer, level and,
+    /// when a minimum asks for it, reach), so every rejection keeps its
+    /// diagnostics. Then only the survivors that can still make the candidate
+    /// limit get a record, a reach count and a score (`ranked_survivors`); the
+    /// others only add their road group key to the same-road counts. The
+    /// result is the one scoring every survivor gives.
     pub fn search(
         &self,
         point: GeoPoint,
@@ -46,290 +57,290 @@ impl<'a> Correlator<'a> {
         policy: &CorrelationPolicy,
         endpoint_options: &RouteEndpointOptions,
     ) -> CandidateSearch {
-        let mut rejected_candidate_count = 0usize;
-        let mut rejected_candidates = Vec::new();
-        // Candidate edges come from the routing package's request sections:
-        // no record is built before the cheap checks pass.
         let request_view = self.access.request();
+        let file = self.access.routing_package().file();
+        let sections = file.view();
         let sar = policy.sar_open.map(crate::sar::SarOpenEdges::relaxations);
         let edges = request_view.correlation_edges_sar(point, policy.max_distance_m, profile, sar);
-        let mut reach = ReachCounter::new(
-            self.access.routing_package().file(),
-            profile,
-            DEFAULT_REACH_EDGE_LIMIT,
-        )
-        .with_sar(sar);
-        let mut candidates = edges
-            .into_iter()
-            .filter_map(|edge| {
-                // The first checks (access, snap distance) read only a few
-                // fields; the full record is built after.
-                let (edge_id, accessible, component_size, layer, level) = (
-                    edge.edge_id,
-                    edge.accessible,
-                    edge.component_size,
-                    edge.layer,
-                    edge.level.clone(),
-                );
-                if !accessible {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(edge_id),
-                        CorrelationRejectReason::InaccessibleProfile,
-                        None,
-                        None,
-                        component_size,
-                        None,
-                        None,
-                        layer,
-                        level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-
-                let Some(snap) = snap_to_geometry(point, &edge.geometry) else {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(edge_id),
-                        CorrelationRejectReason::SnapUnavailable,
-                        None,
-                        None,
-                        component_size,
-                        None,
-                        None,
-                        layer,
-                        level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                };
-                if snap.distance_m > f64::from(policy.max_distance_m) {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(edge_id),
-                        CorrelationRejectReason::BeyondMaxDistance,
-                        Some(snap.distance_m),
-                        None,
-                        component_size,
-                        None,
-                        None,
-                        layer,
-                        level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-                let (record, opposing_edge_id) = request_view.correlation_record(edge, profile)?;
-
-                if endpoint_options
-                    .min_component_size
-                    .is_some_and(|minimum| component_size.unwrap_or_default() < minimum)
-                {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(record.edge.edge_id),
-                        CorrelationRejectReason::BelowMinComponentSize,
-                        Some(snap.distance_m),
-                        None,
-                        component_size,
-                        None,
-                        None,
-                        record.shared_info.layer,
-                        record.shared_info.level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-
-                // The edge's direction where the point snaps, not where it
-                // starts: the two differ on any curved edge.
-                let candidate_heading_deg = snap.bearing_deg.or(record.edge.start_heading_deg);
-                let heading_delta_deg = endpoint_options.heading_deg.and_then(|heading| {
-                    candidate_heading_deg.map(|candidate| heading_delta(heading, candidate))
-                });
-                if endpoint_options
-                    .heading_tolerance_deg
-                    .zip(heading_delta_deg)
-                    .is_some_and(|(tolerance, delta)| delta > tolerance.min(180))
-                {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(record.edge.edge_id),
-                        CorrelationRejectReason::HeadingOutsideTolerance,
-                        Some(snap.distance_m),
-                        heading_delta_deg,
-                        component_size,
-                        None,
-                        None,
-                        record.shared_info.layer,
-                        record.shared_info.level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-
-                if endpoint_options.require_layer_match
-                    && endpoint_options
-                        .preferred_layer
-                        .is_some_and(|layer| record.shared_info.layer != Some(layer))
-                {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(record.edge.edge_id),
-                        CorrelationRejectReason::LayerMismatch,
-                        Some(snap.distance_m),
-                        heading_delta_deg,
-                        component_size,
-                        None,
-                        None,
-                        record.shared_info.layer,
-                        record.shared_info.level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-
-                if endpoint_options.require_level_match
-                    && endpoint_options
-                        .preferred_level
-                        .as_ref()
-                        .is_some_and(|level| {
-                            record
-                                .shared_info
-                                .level
-                                .as_deref()
-                                .is_none_or(|candidate| !level_matches(level, candidate))
-                        })
-                {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(record.edge.edge_id),
-                        CorrelationRejectReason::LevelMismatch,
-                        Some(snap.distance_m),
-                        heading_delta_deg,
-                        component_size,
-                        None,
-                        None,
-                        record.shared_info.layer,
-                        record.shared_info.level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-
-                // Reach BFS (up to 2x64 edges) runs only for candidates that
-                // survived the cheap distance/component/heading/layer/level
-                // rejections; cheap-rejected diagnostics report reach as None.
-                // The routing package answers the same reach question without
-                // materializing edge records (min(reachable, cap) is order-free).
-                let package_reach = reach
-                    .count(record.raw_edge_index, true)
-                    .and_then(|outbound| {
-                        Some((outbound, reach.count(record.raw_edge_index, false)?))
-                    });
-                let (outbound_reach_edge_count, inbound_reach_edge_count) = match package_reach {
-                    Some((outbound, inbound)) => (Some(outbound), Some(inbound)),
-                    None => (
-                        self.access.outbound_reach_edge_count(
-                            record.target.id,
-                            profile,
-                            DEFAULT_REACH_EDGE_LIMIT,
-                        ),
-                        self.access.inbound_reach_edge_count(
-                            record.source.id,
-                            profile,
-                            DEFAULT_REACH_EDGE_LIMIT,
-                        ),
+        let mut reach = ReachCounter::new(file, profile, DEFAULT_REACH_EDGE_LIMIT).with_sar(sar);
+        let mut reach_counts = |edge: u32| -> ReachCounts {
+            // The routing package answers the reach question without
+            // materializing edge records (min(reachable, cap) is order-free).
+            let index = edge as usize;
+            match reach
+                .count(index, true)
+                .and_then(|outbound| Some((outbound, reach.count(index, false)?)))
+            {
+                Some((outbound, inbound)) => (Some(outbound), Some(inbound)),
+                None => (
+                    self.access.outbound_reach_edge_count(
+                        request_view.node_id(request_view.edge_target(edge)),
+                        profile,
+                        DEFAULT_REACH_EDGE_LIMIT,
                     ),
-                };
-                if endpoint_options
+                    self.access.inbound_reach_edge_count(
+                        request_view.node_id(request_view.edge_source(edge)),
+                        profile,
+                        DEFAULT_REACH_EDGE_LIMIT,
+                    ),
+                ),
+            }
+        };
+
+        // Phase 1: the record-free checks, in edge id order.
+        let max_distance_m = f64::from(policy.max_distance_m);
+        let checks_reach = endpoint_options.min_outbound_reach_edge_count.is_some()
+            || endpoint_options.min_inbound_reach_edge_count.is_some();
+        let mut rejected_candidates = Vec::new();
+        let mut survivors = Vec::new();
+        for edge in edges {
+            let mut reject = |reason, distance_m, heading_delta_deg, reach: ReachCounts| {
+                rejected_candidates.push(rejected_candidate(
+                    Some(edge.edge_id),
+                    reason,
+                    distance_m,
+                    heading_delta_deg,
+                    edge.component_size,
+                    reach.0,
+                    reach.1,
+                    edge.layer,
+                    edge.level.as_deref().map(str::to_string),
+                ));
+            };
+            if !edge.accessible {
+                reject(
+                    CorrelationRejectReason::InaccessibleProfile,
+                    None,
+                    None,
+                    (None, None),
+                );
+                continue;
+            }
+            let Some(snap) = snap_to_geometry(point, &edge.geometry) else {
+                reject(
+                    CorrelationRejectReason::SnapUnavailable,
+                    None,
+                    None,
+                    (None, None),
+                );
+                continue;
+            };
+            let distance_m = Some(snap.distance_m);
+            if snap.distance_m > max_distance_m {
+                reject(
+                    CorrelationRejectReason::BeyondMaxDistance,
+                    distance_m,
+                    None,
+                    (None, None),
+                );
+                continue;
+            }
+            if endpoint_options
+                .min_component_size
+                .is_some_and(|minimum| edge.component_size.unwrap_or_default() < minimum)
+            {
+                reject(
+                    CorrelationRejectReason::BelowMinComponentSize,
+                    distance_m,
+                    None,
+                    (None, None),
+                );
+                continue;
+            }
+
+            // The edge's direction where the point snaps, not where it
+            // starts: the two differ on any curved edge.
+            let heading_deg = snap.bearing_deg.or_else(|| {
+                let heading = sections.heading_start[edge.edge() as usize];
+                (heading != crate::package::NO_HEADING).then_some(heading)
+            });
+            let heading_delta_deg = endpoint_options
+                .heading_deg
+                .and_then(|heading| heading_deg.map(|candidate| heading_delta(heading, candidate)));
+            if endpoint_options
+                .heading_tolerance_deg
+                .zip(heading_delta_deg)
+                .is_some_and(|(tolerance, delta)| delta > tolerance.min(180))
+            {
+                reject(
+                    CorrelationRejectReason::HeadingOutsideTolerance,
+                    distance_m,
+                    heading_delta_deg,
+                    (None, None),
+                );
+                continue;
+            }
+            if endpoint_options.require_layer_match
+                && endpoint_options
+                    .preferred_layer
+                    .is_some_and(|layer| edge.layer != Some(layer))
+            {
+                reject(
+                    CorrelationRejectReason::LayerMismatch,
+                    distance_m,
+                    heading_delta_deg,
+                    (None, None),
+                );
+                continue;
+            }
+            if endpoint_options.require_level_match
+                && endpoint_options
+                    .preferred_level
+                    .as_ref()
+                    .is_some_and(|level| {
+                        edge.level
+                            .as_deref()
+                            .is_none_or(|candidate| !level_matches(level, candidate))
+                    })
+            {
+                reject(
+                    CorrelationRejectReason::LevelMismatch,
+                    distance_m,
+                    heading_delta_deg,
+                    (None, None),
+                );
+                continue;
+            }
+
+            // Reach BFS (up to 2x64 edges) runs here only when a minimum
+            // rejects on it; otherwise only for the survivors that get scored.
+            let reach = checks_reach.then(|| reach_counts(edge.edge()));
+            if let Some(counts @ (outbound, inbound)) = reach
+                && (endpoint_options
                     .min_outbound_reach_edge_count
-                    .is_some_and(|minimum| outbound_reach_edge_count.unwrap_or_default() < minimum)
+                    .is_some_and(|minimum| outbound.unwrap_or_default() < minimum)
                     || endpoint_options
                         .min_inbound_reach_edge_count
-                        .is_some_and(|minimum| {
-                            inbound_reach_edge_count.unwrap_or_default() < minimum
-                        })
-                {
-                    rejected_candidate_count += 1;
-                    rejected_candidates.push(rejected_candidate(
-                        Some(record.edge.edge_id),
-                        CorrelationRejectReason::BelowMinReach,
-                        Some(snap.distance_m),
-                        heading_delta_deg,
-                        component_size,
-                        outbound_reach_edge_count,
-                        inbound_reach_edge_count,
-                        record.shared_info.layer,
-                        record.shared_info.level.as_deref().map(str::to_string),
-                    ));
-                    return None;
-                }
-
-                let road_group_key = road_group_key(&record.shared_info);
-                let confidence = confidence(snap.distance_m, f64::from(policy.max_distance_m));
-                let score_breakdown = score_candidate_breakdown(
-                    snap.distance_m,
-                    f64::from(policy.max_distance_m),
+                        .is_some_and(|minimum| inbound.unwrap_or_default() < minimum))
+            {
+                reject(
+                    CorrelationRejectReason::BelowMinReach,
+                    distance_m,
                     heading_delta_deg,
-                    snap.side,
-                    endpoint_options.preferred_side,
-                    component_size,
-                    &record.shared_info,
-                    profile,
-                    outbound_reach_edge_count,
-                    inbound_reach_edge_count,
-                    endpoint_options.preferred_layer,
-                    record.shared_info.layer,
-                    endpoint_options.preferred_level.as_deref(),
-                    record.shared_info.level.as_deref(),
-                    endpoint_options,
+                    counts,
                 );
-                let score = score_breakdown.total_score;
-                Some(CorrelatedLocation {
-                    edge_id: record.edge.edge_id,
-                    compact_edge: crate::types::CompactEdgeHint::of(record.raw_edge_index),
-                    shared_edge_info_id: record.edge.shared_edge_info_id,
-                    opposing_edge_id,
-                    road_group_key,
-                    same_road_candidate_count: 0,
-                    source_node_id: record.source.id,
-                    target_node_id: record.target.id,
-                    snapped_point: snap.point,
-                    distance_m: snap.distance_m,
-                    fraction_along_edge: snap.fraction,
-                    heading_deg: candidate_heading_deg,
-                    heading_delta_deg,
-                    side: snap.side,
-                    component_size,
-                    outbound_reach_edge_count,
-                    inbound_reach_edge_count,
-                    layer: record.shared_info.layer,
-                    level: record.shared_info.level.as_deref().map(str::to_string),
-                    score,
-                    score_breakdown,
-                    confidence,
-                })
-            })
-            .collect::<Vec<_>>();
+                continue;
+            }
+            survivors.push(Survivor {
+                edge,
+                snap,
+                heading_deg,
+                heading_delta_deg,
+                reach,
+            });
+        }
+        let rejected_candidate_count = rejected_candidates.len();
 
-        attach_same_road_candidate_counts(&mut candidates);
+        // Phase 2: records and scores for the survivors that can make the
+        // limit.
+        let hinted = endpoint_options.has_scoring_hints();
+        let mut score = |survivor: Survivor| -> Option<CorrelatedLocation> {
+            let Survivor {
+                edge,
+                snap,
+                heading_deg,
+                heading_delta_deg,
+                reach,
+            } = survivor;
+            let component_size = edge.component_size;
+            let compact_edge = edge.edge();
+            let (record, opposing_edge_id) = request_view.correlation_record(edge, profile)?;
+            let (outbound_reach_edge_count, inbound_reach_edge_count) =
+                reach.unwrap_or_else(|| reach_counts(compact_edge));
+            let road_group_key = road_group_key(&record.shared_info);
+            let confidence = confidence(snap.distance_m, max_distance_m);
+            let score_breakdown = score_candidate_breakdown(
+                snap.distance_m,
+                max_distance_m,
+                heading_delta_deg,
+                snap.side,
+                endpoint_options.preferred_side,
+                component_size,
+                &record.shared_info,
+                profile,
+                outbound_reach_edge_count,
+                inbound_reach_edge_count,
+                endpoint_options.preferred_layer,
+                record.shared_info.layer,
+                endpoint_options.preferred_level.as_deref(),
+                record.shared_info.level.as_deref(),
+                endpoint_options,
+            );
+            let score = score_breakdown.total_score;
+            Some(CorrelatedLocation {
+                edge_id: record.edge.edge_id,
+                compact_edge: crate::types::CompactEdgeHint::of(record.raw_edge_index),
+                shared_edge_info_id: record.edge.shared_edge_info_id,
+                opposing_edge_id,
+                road_group_key,
+                same_road_candidate_count: 0,
+                source_node_id: record.source.id,
+                target_node_id: record.target.id,
+                snapped_point: snap.point,
+                distance_m: snap.distance_m,
+                fraction_along_edge: snap.fraction,
+                heading_deg,
+                heading_delta_deg,
+                side: snap.side,
+                component_size,
+                outbound_reach_edge_count,
+                inbound_reach_edge_count,
+                layer: record.shared_info.layer,
+                level: record.shared_info.level.as_deref().map(str::to_string),
+                score,
+                score_breakdown,
+                confidence,
+            })
+        };
+        #[cfg(test)]
+        let score_all = test_mode::score_all();
+        #[cfg(not(test))]
+        let score_all = false;
+        let (mut candidates, unscored) = if score_all {
+            (
+                survivors.into_iter().filter_map(&mut score).collect(),
+                Vec::new(),
+            )
+        } else if hinted {
+            scored_by_bound(
+                survivors,
+                policy.candidate_limit,
+                endpoint_options,
+                max_distance_m,
+                &mut score,
+            )
+        } else {
+            scored_by_bucket(survivors, policy.candidate_limit, &mut score)
+        };
+
+        // Unscored survivors still count towards the same-road counts, by
+        // their road group key alone (both directions of a segment share it).
+        let mut unscored_keys = HashMap::<u32, Option<String>>::new();
+        if !candidates.is_empty() {
+            for edge in &unscored {
+                let shared = sections.edge_shared_info[edge.edge() as usize];
+                unscored_keys.entry(shared).or_insert_with(|| {
+                    let mut info = SharedEdgeInfo {
+                        osm_way_id: sections.si_way.get(shared as usize),
+                        ..Default::default()
+                    };
+                    request_view.fill_attributes(shared as usize, &mut info)?;
+                    road_group_key(&info)
+                });
+            }
+        }
+        let extra_keys = unscored.iter().filter_map(|edge| {
+            unscored_keys
+                .get(&sections.edge_shared_info[edge.edge() as usize])?
+                .as_deref()
+        });
+        attach_same_road_candidate_counts(&mut candidates, extra_keys);
 
         // Both orders end on the (distinct) edge id, so they are total and an
         // unstable sort of indexes gives the same list without moving the
         // large candidate records around.
-        let hinted = endpoint_options.has_scoring_hints();
-        let compare = |a: &CorrelatedLocation, b: &CorrelatedLocation| {
-            if hinted {
-                b.score
-                    .total_cmp(&a.score)
-                    .then_with(|| a.distance_m.total_cmp(&b.distance_m))
-                    .then_with(|| a.edge_id.cmp(&b.edge_id))
-            } else {
-                default_distance_bucket(a.distance_m)
-                    .cmp(&default_distance_bucket(b.distance_m))
-                    .then_with(|| b.score.total_cmp(&a.score))
-                    .then_with(|| a.distance_m.total_cmp(&b.distance_m))
-                    .then_with(|| b.confidence.total_cmp(&a.confidence))
-                    .then_with(|| a.edge_id.cmp(&b.edge_id))
-            }
-        };
         let mut order = (0..candidates.len()).collect::<Vec<_>>();
-        order.sort_unstable_by(|a, b| compare(&candidates[*a], &candidates[*b]));
+        order.sort_unstable_by(|a, b| candidate_order(hinted, &candidates[*a], &candidates[*b]));
         order.truncate(policy.candidate_limit);
         let mut slots = candidates.into_iter().map(Some).collect::<Vec<_>>();
         let candidates = order
@@ -453,22 +464,188 @@ pub struct CandidateSearch {
     pub expanded_max_distance_m: Option<u32>,
 }
 
-fn attach_same_road_candidate_counts(candidates: &mut [CorrelatedLocation]) {
-    let counts = candidates
+/// What phase 1 of `Correlator::search` keeps of a survivor.
+struct Survivor {
+    edge: CorrelationEdge,
+    snap: Snap,
+    heading_deg: Option<u16>,
+    heading_delta_deg: Option<u16>,
+    /// Counted in phase 1 when a minimum rejects on reach.
+    reach: Option<ReachCounts>,
+}
+
+/// Outbound and inbound reach, capped at [`DEFAULT_REACH_EDGE_LIMIT`].
+type ReachCounts = (Option<usize>, Option<usize>);
+
+/// How `Correlator::search` ranks candidates: by score with scoring hints,
+/// else by 2 m distance bucket first. Both end on the (distinct) edge id.
+fn candidate_order(hinted: bool, a: &CorrelatedLocation, b: &CorrelatedLocation) -> Ordering {
+    if hinted {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.distance_m.total_cmp(&b.distance_m))
+            .then_with(|| a.edge_id.cmp(&b.edge_id))
+    } else {
+        default_distance_bucket(a.distance_m)
+            .cmp(&default_distance_bucket(b.distance_m))
+            .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.distance_m.total_cmp(&b.distance_m))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+            .then_with(|| a.edge_id.cmp(&b.edge_id))
+    }
+}
+
+/// Phase 2 without scoring hints: the order starts with the distance bucket
+/// and nothing rejects a survivor any more, so only those in the buckets up
+/// to the `limit`-th one's can make the limit. Returns the scored candidates
+/// and the survivors left unscored.
+fn scored_by_bucket(
+    survivors: Vec<Survivor>,
+    limit: usize,
+    score: &mut impl FnMut(Survivor) -> Option<CorrelatedLocation>,
+) -> (Vec<CorrelatedLocation>, Vec<CorrelationEdge>) {
+    if survivors.len() <= limit {
+        return (
+            survivors.into_iter().filter_map(score).collect(),
+            Vec::new(),
+        );
+    }
+    if limit == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let bucket = |survivor: &Survivor| default_distance_bucket(survivor.snap.distance_m);
+    let mut buckets = survivors.iter().map(bucket).collect::<Vec<_>>();
+    let threshold = *buckets.select_nth_unstable(limit - 1).1;
+    let (kept, dropped): (Vec<_>, Vec<_>) = survivors
+        .into_iter()
+        .partition(|survivor| bucket(survivor) <= threshold);
+    let mut candidates = kept.into_iter().filter_map(&mut *score).collect::<Vec<_>>();
+    if candidates.len() < limit {
+        // A kept survivor without a record (none in a valid package) lets a
+        // dropped one in: score them all, as without the cut.
+        candidates.extend(dropped.into_iter().filter_map(score));
+        return (candidates, Vec::new());
+    }
+    (
+        candidates,
+        dropped.into_iter().map(|survivor| survivor.edge).collect(),
+    )
+}
+
+/// Bounds and exact scores may sum the same terms in another order.
+const SCORE_BOUND_SLACK: f64 = 1e-9;
+
+/// Phase 2 with scoring hints: the order is by score. Survivors are scored in
+/// the order of an upper bound on their score from what phase 1 knows, until
+/// the next bound falls below the `limit`-th best score so far. Returns the
+/// scored candidates and the survivors left unscored.
+fn scored_by_bound(
+    survivors: Vec<Survivor>,
+    limit: usize,
+    endpoint_options: &RouteEndpointOptions,
+    max_distance_m: f64,
+    score: &mut impl FnMut(Survivor) -> Option<CorrelatedLocation>,
+) -> (Vec<CorrelatedLocation>, Vec<CorrelationEdge>) {
+    if survivors.len() <= limit {
+        return (
+            survivors.into_iter().filter_map(score).collect(),
+            Vec::new(),
+        );
+    }
+    if limit == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut bounded = survivors
+        .into_iter()
+        .map(|survivor| {
+            (
+                score_upper_bound(&survivor, endpoint_options, max_distance_m),
+                survivor,
+            )
+        })
+        .collect::<Vec<_>>();
+    bounded.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+    let mut candidates = Vec::with_capacity(limit);
+    // The `limit` best scores so far, best first.
+    let mut best = Vec::<f64>::with_capacity(limit + 1);
+    let mut unscored = Vec::new();
+    let mut rest = bounded.into_iter();
+    for (bound, survivor) in rest.by_ref() {
+        if best.len() == limit && bound + SCORE_BOUND_SLACK < best[limit - 1] {
+            // This and every later survivor score below `limit` candidates.
+            unscored.push(survivor.edge);
+            break;
+        }
+        if let Some(candidate) = score(survivor) {
+            let at = best.partition_point(|better| better.total_cmp(&candidate.score).is_ge());
+            best.insert(at, candidate.score);
+            best.truncate(limit);
+            candidates.push(candidate);
+        }
+    }
+    unscored.extend(rest.map(|(_, survivor)| survivor.edge));
+    (candidates, unscored)
+}
+
+/// The most `score_candidate_breakdown` can give a survivor: its exact
+/// distance, heading, component, side, layer and level terms (and reach, when
+/// phase 1 counted it), plus the largest road class, access, candidate type
+/// (and reach) terms, which need the record.
+fn score_upper_bound(
+    survivor: &Survivor,
+    endpoint_options: &RouteEndpointOptions,
+    max_distance_m: f64,
+) -> f64 {
+    let reach = survivor.reach.map_or(REACH_WEIGHT, |(outbound, inbound)| {
+        reach_score(outbound, inbound)
+    });
+    let candidate_type = if has_candidate_type_hints(endpoint_options) {
+        0.5 * CANDIDATE_TYPE_WEIGHT
+    } else {
+        0.0
+    };
+    distance_score(survivor.snap.distance_m, max_distance_m)
+        + heading_score(survivor.heading_delta_deg)
+        + ROAD_CLASS_WEIGHT
+        + ACCESS_WEIGHT
+        + component_score(survivor.edge.component_size)
+        + reach
+        + side_score(survivor.snap.side, endpoint_options.preferred_side)
+        + layer_match_score(endpoint_options.preferred_layer, survivor.edge.layer) * LAYER_WEIGHT
+        + level_match_score(
+            endpoint_options.preferred_level.as_deref(),
+            survivor.edge.level.as_deref(),
+        ) * LEVEL_WEIGHT
+        + candidate_type
+}
+
+fn attach_same_road_candidate_counts<'k>(
+    candidates: &mut [CorrelatedLocation],
+    extra_keys: impl Iterator<Item = &'k str>,
+) {
+    let mut counts = HashMap::<&str, usize>::new();
+    for key in candidates
         .iter()
         .filter_map(|candidate| candidate.road_group_key.as_deref())
-        .fold(HashMap::<String, usize>::new(), |mut counts, key| {
-            *counts.entry(key.to_string()).or_default() += 1;
-            counts
-        });
-
-    for candidate in candidates {
-        candidate.same_road_candidate_count = candidate
-            .road_group_key
-            .as_ref()
-            .and_then(|key| counts.get(key))
-            .copied()
-            .unwrap_or(1);
+    {
+        *counts.entry(key).or_default() += 1;
+    }
+    for key in extra_keys {
+        *counts.entry(key).or_default() += 1;
+    }
+    let counts = candidates
+        .iter()
+        .map(|candidate| {
+            candidate
+                .road_group_key
+                .as_deref()
+                .and_then(|key| counts.get(key))
+                .copied()
+                .unwrap_or(1)
+        })
+        .collect::<Vec<_>>();
+    for (candidate, count) in candidates.iter_mut().zip(counts) {
+        candidate.same_road_candidate_count = count;
     }
 }
 
@@ -656,45 +833,18 @@ fn score_candidate_breakdown(
     candidate_level: Option<&str>,
     endpoint_options: &RouteEndpointOptions,
 ) -> CorrelationScoreBreakdown {
-    let distance_score = confidence(distance_m, max_distance_m) * 0.31;
-    let heading_score = heading_delta_deg
-        .map(|delta| (1.0 - f64::from(delta.min(180)) / 180.0).clamp(0.0, 1.0))
-        .unwrap_or(0.5)
-        * 0.16;
-    let road_score = profile_road_score(profile, shared_info.road_type) * 0.13;
-    let access_score = access_preference_score(shared_info) * 0.10;
-    let component_score = component_size
-        .map(|size| ((size as f64).ln_1p() / 8.0).clamp(0.0, 1.0))
-        .unwrap_or(0.0)
-        * 0.07;
-    let reach_score = outbound_reach_edge_count
-        .into_iter()
-        .chain(inbound_reach_edge_count)
-        .max()
-        .map(|count| ((count as f64).ln_1p() / 5.0).clamp(0.0, 1.0))
-        .unwrap_or(0.0)
-        * 0.10;
-    let side_score = match preferred_side {
-        PreferredRoadSide::Either => 0.5,
-        PreferredRoadSide::Left => {
-            if side == CorrelationSide::Left || side == CorrelationSide::OnEdge {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        PreferredRoadSide::Right => {
-            if side == CorrelationSide::Right || side == CorrelationSide::OnEdge {
-                1.0
-            } else {
-                0.0
-            }
-        }
-    } * 0.05;
-    let layer_score = layer_match_score(preferred_layer, candidate_layer) * 0.07;
-    let level_score = level_match_score(preferred_level, candidate_level) * 0.05;
-    let candidate_type_score =
-        (candidate_type_preference_score(shared_info, endpoint_options) - 0.5) * 0.20;
+    let distance_score = distance_score(distance_m, max_distance_m);
+    let heading_score = heading_score(heading_delta_deg);
+    let road_score = profile_road_score(profile, shared_info.road_type) * ROAD_CLASS_WEIGHT;
+    let access_score = access_preference_score(shared_info) * ACCESS_WEIGHT;
+    let component_score = component_score(component_size);
+    let reach_score = reach_score(outbound_reach_edge_count, inbound_reach_edge_count);
+    let side_score = side_score(side, preferred_side);
+    let layer_score = layer_match_score(preferred_layer, candidate_layer) * LAYER_WEIGHT;
+    let level_score = level_match_score(preferred_level, candidate_level) * LEVEL_WEIGHT;
+    let candidate_type_score = (candidate_type_preference_score(shared_info, endpoint_options)
+        - 0.5)
+        * CANDIDATE_TYPE_WEIGHT;
     let total_score = distance_score
         + heading_score
         + road_score
@@ -718,6 +868,60 @@ fn score_candidate_breakdown(
         candidate_type_score,
         total_score,
     }
+}
+
+// The weights of the score's terms; each term is its weight times a value in
+// [0, 1] (the candidate type's value is shifted by -0.5).
+const DISTANCE_WEIGHT: f64 = 0.31;
+const HEADING_WEIGHT: f64 = 0.16;
+const ROAD_CLASS_WEIGHT: f64 = 0.13;
+const ACCESS_WEIGHT: f64 = 0.10;
+const COMPONENT_WEIGHT: f64 = 0.07;
+const REACH_WEIGHT: f64 = 0.10;
+const SIDE_WEIGHT: f64 = 0.05;
+const LAYER_WEIGHT: f64 = 0.07;
+const LEVEL_WEIGHT: f64 = 0.05;
+const CANDIDATE_TYPE_WEIGHT: f64 = 0.20;
+
+fn distance_score(distance_m: f64, max_distance_m: f64) -> f64 {
+    confidence(distance_m, max_distance_m) * DISTANCE_WEIGHT
+}
+
+fn heading_score(heading_delta_deg: Option<u16>) -> f64 {
+    heading_delta_deg
+        .map(|delta| (1.0 - f64::from(delta.min(180)) / 180.0).clamp(0.0, 1.0))
+        .unwrap_or(0.5)
+        * HEADING_WEIGHT
+}
+
+fn component_score(component_size: Option<usize>) -> f64 {
+    component_size
+        .map(|size| ((size as f64).ln_1p() / 8.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+        * COMPONENT_WEIGHT
+}
+
+fn reach_score(
+    outbound_reach_edge_count: Option<usize>,
+    inbound_reach_edge_count: Option<usize>,
+) -> f64 {
+    outbound_reach_edge_count
+        .into_iter()
+        .chain(inbound_reach_edge_count)
+        .max()
+        .map(|count| ((count as f64).ln_1p() / 5.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+        * REACH_WEIGHT
+}
+
+fn side_score(side: CorrelationSide, preferred_side: PreferredRoadSide) -> f64 {
+    let matches = |wanted| side == wanted || side == CorrelationSide::OnEdge;
+    let value = match preferred_side {
+        PreferredRoadSide::Either => 0.5,
+        PreferredRoadSide::Left => f64::from(u8::from(matches(CorrelationSide::Left))),
+        PreferredRoadSide::Right => f64::from(u8::from(matches(CorrelationSide::Right))),
+    };
+    value * SIDE_WEIGHT
 }
 
 fn default_distance_bucket(distance_m: f64) -> u64 {
@@ -748,13 +952,7 @@ fn candidate_type_preference_score(
     info: &SharedEdgeInfo,
     endpoint_options: &RouteEndpointOptions,
 ) -> f64 {
-    let has_hints = !endpoint_options.preferred_road_classes.is_empty()
-        || !endpoint_options.avoided_road_classes.is_empty()
-        || !endpoint_options.preferred_route_refs.is_empty()
-        || endpoint_options.prefer_any_route_ref
-        || endpoint_options.avoid_service_roads
-        || endpoint_options.avoid_private_access;
-    if !has_hints {
+    if !has_candidate_type_hints(endpoint_options) {
         return 0.5;
     }
 
@@ -806,6 +1004,15 @@ fn candidate_type_preference_score(
     }
 
     score.clamp(0.0, 1.0)
+}
+
+fn has_candidate_type_hints(endpoint_options: &RouteEndpointOptions) -> bool {
+    !endpoint_options.preferred_road_classes.is_empty()
+        || !endpoint_options.avoided_road_classes.is_empty()
+        || !endpoint_options.preferred_route_refs.is_empty()
+        || endpoint_options.prefer_any_route_ref
+        || endpoint_options.avoid_service_roads
+        || endpoint_options.avoid_private_access
 }
 
 fn preferred_route_ref_matches(info: &SharedEdgeInfo, preferred_route_refs: &[String]) -> bool {
@@ -897,6 +1104,24 @@ fn profile_road_score(profile: MobilityProfile, road_type: RoadType) -> f64 {
             RoadType::Primary | RoadType::Secondary => 0.25,
             RoadType::Motorway => 0.05,
         },
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_mode {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SCORE_ALL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Makes `Correlator::search` score every survivor, as it used to.
+    pub(crate) fn set_score_all(all: bool) {
+        SCORE_ALL.with(|cell| cell.set(all));
+    }
+
+    pub(crate) fn score_all() -> bool {
+        SCORE_ALL.with(Cell::get)
     }
 }
 
@@ -1445,6 +1670,45 @@ mod tests {
             &options,
         );
         assert_eq!(connected.expanded_max_distance_m, None);
+
+        // Routes and matrices report the widened radius per endpoint.
+        let far = GeoPoint::new(50.0001, 20.02);
+        let route = engine
+            .route_leg(crate::LegRequest::new(point, far, MobilityProfile::Wheeled))
+            .expect("route from the widened origin");
+        assert_eq!(
+            route.diagnostics.origin_expanded_correlation_distance_m,
+            Some(300)
+        );
+        assert_eq!(
+            route
+                .diagnostics
+                .destination_expanded_correlation_distance_m,
+            None
+        );
+        let json = serde_json::to_value(&route.diagnostics).unwrap();
+        assert_eq!(json["originExpandedCorrelationDistanceM"], 300);
+        assert!(
+            json.get("destinationExpandedCorrelationDistanceM")
+                .is_none()
+        );
+        let matrix = engine.matrix(crate::RouteMatrixRequest::new(
+            vec![far, point],
+            vec![far],
+            MobilityProfile::Wheeled,
+        ));
+        assert_eq!(
+            matrix.source_expanded_correlation_distances_m,
+            vec![None, Some(300)]
+        );
+        assert!(matrix.target_expanded_correlation_distances_m.is_empty());
+        let plain = engine.matrix(crate::RouteMatrixRequest::new(
+            vec![far],
+            vec![far],
+            MobilityProfile::Wheeled,
+        ));
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("sourceExpandedCorrelationDistancesM").is_none());
     }
 
     #[test]
@@ -1499,5 +1763,127 @@ mod tests {
             MobilityProfile::Wheeled,
         ));
         assert!(route.is_ok(), "{route:?}");
+    }
+
+    /// The Monaco fixture, compiled as `scripts/check.sh` does.
+    fn monaco() -> (tempfile::TempDir, crate::RoutingEngine) {
+        let pbf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/monaco.osm.pbf");
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("monaco.mrt");
+        wayfarer_compiler::compile(
+            &wayfarer_compiler::CompileRequest::new(pbf, output.clone())
+                .scratch_dir(dir.path().join("scratch"))
+                .graph_id("monaco")
+                .country("MC"),
+            &wayfarer_compiler::CancelToken::new(),
+            |_| {},
+        )
+        .unwrap();
+        let package = std::sync::Arc::new(crate::RoutingPackage::open(&output).unwrap());
+        (dir, crate::RoutingEngine::from_package(package))
+    }
+
+    /// Scoring only the survivors that can make the limit gives what scoring
+    /// all of them gave: candidates, same-road counts and rejections, with and
+    /// without scoring hints, for every profile and through the widening
+    /// search.
+    #[test]
+    fn two_phase_search_equals_scoring_every_survivor_on_monaco() {
+        let (_dir, engine) = monaco();
+        let correlator = Correlator::new(engine.route_graph_view());
+        let hinted = RouteEndpointOptions {
+            heading_deg: Some(17),
+            heading_tolerance_deg: Some(120),
+            preferred_side: PreferredRoadSide::Right,
+            preferred_layer: Some(0),
+            avoid_private_access: true,
+            preferred_road_classes: vec![
+                CorrelationRoadClassPreference::Primary,
+                CorrelationRoadClassPreference::Secondary,
+            ],
+            avoid_service_roads: true,
+            prefer_any_route_ref: true,
+            min_outbound_reach_edge_count: Some(8),
+            ..RouteEndpointOptions::default()
+        };
+        let option_sets = [
+            RouteEndpointOptions::default(),
+            hinted,
+            RouteEndpointOptions {
+                heading_deg: Some(250),
+                ..RouteEndpointOptions::default()
+            },
+            RouteEndpointOptions {
+                preferred_side: PreferredRoadSide::Left,
+                preferred_level: Some("0".into()),
+                ..RouteEndpointOptions::default()
+            },
+            RouteEndpointOptions {
+                min_component_size: Some(EXPANDED_CORRELATION_MIN_COMPONENT_SIZE),
+                min_outbound_reach_edge_count: Some(DEFAULT_REACH_EDGE_LIMIT),
+                min_inbound_reach_edge_count: Some(DEFAULT_REACH_EDGE_LIMIT),
+                ..RouteEndpointOptions::default()
+            },
+            RouteEndpointOptions {
+                preferred_layer: Some(1),
+                require_layer_match: true,
+                avoided_road_classes: vec![CorrelationRoadClassPreference::Residential],
+                ..RouteEndpointOptions::default()
+            },
+        ];
+        let policies = [(150, 8), (40, 1), (300, 3), (1_000, 8), (75, 0)].map(
+            |(max_distance_m, candidate_limit)| CorrelationPolicy {
+                max_distance_m,
+                candidate_limit,
+                ..CorrelationPolicy::default()
+            },
+        );
+        let profiles = [
+            MobilityProfile::Wheeled,
+            MobilityProfile::OnFoot,
+            MobilityProfile::Tracked,
+        ];
+        let both = |run: &dyn Fn() -> CandidateSearch| {
+            test_mode::set_score_all(true);
+            let all = format!("{:?}", run());
+            test_mode::set_score_all(false);
+            (all, format!("{:?}", run()))
+        };
+        let mut compared = 0;
+        let mut full = 0;
+        for row in 0..9u8 {
+            for col in 0..9u8 {
+                let point = GeoPoint::new(
+                    43.723 + f64::from(row) * 0.0037,
+                    7.405 + f64::from(col) * 0.0043,
+                );
+                for profile in profiles {
+                    for (index, options) in option_sets.iter().enumerate() {
+                        // Fewer combinations at the wide radius.
+                        for policy in policies.iter().filter(|policy| {
+                            policy.max_distance_m < 1_000
+                                || (usize::from(row + col) + index) % 4 == 0
+                        }) {
+                            let (all, two_phase) =
+                                both(&|| correlator.search(point, profile, policy, options));
+                            assert_eq!(
+                                all, two_phase,
+                                "{point:?} {profile:?} options {index} {policy:?}"
+                            );
+                            compared += 1;
+                            let kept = all.matches("CorrelatedLocation {").count();
+                            full += usize::from(kept > 0 && kept == policy.candidate_limit);
+                        }
+                    }
+                    let policy = &policies[1];
+                    let (all, two_phase) = both(&|| {
+                        correlator.search_expanding(point, profile, policy, &option_sets[0])
+                    });
+                    assert_eq!(all, two_phase, "{point:?} {profile:?} expanding");
+                }
+            }
+        }
+        assert!(compared > 3_000 && full > 600, "{compared} {full}");
     }
 }

@@ -299,6 +299,9 @@ impl RoutingEngine {
                 destination_rejected_candidate_count: destination_search.rejected_candidate_count,
                 origin_rejected_candidates: origin_search.rejected_candidates,
                 destination_rejected_candidates: destination_search.rejected_candidates,
+                origin_expanded_correlation_distance_m: origin_search.expanded_max_distance_m,
+                destination_expanded_correlation_distance_m: destination_search
+                    .expanded_max_distance_m,
                 correlation_duration_ns: elapsed_ns(correlation_started.elapsed()),
                 correlation_mode: origin_search.mode,
                 ..Default::default()
@@ -323,6 +326,9 @@ impl RoutingEngine {
             let diagnostics = RouteDiagnostics {
                 origin_candidate_count: origin_search.candidates.len(),
                 destination_candidate_count: destination_search.candidates.len(),
+                origin_expanded_correlation_distance_m: origin_search.expanded_max_distance_m,
+                destination_expanded_correlation_distance_m: destination_search
+                    .expanded_max_distance_m,
                 correlation_duration_ns: elapsed_ns(correlation_started.elapsed()),
                 correlation_mode: origin_search.mode,
                 ..Default::default()
@@ -360,6 +366,8 @@ impl RoutingEngine {
             destination_relaxed_correlation_retry_count,
             origin_rejected_candidates: origin_search.rejected_candidates,
             destination_rejected_candidates: destination_search.rejected_candidates,
+            origin_expanded_correlation_distance_m: origin_search.expanded_max_distance_m,
+            destination_expanded_correlation_distance_m: destination_search.expanded_max_distance_m,
             correlation_duration_ns,
             correlation_mode: origin_search.mode,
             ..Default::default()

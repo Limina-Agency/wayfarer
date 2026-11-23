@@ -93,6 +93,15 @@ pub struct RouteMatrixResult {
     pub visited_edge_count: usize,
     #[serde(default)]
     pub settled_node_count: usize,
+    /// Per source, the correlation distance its snapping widened to (300 m,
+    /// 1 km, or a SAR request's `off_network` reach) because no candidate
+    /// within `max_correlation_distance_m` was connected to the network, or
+    /// none; empty (and absent from JSON) when no source widened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_expanded_correlation_distances_m: Vec<Option<u32>>,
+    /// [`Self::source_expanded_correlation_distances_m`] for the targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_expanded_correlation_distances_m: Vec<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

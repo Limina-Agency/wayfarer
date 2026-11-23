@@ -730,6 +730,15 @@ pub struct RouteDiagnostics {
     pub origin_rejected_candidates: Vec<RejectedCorrelationCandidate>,
     #[serde(default)]
     pub destination_rejected_candidates: Vec<RejectedCorrelationCandidate>,
+    /// The correlation distance the origin's snapping widened to (300 m,
+    /// 1 km, or a SAR request's `off_network` reach) because no candidate
+    /// within `max_correlation_distance_m` was connected to the network;
+    /// absent when it did not widen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_expanded_correlation_distance_m: Option<u32>,
+    /// [`Self::origin_expanded_correlation_distance_m`] for the destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_expanded_correlation_distance_m: Option<u32>,
     pub blocked_edge_count: usize,
     pub avoided_edge_count: usize,
     #[serde(default)]
