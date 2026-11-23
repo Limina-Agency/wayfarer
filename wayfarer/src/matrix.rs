@@ -8,6 +8,7 @@ use crate::correlator::{CandidateSearch, Correlator};
 use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
 use crate::limits::MAX_MATRIX_CELLS;
+use crate::package::SearchGraph;
 use crate::package::destination::relax_split_costs;
 use crate::package::search::SearchState;
 use crate::package::search::analysis::{
@@ -19,7 +20,6 @@ use crate::package::search::patch::{
     PatchCosts, PatchCounters, PatchGraph, PatchOutcome, PatchPath, PatchQuery, analysis_overlay,
     matrix_row as patch_row, run as run_patch,
 };
-use crate::package::{SearchGraph, profile_bit};
 use crate::search::RoutingEngine;
 use crate::trip::{
     apply_query_overlays, invalid_point, validate_query_options, validate_query_overlays,
@@ -389,6 +389,7 @@ impl RoutingEngine {
             .with_transitions(crate::transitions::Transitions::of(
                 &request.options,
                 request.profile,
+                graph.profile_bit(request.profile),
             ));
         let column = handle.column(&view);
         let resolve = |candidates: &&[CorrelatedLocation]| {
@@ -488,7 +489,7 @@ impl RoutingEngine {
         let heuristic_cost_per_m = bounds.heuristic_cost_per_m;
         let query = AnalysisQuery {
             column,
-            profile_bit: profile_bit(request.profile),
+            profile_bit: view.profile_bit(request.profile),
             max_visited_edge_count: request.options.max_visited_edge_count,
             cancellation: &request.options.cancellation,
             cost_overrides,
@@ -516,7 +517,7 @@ impl RoutingEngine {
             // virtual points, which go along edges at column cost.
             potentials: !bounds.fell_back(),
             gates: &bounds.gates,
-            profile_bit: profile_bit(request.profile),
+            profile_bit: view.profile_bit(request.profile),
             origins: &[],
             destinations: &[],
             origin_edges: &[],

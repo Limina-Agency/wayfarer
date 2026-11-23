@@ -35,7 +35,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use super::{RoutingPackage, SearchGraph, chord_m, profile_bit, road_type_from_rank};
+use super::{RoutingPackage, SearchGraph, chord_m, road_type_from_rank};
 use crate::costing::{
     CostingPolicy, EdgeCostClasses, EdgeCostDecision, EdgeCostFlags, EdgeCostInputs, JunctionDelay,
 };
@@ -531,7 +531,7 @@ impl SearchGraph<'_> {
     pub(crate) fn cost_inputs(
         &self,
         edge: u32,
-        profile_bit: u8,
+        profile_bit: u16,
         profile_mask: wayfarer_package::ModeMask,
     ) -> EdgeCostInputs<'static> {
         let index = edge as usize;
@@ -543,7 +543,7 @@ impl SearchGraph<'_> {
             distance_m: self.edge_length[index],
             // Only `mask & profile_mask != 0` is ever tested, which the
             // stored access bit records exactly.
-            mobility_mode_mask: if self.edge_profile_access[index] & profile_bit != 0 {
+            mobility_mode_mask: if self.edge_access.profiles(index) & profile_bit != 0 {
                 profile_mask
             } else {
                 0
@@ -556,7 +556,7 @@ impl SearchGraph<'_> {
             free_flow_speed_kph: speed(self.si_speeds[tuple * 3 + 1]),
             constrained_speed_kph: speed(self.si_speeds[tuple * 3 + 2]),
             conditional_restrictions: &[],
-            sar_access: self.edge_profile_access[index] & SAR_ACCESS_BITS,
+            sar_access: self.edge_access.sar(index) & SAR_ACCESS_BITS,
             legal_reason: self.legal_reason(self.edge_shared_info[index] as usize).0,
         }
     }
@@ -569,7 +569,7 @@ impl SearchGraph<'_> {
         &self,
         policy: &CostingPolicy<'_>,
         edge: u32,
-        profile_bit: u8,
+        profile_bit: u16,
         profile_mask: wayfarer_package::ModeMask,
     ) -> EdgeCostDecision {
         let conditional = if self.conditional_edges.binary_search(&edge).is_ok() {
@@ -639,7 +639,7 @@ pub(super) fn derive_column_from(
         key.allow_destination_only,
     )
     .with_sar_relaxations(key.sar);
-    let bit = profile_bit(key.profile);
+    let bit = view.profile_bit(key.profile);
     let mask = key.profile.mobility_mode_mask();
     let edge_count = view.edge_count;
     let mut cost = vec![f32::INFINITY; edge_count];
@@ -834,7 +834,7 @@ pub(crate) fn metric_costs(view: &SearchGraph<'_>, metric: MetricKey) -> Vec<f32
     };
     let policy = CostingPolicy::with_destination_only_policy(metric.profile, &options, true)
         .with_sar_relaxations(metric_policy_sar(view, metric));
-    let bit = profile_bit(metric.profile);
+    let bit = view.profile_bit(metric.profile);
     let mask = metric.profile.mobility_mode_mask();
     (0..view.edge_count as u32)
         .into_par_iter()

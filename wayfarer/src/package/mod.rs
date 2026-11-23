@@ -52,6 +52,10 @@ use serde::{Deserialize, Serialize};
 use crate::types::MobilityProfile;
 pub(crate) use search::SearchState;
 pub(crate) use wayfarer_package::format::*;
+
+/// Complex-restriction automata a package may build: one per slot bit of a
+/// u16 mask.
+const AUTOMATA_SLOTS: usize = 16;
 pub use wayfarer_package::format::{
     PackageCounts, PackageQuality, PackageQualityStatus, ROUTING_PACKAGE_FORMAT_VERSION,
     RoutingPackageError, RoutingPackageMetadata, RoutingPackageSection, RoutingPackageVerification,
@@ -139,8 +143,9 @@ pub struct RoutingPackage {
     memory: RoutePackageMemoryProfile,
     state_pool: Mutex<Vec<SearchState>>,
     derived_columns: columns::DerivedColumnCache,
-    /// Per profile slot, built on first use (see `restrictions`).
-    complex_automata: [OnceLock<restrictions::ComplexAutomata>; PROFILE_SLOTS],
+    /// Per profile slot (by its bit), built on first use (see
+    /// `restrictions`).
+    complex_automata: [OnceLock<restrictions::ComplexAutomata>; AUTOMATA_SLOTS],
     /// The matrix thread pool of a bounded memory profile, built on first use.
     matrix_pool: OnceLock<Option<rayon::ThreadPool>>,
     /// The package's stored costs are of an older costing model: every
@@ -200,6 +205,11 @@ impl RoutingPackage {
     /// Whether the package stores costs for `profile`.
     pub fn supports_profile(&self, profile: crate::types::MobilityProfile) -> bool {
         self.file.supports_profile(profile)
+    }
+
+    /// The profile's bit in the package's masks; 0 without a slot.
+    pub(crate) fn profile_bit(&self, profile: crate::types::MobilityProfile) -> u16 {
+        self.file.profile_bit(profile)
     }
 
     /// The package's size in bytes.
@@ -407,7 +417,7 @@ impl RoutingPackage {
 #[derive(Clone, Copy)]
 pub(crate) struct SearchGraph<'g> {
     sections: Sections<'g>,
-    complex_automata: &'g [OnceLock<restrictions::ComplexAutomata>; PROFILE_SLOTS],
+    complex_automata: &'g [OnceLock<restrictions::ComplexAutomata>; AUTOMATA_SLOTS],
     /// A request's transition costs (barriers, a SAR request's R2 entry and
     /// R4 barriers), which [`SearchGraph::turn_cost`] adds; `None` outside a
     /// request (map matching).
@@ -434,9 +444,11 @@ impl<'g> SearchGraph<'g> {
         }
     }
 
-    pub(crate) fn complex_automata(&self, profile_bit: u8) -> &'g restrictions::ComplexAutomata {
-        let slot = (profile_bit.trailing_zeros() as usize).min(PROFILE_SLOTS - 1);
-        let automata: &'g [OnceLock<restrictions::ComplexAutomata>; PROFILE_SLOTS] =
+    pub(crate) fn complex_automata(&self, profile_bit: u16) -> &'g restrictions::ComplexAutomata {
+        // A profile without a slot (bit 0) has the last entry, which no
+        // slot reaches.
+        let slot = (profile_bit.trailing_zeros() as usize).min(AUTOMATA_SLOTS - 1);
+        let automata: &'g [OnceLock<restrictions::ComplexAutomata>; AUTOMATA_SLOTS] =
             self.complex_automata;
         automata[slot].get_or_init(|| restrictions::ComplexAutomata::new(self, profile_bit))
     }
@@ -461,7 +473,7 @@ impl RoutingPackage {
             return Some(0);
         }
         let g = self.view();
-        let bit = profile_bit(profile);
+        let bit = g.profile_bit(profile);
         let start = if outgoing {
             g.edge_target[edge as usize]
         } else {
@@ -482,7 +494,7 @@ impl RoutingPackage {
                 g.in_edges(node).map(|(edge, _)| edge).collect()
             };
             for candidate in candidates {
-                if g.edge_profile_access[candidate as usize] & bit == 0
+                if g.edge_access.profiles(candidate as usize) & bit == 0
                     || seen_edges.contains(&candidate)
                 {
                     continue;

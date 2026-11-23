@@ -2,9 +2,9 @@
 
 Status: being built behind an off-by-default compiler switch (decision F1
 of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: step 1 of section 12 (the tagged table,
-both hashes, `PackageParams`, retired reserved sections, implied ids), draft
-revision 1. Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
+--package-format 3`, hidden). Done: steps 1 and 2 of section 12 (the tagged
+table, both hashes, `PackageParams`, retired reserved sections, implied ids;
+`ProfileSlots` and the u16 masks), draft revision 2. Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -283,7 +283,15 @@ column 0, *measured*). A request for a profile the package has no slot for is
 refused with a typed error. An engine keeps a slot whose profile code it
 doesn't know and never matches it, so a 1.x compiler can add a bicycle, HGV
 or motorcycle slot and older engines still read the package, as long as the
-masks have a free bit: hence u16, with 6 of its 16 bits used today.
+masks have a free bit: hence u16, with 5 of its 16 bits used today.
+
+As built: `EdgeAccess` also carries format 2's two SAR bits (physically
+drivable, against a vehicle one-way), in its top two bits (14 and 15), so a
+package has at most 14 slots. The other masks could hold 16, but one slot
+count numbers them all. A compile writes the five slots in code order
+(wheeled, tracked, emergency, on foot, legged: bits 0 to 4), and the
+compiler, which builds every mask in format 2's bits, moves each down one
+and drops `Default`'s, which always equals `Wheeled`'s.
 
 ### 5.2 u16 masks (new ids, old ids retired)
 
@@ -697,9 +705,10 @@ bump.
 **Building it on `main`.** Format 3 is several PRs, and packages written by
 `main` between them must not be mistaken for the final format. Until
 `chore/format-3-release` the writer sits behind a compiler switch that is off
-by default, so default compiles stay format 2 and byte-identical; draft
-revision 1 keeps format 2's profile columns and heuristic costs at header
-offsets 96 and 104 (inside the zero area) until `ProfileSlots` replaces them. The first PR
+by default, so default compiles stay format 2 and byte-identical. Draft
+revision 1 kept format 2's profile columns and heuristic costs at header
+offsets 96 and 104; draft revision 2 moves them to `ProfileSlots`, and the
+header is zero from 88 to the checksum. The first PR
 sets the version to 3 and writes `PackageParams` key 10 (draft revision);
 each later PR that changes bytes raises it, and an engine refuses any draft
 revision but its own; the last PR removes the key. Suggested order:

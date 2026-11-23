@@ -20,7 +20,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use wayfarer_costing::{EdgeCostDecision, EdgeCostFlags};
 
-use super::{RoutingPackage, SearchGraph, profile_bit, profile_slot};
+use super::{RoutingPackage, SearchGraph, profile_slot};
 use crate::costing::CostingPolicy;
 use crate::types::{MobilityProfile, RouteOptions};
 
@@ -36,12 +36,12 @@ pub(crate) struct DestinationPockets {
 
 impl DestinationPockets {
     pub(crate) fn build(graph: SearchGraph<'_>, profile: MobilityProfile) -> Self {
-        let bit = profile_bit(profile);
+        let bit = graph.profile_bit(profile);
         let destination_only = (0..graph.edge_count as u32)
             .filter(|edge| {
                 let index = *edge as usize;
                 let tuple = graph.cost_tuple(graph.edge_shared_info[index] as usize);
-                graph.edge_profile_access[index] & bit != 0
+                graph.edge_access.profiles(index) & bit != 0
                     && EdgeCostFlags(graph.si_cost_flags[tuple])
                         .has(EdgeCostFlags::DESTINATION_ONLY)
             })
@@ -152,7 +152,7 @@ impl RoutingPackage {
         let graph = self.view();
         let pockets = self.destination_pockets(profile);
         let relaxed = CostingPolicy::new(profile, options);
-        let (bit, mask) = (profile_bit(profile), profile.mobility_mode_mask());
+        let (bit, mask) = (graph.profile_bit(profile), profile.mobility_mode_mask());
         let mut seen = FxHashSet::default();
         for endpoint in endpoints {
             let Some(pocket) = pockets.pocket_of.get(&endpoint) else {

@@ -29,7 +29,6 @@ use crate::costing::{CostingPolicy, EdgeCostDecision};
 use crate::package::SearchGraph;
 use crate::package::cch::{GatedPotential, PotentialScratch};
 use crate::package::columns::CostColumn;
-use crate::package::profile_bit;
 use crate::package::restrictions::{ComplexAutomata, ROOT};
 use crate::package::search::gates::{DiscountGate, discount_gates, gate_limit};
 use crate::types::{MobilityProfile, RouteOptions};
@@ -125,7 +124,7 @@ impl AnalysisPoint {
 
 pub(crate) struct AnalysisQuery<'c> {
     pub column: CostColumn<'c>,
-    pub profile_bit: u8,
+    pub profile_bit: u16,
     pub max_visited_edge_count: Option<usize>,
     /// Stops each search like the budget; the request reports `Cancelled`.
     pub cancellation: &'c crate::RouteCancellation,
@@ -256,7 +255,7 @@ pub(crate) fn request_duration_overrides(
         if let EdgeCostDecision::Allowed(costed) = graph.edge_cost_decision(
             costing,
             edge,
-            profile_bit(profile),
+            graph.profile_bit(profile),
             profile.mobility_mode_mask(),
         ) {
             durations.insert(edge, costed.duration_s as f32);
@@ -287,7 +286,7 @@ pub(crate) fn conditional_overrides(
         let (cost, duration) = match graph.edge_cost_decision(
             costing,
             *edge,
-            profile_bit(profile),
+            graph.profile_bit(profile),
             profile.mobility_mode_mask(),
         ) {
             EdgeCostDecision::Allowed(costed) => (costed.cost as f32, costed.duration_s as f32),
@@ -316,7 +315,7 @@ pub(crate) fn request_edge_cost(
     match graph.edge_cost_decision(
         costing,
         edge,
-        profile_bit(profile),
+        graph.profile_bit(profile),
         profile.mobility_mode_mask(),
     ) {
         EdgeCostDecision::Allowed(costed) => costed.cost as f32,

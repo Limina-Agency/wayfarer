@@ -2021,14 +2021,14 @@ fn barrier_node_access(graph: &RoadGraph, node_id: i64) -> (BarrierAccess, usize
         .node_weights()
         .find(|node| node.source_node_id == Some(node_id))
         .map_or(0, |node| node.barrier_access);
-    (BarrierAccess(node), graph.edge_count())
+    (BarrierAccess::from_format_2(node), graph.edge_count())
 }
 
 /// Profile bits: vehicles (Default, Wheeled, Tracked), Emergency, walkers
 /// (OnFoot, Legged).
-const VEHICLES: u8 = 0b00_0111;
-const EMERGENCY: u8 = 0b00_1000;
-const WALKERS: u8 = 0b11_0000;
+const VEHICLES: u16 = 0b00_0111;
+const EMERGENCY: u16 = 0b00_1000;
+const WALKERS: u16 = 0b11_0000;
 
 #[test]
 fn node_barrier_semantics_cover_representative_values() {

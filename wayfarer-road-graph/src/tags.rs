@@ -326,7 +326,7 @@ impl NodeBarrier {
     /// OnFoot and Legged walkers.
     pub fn profile_access(&self) -> wayfarer_package::barrier::BarrierAccess {
         use wayfarer_package::MobilityProfile as P;
-        use wayfarer_package::format::profile_bit;
+        use wayfarer_package::format::format_2_profile_bit as profile_bit;
         let (mut closed, mut gate) = (0u8, 0u8);
         for profile in [
             P::Default,
@@ -347,7 +347,7 @@ impl NodeBarrier {
                 gate |= profile_bit(profile);
             }
         }
-        wayfarer_package::barrier::BarrierAccess::new(closed, gate)
+        wayfarer_package::barrier::BarrierAccess::new(u16::from(closed), u16::from(gate))
     }
 }
 

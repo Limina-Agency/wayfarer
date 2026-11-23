@@ -8,13 +8,13 @@
 //! relaxation replaces it for vehicles with its own costs per
 //! [`crate::sar::SarBarrierClass`].
 
-use crate::format::PROFILE_SLOTS;
-
-/// How a barrier node affects each profile: bits 0-7 the profile bits it
-/// closes, bits 8-15 those that pass it as a gate (with a delay). The two
-/// sets are disjoint; profiles in neither pass freely.
+/// How a barrier node affects each profile: bits 0-15 the slot bits it
+/// closes, bits 16-31 those that pass it as a gate (with a delay). The two
+/// sets are disjoint; profiles in neither pass freely. Format 3 stores it as
+/// is; format 2 and road graphs store a u16 with eight bits each
+/// ([`Self::from_format_2`], [`Self::to_format_2`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct BarrierAccess(pub u16);
+pub struct BarrierAccess(pub u32);
 
 /// What a barrier does to one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,16 +29,26 @@ impl BarrierAccess {
 
     /// The access closing the profile bits `closed` and gating `gate` (less
     /// any it closes).
-    pub fn new(closed: u8, gate: u8) -> Self {
-        Self(u16::from(closed) | (u16::from(gate & !closed) << 8))
+    pub fn new(closed: u16, gate: u16) -> Self {
+        Self(u32::from(closed) | (u32::from(gate & !closed) << 16))
     }
 
-    pub fn closed(self) -> u8 {
-        self.0 as u8
+    /// Format 2's u16: closed bits 0-7, gate bits 8-15.
+    pub fn from_format_2(access: u16) -> Self {
+        Self(u32::from(access & 0xff) | (u32::from(access >> 8) << 16))
     }
 
-    pub fn gate(self) -> u8 {
-        (self.0 >> 8) as u8
+    /// Format 2's u16 of an access whose bits are format 2's profile bits.
+    pub fn to_format_2(self) -> u16 {
+        (self.closed() & 0xff) | ((self.gate() & 0xff) << 8)
+    }
+
+    pub fn closed(self) -> u16 {
+        self.0 as u16
+    }
+
+    pub fn gate(self) -> u16 {
+        (self.0 >> 16) as u16
     }
 
     /// Whether the barrier affects some profile.
@@ -48,7 +58,7 @@ impl BarrierAccess {
 
     /// What the barrier does to the profile with `profile_bit`.
     #[inline]
-    pub fn effect(self, profile_bit: u8) -> BarrierEffect {
+    pub fn effect(self, profile_bit: u16) -> BarrierEffect {
         if self.closed() & profile_bit != 0 {
             BarrierEffect::Closed
         } else if self.gate() & profile_bit != 0 {
@@ -58,11 +68,11 @@ impl BarrierAccess {
         }
     }
 
-    /// Whether the value is one the format defines: disjoint sets of
-    /// profile bits.
-    pub fn is_valid(self) -> bool {
-        let profiles = (1u16 << PROFILE_SLOTS) - 1;
-        self.closed() & self.gate() == 0 && u16::from(self.closed() | self.gate()) & !profiles == 0
+    /// Whether the value is one the format defines for a package with
+    /// `slot_count` profile slots: disjoint sets of slot bits.
+    pub fn is_valid(self, slot_count: usize) -> bool {
+        let slots = ((1u32 << slot_count.min(16)) - 1) as u16;
+        self.closed() & self.gate() == 0 && (self.closed() | self.gate()) & !slots == 0
     }
 }
 
@@ -78,9 +88,16 @@ mod tests {
         assert_eq!(access.effect(0b10), BarrierEffect::Closed);
         assert_eq!(access.effect(0b1_0000), BarrierEffect::Gate);
         assert_eq!(access.effect(0b1), BarrierEffect::Free);
-        assert!(access.is_valid());
-        assert!(!BarrierAccess(0x0101).is_valid());
-        assert!(!BarrierAccess(0x0040).is_valid());
+        assert!(access.is_valid(6));
+        assert!(!BarrierAccess(0x0001_0001).is_valid(6));
+        assert!(!BarrierAccess(0x0040).is_valid(6));
+        assert!(BarrierAccess(0x0040).is_valid(7));
         assert!(!BarrierAccess::NONE.has_effect());
+        // Format 2's u16 round-trips.
+        assert_eq!(
+            BarrierAccess::from_format_2(0x3006),
+            BarrierAccess::new(0b110, 0b11_0000)
+        );
+        assert_eq!(BarrierAccess::new(0b110, 0b11_0000).to_format_2(), 0x3006);
     }
 }

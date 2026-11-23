@@ -53,7 +53,7 @@ use crate::costing::heading_delta;
 use crate::graph_view::PackageGraphView;
 use crate::navigation::NavigationPositionSample;
 use crate::package::restrictions::{ComplexAutomata, ROOT};
-use crate::package::{EDGE_FLAG_SHAPE_REVERSED, NO_HEADING, SearchGraph, profile_bit};
+use crate::package::{EDGE_FLAG_SHAPE_REVERSED, NO_HEADING, SearchGraph};
 use crate::types::{
     CorrelationScoreBreakdown, GeoPoint, MobilityProfile, RouteEdgeAttribution, RouteOptions,
 };
@@ -321,7 +321,7 @@ pub fn match_navigation_trace_cancellable(
     }
 
     let g = access.package().view();
-    let bit = profile_bit(profile);
+    let bit = g.profile_bit(profile);
     let network = Network {
         g,
         automata: g.complex_automata(bit),
@@ -857,12 +857,12 @@ fn rejected(
 struct Network<'g> {
     g: SearchGraph<'g>,
     automata: &'g ComplexAutomata,
-    profile_bit: u8,
+    profile_bit: u16,
 }
 
 impl Network<'_> {
     fn accessible(&self, edge: u32) -> bool {
-        self.g.edge_profile_access[edge as usize] & self.profile_bit != 0
+        self.g.edge_access.profiles(edge as usize) & self.profile_bit != 0
     }
 
     fn length_m(&self, edge: u32) -> f64 {

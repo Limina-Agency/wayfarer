@@ -1,6 +1,7 @@
-//! Format 3's section table (`docs/design/format-3.md`, sections 2 to 5):
-//! a format-3 compile routes as format 2 does, the identity and content
-//! hashes, and the table checks against hostile packages.
+//! Format 3's section table and profile slots (`docs/design/format-3.md`,
+//! sections 2 to 5 and 7): a format-3 compile routes as format 2 does, the
+//! identity and content hashes, the slot table and u16 masks, and the checks
+//! against hostile packages.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -10,9 +11,9 @@ use wayfarer::{
 };
 use wayfarer_compiler::{CancelToken, CompileRequest, compile};
 use wayfarer_package::format::{
-    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, PARAM_MUST_UNDERSTAND, PackageFile,
-    PackageFormat, PackageParams, RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED, Section,
-    param_key,
+    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, NO_SLOT_COLUMN, PARAM_MUST_UNDERSTAND,
+    PROFILE_SLOT_BYTES, PackageFile, PackageFormat, PackageParams, ProfileSlot,
+    RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED, Section, param_key, profile_code,
 };
 use wayfarer_package::raw::{RawPackage, RawSection, resign};
 
@@ -95,7 +96,8 @@ fn a_format_3_package_routes_as_format_2_does() {
     let base = open(v2).unwrap().view().edge_id_base;
     let blocked: std::collections::BTreeSet<u64> =
         (0..4_000).step_by(7).map(|slot| base + slot).collect();
-    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+    // Every profile: format 3 numbers their slots differently.
+    for profile in ALL_PROFILES {
         for from in &points {
             for to in &points {
                 for block in [false, true] {
@@ -512,4 +514,254 @@ fn package_params_are_checked_and_the_draft_revision_must_match() {
         9_999
     );
     assert!(RoutingPackage::from_bytes(&newer_model.encode()).is_err());
+}
+
+const ALL_PROFILES: [MobilityProfile; 6] = [
+    MobilityProfile::Default,
+    MobilityProfile::Wheeled,
+    MobilityProfile::Tracked,
+    MobilityProfile::Emergency,
+    MobilityProfile::OnFoot,
+    MobilityProfile::Legged,
+];
+
+/// Every mask of both packages admits the same profiles, through each
+/// package's own bits: format 3 numbers five slots (`Default` shares
+/// `Wheeled`'s) where format 2 has six fixed ones.
+#[test]
+fn format_3_numbers_its_profile_slots_and_widens_the_masks() {
+    let (v2, v3) = monaco();
+    let (v2, v3) = (open(v2).unwrap(), open(v3).unwrap());
+    assert_eq!(v2.profiles().slot_count(), 6);
+    assert_eq!(v3.profiles().slot_count(), 5);
+    assert_eq!(
+        ALL_PROFILES.map(|profile| v3.profile_bit(profile)),
+        [1, 1, 2, 4, 8, 16]
+    );
+    assert_eq!(
+        ALL_PROFILES.map(|profile| v2.profile_bit(profile)),
+        [1, 2, 4, 8, 16, 32]
+    );
+    for profile in ALL_PROFILES {
+        assert_eq!(
+            v2.column_for(profile),
+            v3.column_for(profile),
+            "{profile:?}"
+        );
+        assert_eq!(
+            v2.heuristic_cost_per_m(profile).to_bits(),
+            v3.heuristic_cost_per_m(profile).to_bits(),
+            "{profile:?}"
+        );
+    }
+    let names = v3
+        .section_sizes()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    for wide in [
+        "ProfileSlots",
+        "EdgeAccess",
+        "SimpleMask16",
+        "ComplexMask16",
+        "BarrierAccess32",
+        "NodeReachSaturated16",
+    ] {
+        assert!(names.contains(&wide), "{wide}");
+    }
+    for narrow in [
+        "EdgeProfileAccess",
+        "SimpleMask",
+        "ComplexMask",
+        "BarrierAccess",
+        "NodeReachSaturated",
+    ] {
+        assert!(!names.contains(&narrow), "{narrow}");
+    }
+    // The header no longer holds profile columns or heuristic costs.
+    let header = &monaco().1[..256];
+    assert!(header[88..224].iter().all(|byte| *byte == 0));
+    let (a, b) = (v2.view(), v3.view());
+    let same = |what: &str, count: usize, mask: &dyn Fn(bool, usize) -> u16| {
+        for index in 0..count {
+            for profile in ALL_PROFILES {
+                assert_eq!(
+                    mask(false, index) & v2.profile_bit(profile) != 0,
+                    mask(true, index) & v3.profile_bit(profile) != 0,
+                    "{what} {index} {profile:?}"
+                );
+            }
+        }
+    };
+    same("edge", a.edge_count, &|wide, edge| {
+        if wide {
+            b.edge_access.profiles(edge)
+        } else {
+            a.edge_access.profiles(edge)
+        }
+    });
+    for edge in 0..a.edge_count {
+        assert_eq!(
+            a.edge_access.sar(edge),
+            b.edge_access.sar(edge),
+            "edge {edge}"
+        );
+    }
+    same("simple restriction", a.simple_mask.len(), &|wide, row| {
+        if wide {
+            b.simple_mask.get(row)
+        } else {
+            a.simple_mask.get(row)
+        }
+    });
+    same("complex restriction", a.complex_mask.len(), &|wide, row| {
+        if wide {
+            b.complex_mask.get(row)
+        } else {
+            a.complex_mask.get(row)
+        }
+    });
+    let saturated = [&v2, &v3].map(|package| {
+        package.profile_masks(Section::NodeReachSaturated, Section::NodeReachSaturated16)
+    });
+    same("node", a.node_count, &|wide, node| {
+        saturated[usize::from(wide)].get(node)
+    });
+    assert_eq!(a.barrier_access.len(), b.barrier_access.len());
+    for at in 0..a.barrier_access.len() {
+        for profile in ALL_PROFILES {
+            assert_eq!(
+                a.barrier_access.get(at).effect(v2.profile_bit(profile)),
+                b.barrier_access.get(at).effect(v3.profile_bit(profile)),
+                "barrier {at} {profile:?}"
+            );
+        }
+    }
+}
+
+/// The format-3 package with its slots replaced by `edit`'s.
+fn with_slots(edit: impl FnOnce(&mut Vec<ProfileSlot>)) -> RawPackage {
+    let mut raw = format_3();
+    let at = raw.position(Section::ProfileSlots.id()).unwrap();
+    let mut slots = raw.sections[at]
+        .bytes
+        .as_chunks::<PROFILE_SLOT_BYTES>()
+        .0
+        .iter()
+        .map(|bytes| ProfileSlot::from_bytes(bytes).unwrap())
+        .collect::<Vec<_>>();
+    edit(&mut slots);
+    raw.sections[at].bytes = slots.into_iter().flat_map(ProfileSlot::to_bytes).collect();
+    raw
+}
+
+#[test]
+fn profile_slots_are_checked() {
+    // Flags and reserved bytes are zero.
+    for byte in [2, 3, 16, 31] {
+        let mut raw = format_3();
+        let at = raw.position(Section::ProfileSlots.id()).unwrap();
+        raw.sections[at].bytes[byte] = 1;
+        assert!(open_error(&raw).contains("profile slots"), "byte {byte}");
+    }
+    type Edit = fn(&mut Vec<ProfileSlot>);
+    let cases: [(&str, Edit); 6] = [
+        ("profile slot codes", |slots| slots[1].code = slots[0].code),
+        ("profile slot codes", |slots| slots[2].code = 0),
+        ("too many profile slots", |slots| {
+            for code in 0..10 {
+                slots.push(ProfileSlot {
+                    code: profile_code::PRIVATE + code,
+                    column: NO_SLOT_COLUMN,
+                    heuristic_cost_per_m: 0.0,
+                });
+            }
+        }),
+        ("profile column out of range", |slots| slots[0].column = 7),
+        ("heuristic", |slots| slots[3].heuristic_cost_per_m = -1.0),
+        ("heuristic", |slots| {
+            slots[3].heuristic_cost_per_m = f64::NAN
+        }),
+    ];
+    for (expected, edit) in cases {
+        let error = open_error(&with_slots(edit));
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+}
+
+/// A 1.x compiler may add a slot this build doesn't know (a bicycle, say):
+/// the package still opens, its bit matches no profile, and every route is
+/// the same.
+#[test]
+fn a_slot_of_an_unknown_profile_is_kept_and_matches_no_profile() {
+    let mut raw = with_slots(|slots| {
+        slots.push(ProfileSlot {
+            code: profile_code::BICYCLE,
+            column: NO_SLOT_COLUMN,
+            heuristic_cost_per_m: 0.25,
+        })
+    });
+    // Bicycles may use every edge.
+    let at = raw.position(Section::EdgeAccess.id()).unwrap();
+    for pair in raw.sections[at].bytes.as_chunks_mut::<2>().0 {
+        pair[0] |= 1 << 5;
+    }
+    let bytes = raw.encode();
+    let package = open(&bytes).unwrap();
+    assert_eq!(package.profiles().slot_count(), 6);
+    assert_eq!(package.profile_bit(MobilityProfile::Wheeled), 1);
+    assert_eq!(package.profile_bit(MobilityProfile::Legged), 16);
+    let engines = [&monaco().1, &bytes].map(|bytes| {
+        RoutingEngine::from_package(Arc::new(RoutingPackage::from_bytes(bytes).unwrap()))
+    });
+    let points = points();
+    for profile in [MobilityProfile::Tracked, MobilityProfile::Legged] {
+        for to in &points[1..] {
+            let [a, b] = engines.each_ref().map(|engine| {
+                without_timings(format!(
+                    "{:?}",
+                    engine.route(RouteRequest::new(points[0], *to, profile))
+                ))
+            });
+            assert_eq!(a, b, "{profile:?} -> {to:?}");
+        }
+    }
+}
+
+/// A request for a profile the package has no slot for is refused with a
+/// typed error.
+#[test]
+fn a_profile_without_a_slot_is_refused() {
+    let raw = with_slots(|slots| {
+        let tracked = slots
+            .iter_mut()
+            .find(|slot| slot.code == profile_code::TRACKED)
+            .unwrap();
+        tracked.code = profile_code::PRIVATE;
+    });
+    let bytes = raw.encode();
+    assert_eq!(
+        open(&bytes).unwrap().profile_bit(MobilityProfile::Tracked),
+        0
+    );
+    let engine = RoutingEngine::from_package(Arc::new(RoutingPackage::from_bytes(&bytes).unwrap()));
+    let points = points();
+    let route = |profile| engine.route(RouteRequest::new(points[0], points[1], profile));
+    let refused = format!("{:?}", route(MobilityProfile::Tracked).unwrap_err().error);
+    assert!(refused.contains("ImpossibleMobilityProfile"), "{refused}");
+    assert!(route(MobilityProfile::Wheeled).is_ok());
+}
+
+/// Barrier access names only bits of the package's slots.
+#[test]
+fn barrier_access_is_checked_against_the_slot_count() {
+    let mut raw = format_3();
+    let at = raw.position(Section::BarrierAccess32.id()).unwrap();
+    assert!(
+        !raw.sections[at].bytes.is_empty(),
+        "Monaco has barrier nodes"
+    );
+    // A gate for a sixth slot.
+    raw.sections[at].bytes[2] |= 1 << 5;
+    assert!(open_error(&raw).contains("barrier"));
 }

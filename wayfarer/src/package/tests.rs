@@ -4213,7 +4213,7 @@ fn complex_restriction_statistics() {
         std::fs::write(path, ids.join("\n")).unwrap();
     }
     for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
-        let automata = view.complex_automata(profile_bit(profile));
+        let automata = view.complex_automata(view.profile_bit(profile));
         println!(
             "{profile:?}: {} restrictions, states (forward, backward) {:?}, overlapping states {:?}, member edges {}",
             automata.restriction_count(),
@@ -9060,7 +9060,7 @@ fn via_alternatives_are_valid_routes_within_the_policy() {
                         );
                     }
                     assert!(
-                        view.restriction_violations(&edges, profile_bit(profile))
+                        view.restriction_violations(&edges, view.profile_bit(profile))
                             .is_empty(),
                         "{context}: breaks a restriction"
                     );

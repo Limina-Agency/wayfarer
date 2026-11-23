@@ -23,8 +23,8 @@ use crate::{RoadEdge, RoadHierarchyTier, RoadNode, RoadType, SharedEdgeInfo, Tra
 use rustc_hash::FxHashMap;
 
 use crate::format::{
-    EDGE_FLAG_SHAPE_REVERSED, NO_HEADING, PackageFile, RoutingPackageError, Section, Sections,
-    get_varint, profile_bit, put_varint, unzigzag, zigzag,
+    EDGE_FLAG_SHAPE_REVERSED, NO_HEADING, PackageFile, ProfileMasks, RoutingPackageError, Section,
+    Sections, get_varint, put_varint, unzigzag, zigzag,
 };
 use crate::{GeoPoint, GraphViewEdge, MobilityProfile, lat_lng_envelope_for_radius};
 
@@ -673,7 +673,8 @@ impl LegAttrs {
 /// whose profile admits the edge. Every profile's access test (`mask &
 /// profile mask != 0`) gives the same answer on it as on the true mask when
 /// `exact_mode_mask` holds; other edges store their mask as an exception.
-pub fn rebuilt_mode_mask(profile_access: u8) -> u32 {
+/// `profile_access` holds the slot bits of `profiles`.
+pub fn rebuilt_mode_mask(profiles: &crate::format::ProfileMap, profile_access: u16) -> u32 {
     [
         MobilityProfile::Wheeled,
         MobilityProfile::Tracked,
@@ -681,16 +682,22 @@ pub fn rebuilt_mode_mask(profile_access: u8) -> u32 {
         MobilityProfile::Legged,
     ]
     .into_iter()
-    .filter(|profile| profile_access & profile_bit(*profile) != 0)
+    .filter(|profile| profile_access & profiles.bit(*profile) != 0)
     .fold(0, |mask, profile| mask | profile.mobility_mode_mask())
 }
 
 pub fn exact_mode_mask(mask: u32) -> bool {
+    // Format 3's slots number fewer profiles than format 2's, but rebuild
+    // the same mask: `Default`'s bit is always `Wheeled`'s.
+    let profiles = crate::format::ProfileMap::format_2(
+        [crate::format::NO_COLUMN; crate::format::PROFILE_SLOTS],
+        [0.0; crate::format::PROFILE_SLOTS],
+    );
     let access = PROFILES
         .iter()
         .filter(|profile| mask & profile.mobility_mode_mask() != 0)
-        .fold(0u8, |bits, profile| bits | profile_bit(*profile));
-    let rebuilt = rebuilt_mode_mask(access);
+        .fold(0u16, |bits, profile| bits | profiles.bit(*profile));
+    let rebuilt = rebuilt_mode_mask(&profiles, access);
     PROFILES.iter().all(|profile| {
         (mask & profile.mobility_mode_mask() != 0) == (rebuilt & profile.mobility_mode_mask() != 0)
     })
@@ -995,7 +1002,10 @@ impl PackageFile {
             || !sorted_pairs_ok(self.slice(Section::ComponentSizes), usize::MAX)
             || !sorted_pairs_ok(self.slice(Section::ModeMaskExceptions), c.edge_count)
             || !sorted_pairs_ok(self.slice(Section::TierExceptions), c.edge_count)
-            || self.slice::<u8>(Section::NodeReachSaturated).len() != c.node_count
+            || self
+                .profile_masks(Section::NodeReachSaturated, Section::NodeReachSaturated16)
+                .len()
+                != c.node_count
         {
             return invalid("request sections are inconsistent");
         }
@@ -1282,7 +1292,7 @@ impl RequestView<'_> {
         // entry of the same shared info) is listed once.
         selected.sort_unstable_by_key(|(edge_id, _, _)| *edge_id);
         selected.dedup_by_key(|(edge_id, _, _)| *edge_id);
-        let bit = profile_bit(profile);
+        let bit = g.profile_bit(profile);
         let mut candidates = Vec::with_capacity(selected.len());
         for (edge_id, edge, slot) in selected {
             let mut geometry = shapes[slot].clone();
@@ -1440,7 +1450,7 @@ impl RequestView<'_> {
         };
         let inferred = g.edge_inferred_speed[index];
         let mobility_mode_mask = pair_value(self.mode_mask_exceptions, edge)
-            .unwrap_or_else(|| rebuilt_mode_mask(g.edge_profile_access[index]));
+            .unwrap_or_else(|| rebuilt_mode_mask(g.profiles, g.edge_access.profiles(index)));
         let hierarchy_tier = match pair_value(self.tier_exceptions, edge) {
             Some(code) => tier_from_code(code),
             None => info.hierarchy_tier,
@@ -1590,13 +1600,13 @@ impl SmallSet {
 /// nodes. The count is min(reachable, cap), so it depends only on the start.
 pub struct ReachCounter<'g> {
     graph: Sections<'g>,
-    bit: u8,
+    bit: u16,
     /// A SAR request's R1 and R2: the edges they open count too.
     sar: Option<crate::sar::SarEdgeRelaxations>,
     cap: usize,
     memo: FxHashMap<(u32, bool), usize>,
     /// `NodeReachSaturated` when it answers for `cap`, else empty.
-    saturated: &'g [u8],
+    saturated: ProfileMasks<'g>,
     edges: SmallSet,
     nodes: SmallSet,
     queue: Vec<u32>,
@@ -1605,13 +1615,13 @@ pub struct ReachCounter<'g> {
 impl<'g> ReachCounter<'g> {
     pub fn new(graph: &'g PackageFile, profile: MobilityProfile, cap: usize) -> Self {
         let saturated = if graph.params().reach_cap == cap as u64 {
-            graph.slice::<u8>(Section::NodeReachSaturated)
+            graph.profile_masks(Section::NodeReachSaturated, Section::NodeReachSaturated16)
         } else {
-            &[]
+            ProfileMasks::Narrow(&[])
         };
         Self {
             graph: graph.view(),
-            bit: profile_bit(profile),
+            bit: graph.profile_bit(profile),
             sar: None,
             cap,
             memo: FxHashMap::default(),
@@ -1653,10 +1663,8 @@ impl<'g> ReachCounter<'g> {
         if start as usize >= g.node_count {
             return None;
         }
-        if self
-            .saturated
-            .get(start as usize)
-            .is_some_and(|bits| bits & self.bit != 0)
+        if (start as usize) < self.saturated.len()
+            && self.saturated.get(start as usize) & self.bit != 0
         {
             return Some(self.cap);
         }
@@ -1715,15 +1723,14 @@ impl<'g> ReachCounter<'g> {
 fn edge_accessible(
     g: &Sections<'_>,
     edge: u32,
-    bit: u8,
+    bit: u16,
     sar: Option<&crate::sar::SarEdgeRelaxations>,
 ) -> bool {
-    let access = g.edge_profile_access[edge as usize];
-    access & bit != 0
+    g.edge_access.profiles(edge as usize) & bit != 0
         || sar.is_some_and(|sar| {
             let shared = g.edge_shared_info[edge as usize] as usize;
             sar.factor(crate::sar::SarEdgeFacts::from_cost_classes(
-                access,
+                g.edge_access.sar(edge as usize),
                 g.legal_reason(shared),
                 g.si_cost_classes[g.cost_tuple(shared)],
             ))

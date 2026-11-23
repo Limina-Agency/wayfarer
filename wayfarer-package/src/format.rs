@@ -40,7 +40,7 @@ pub const MAX_READ_FORMAT_VERSION: u32 = 3;
 /// The draft revision of format 3 this build writes and reads
 /// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
 /// its release raises it; the release removes the key.
-pub const FORMAT_3_DRAFT_REVISION: u64 = 1;
+pub const FORMAT_3_DRAFT_REVISION: u64 = 2;
 pub const HEADER_FIXED_BYTES: usize = 256;
 /// A format-2 section table entry: offset u64, length u64, blake3.
 pub const TABLE_ENTRY_BYTES: usize = 48;
@@ -90,8 +90,18 @@ impl PackageFormat {
     }
 }
 pub const SECTION_ALIGN: usize = 64;
+/// The profiles this build knows, one per [`MobilityProfile`]; also format
+/// 2's fixed profile slots ([`profile_slot`]).
 pub const PROFILE_SLOTS: usize = 6;
+/// Format 2's header column of a profile whose costs the engine derives.
 pub const NO_COLUMN: u8 = u8::MAX;
+/// [`ProfileSlot::column`] of a profile whose costs the engine derives.
+pub const NO_SLOT_COLUMN: u32 = u32::MAX;
+/// Format 3's limit on profile slots: [`Section::EdgeAccess`] keeps its top
+/// two bits for the SAR bits.
+pub const MAX_PROFILE_SLOTS: usize = 14;
+/// The bytes of one [`ProfileSlot`].
+pub const PROFILE_SLOT_BYTES: usize = 32;
 
 /// [`Section::EdgeTwin`] of an edge without a twin.
 pub const NO_TWIN: u32 = u32::MAX;
@@ -291,11 +301,31 @@ pub enum Section {
     /// ([`PackageParams`]). Format 2 keeps them in the JSON metadata and
     /// `RequestMeta`.
     PackageParams,
+    /// Format 3 (id 128): one 32-byte [`ProfileSlot`] per profile slot, at
+    /// most [`MAX_PROFILE_SLOTS`]; the entry's index is the slot's bit in
+    /// every access and restriction mask. Format 2 has six fixed slots, one
+    /// per [`MobilityProfile`], with their columns and bounds in the header.
+    ProfileSlots,
+    /// Format 3 (id 130), replacing [`Section::EdgeProfileAccess`]: per edge
+    /// its slot bits (bits 0-13) and the SAR bits (bit 14 physically
+    /// drivable, bit 15 against a vehicle one-way); read through
+    /// [`EdgeAccess`].
+    EdgeAccess,
+    /// Format 3 (id 131), replacing [`Section::SimpleMask`]: u16 slot bits.
+    SimpleMask16,
+    /// Format 3 (id 132), replacing [`Section::ComplexMask`]: u16 slot bits.
+    ComplexMask16,
+    /// Format 3 (id 133), replacing [`Section::BarrierAccess`]: per barrier
+    /// node the slot bits it closes (bits 0-15) and gates (bits 16-31).
+    BarrierAccess32,
+    /// Format 3 (id 134), replacing [`Section::NodeReachSaturated`]: u16
+    /// slot bits.
+    NodeReachSaturated16,
 }
 
 /// Every section this build knows, of any format; the internal index of
 /// [`Section`] (not its format-3 id, see [`Section::id`]).
-pub const SECTION_COUNT: usize = Section::PackageParams as usize + 1;
+pub const SECTION_COUNT: usize = Section::NodeReachSaturated16 as usize + 1;
 /// The sections a format-2 table lists, in slot order: `Metadata` to
 /// `CchRank`.
 pub const FORMAT2_SECTION_COUNT: usize = Section::CchRank as usize + 1;
@@ -397,6 +427,12 @@ pub const SECTIONS: [Section; SECTION_COUNT] = [
     Section::LoneHeadingEnd,
     Section::CchRank,
     Section::PackageParams,
+    Section::ProfileSlots,
+    Section::EdgeAccess,
+    Section::SimpleMask16,
+    Section::ComplexMask16,
+    Section::BarrierAccess32,
+    Section::NodeReachSaturated16,
 ];
 
 /// Whether a section is in format-3 packages.
@@ -422,7 +458,13 @@ impl Section {
     /// (`docs/design/format-3.md`, section 6).
     pub const fn id(self) -> u32 {
         match self {
+            Self::ProfileSlots => 128,
             Self::PackageParams => 129,
+            Self::EdgeAccess => 130,
+            Self::SimpleMask16 => 131,
+            Self::ComplexMask16 => 132,
+            Self::BarrierAccess32 => 133,
+            Self::NodeReachSaturated16 => 134,
             other => other as u32,
         }
     }
@@ -430,7 +472,13 @@ impl Section {
     /// The known section with format-3 id `id`, retired or not.
     pub fn from_id(id: u32) -> Option<Self> {
         match id {
+            128 => Some(Self::ProfileSlots),
             129 => Some(Self::PackageParams),
+            130 => Some(Self::EdgeAccess),
+            131 => Some(Self::SimpleMask16),
+            132 => Some(Self::ComplexMask16),
+            133 => Some(Self::BarrierAccess32),
+            134 => Some(Self::NodeReachSaturated16),
             id if (id as usize) < FORMAT2_SECTION_COUNT => Self::from_index(id as usize),
             _ => None,
         }
@@ -468,7 +516,12 @@ impl Section {
             | Self::Reserved9
             | Self::Reserved10
             | Self::Reserved11
-            | Self::Reserved12 => Presence::Retired,
+            | Self::Reserved12
+            | Self::EdgeProfileAccess
+            | Self::SimpleMask
+            | Self::ComplexMask
+            | Self::BarrierAccess
+            | Self::NodeReachSaturated => Presence::Retired,
             Self::NodeLatE7 | Self::NodeLngE7 => Presence::Conditional,
             _ => Presence::Mandatory,
         }
@@ -627,6 +680,12 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     2, // LoneHeadingEnd: their end headings
     4, // CchRank: [node] rank in the CCH elimination order (format 2)
     16, // PackageParams: (key u32, flags u32, value u64) entries (format 3)
+    32, // ProfileSlots: one ProfileSlot per slot (format 3)
+    2, // EdgeAccess: slot bits 0-13, SAR bits 14-15 per edge (format 3)
+    2, // SimpleMask16 (format 3)
+    2, // ComplexMask16 (format 3)
+    4, // BarrierAccess32: closed u16, gate u16 (format 3)
+    2, // NodeReachSaturated16 (format 3)
 ];
 
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
@@ -725,6 +784,12 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "LoneHeadingEnd",
     "CchRank",
     "PackageParams",
+    "ProfileSlots",
+    "EdgeAccess",
+    "SimpleMask16",
+    "ComplexMask16",
+    "BarrierAccess32",
+    "NodeReachSaturated16",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1071,18 +1136,10 @@ pub const HEADER_V3_COUNTS: usize = 24; // 6 x u64 (see [`PackageCounts`])
 /// u64; bit 0 [`LAYOUT_NODE_E7_DERIVED`], every other bit must be zero.
 pub const HEADER_V3_LAYOUT_FLAGS: usize = 72;
 pub const HEADER_V3_EDGE_ID_BASE: usize = 80;
-/// Draft revision 1 keeps format 2's profile columns (6 x u8) and heuristic
-/// costs (6 x f64) at format 2's offsets, inside the header's zero area,
-/// until `ProfileSlots` replaces them.
-pub const HEADER_V3_PROFILE_COLUMNS: usize = HEADER_PROFILE_COLUMNS;
-pub const HEADER_V3_HEURISTIC: usize = HEADER_HEURISTIC;
 pub const HEADER_V3_ROOT_CHECKSUM: usize = 224; // 32 bytes
-/// The format-3 header bytes that must be zero.
-const HEADER_V3_ZERO: [std::ops::Range<usize>; 3] = [
-    88..HEADER_V3_PROFILE_COLUMNS,
-    HEADER_V3_PROFILE_COLUMNS + PROFILE_SLOTS..HEADER_V3_HEURISTIC,
-    HEADER_V3_HEURISTIC + PROFILE_SLOTS * 8..HEADER_V3_ROOT_CHECKSUM,
-];
+/// The format-3 header bytes that must be zero. Profile columns and
+/// heuristic costs are in [`Section::ProfileSlots`].
+const HEADER_V3_ZERO: std::ops::Range<usize> = 88..HEADER_V3_ROOT_CHECKSUM;
 
 /// A validated routing package file: its storage, header and section table.
 /// The engine wraps it with its query-time state.
@@ -1102,8 +1159,8 @@ pub struct PackageFile {
     /// from [`Section::PackageParams`] (see [`Self::params`]), not the JSON.
     pub(crate) metadata: RoutingPackageMetadata,
     pub(crate) params: PackageParams,
-    pub(crate) profile_columns: [u8; PROFILE_SLOTS],
-    pub(crate) heuristic_cost_per_m: [f64; PROFILE_SLOTS],
+    /// The profiles' mask bits, stored columns and heuristic costs.
+    pub(crate) profiles: ProfileMap,
     pub(crate) format_version: u32,
     /// The edge id lookup, built on first use (see [`Sections::edge_for_id`]).
     pub(crate) edge_id_lookup: OnceLock<Vec<u32>>,
@@ -1115,11 +1172,14 @@ impl std::fmt::Debug for PackageFile {
             .field("counts", &self.counts)
             .field("dataset_hash", &self.dataset_hash)
             .field("graph_id", &self.metadata.graph_id)
-            .field("profile_columns", &self.profile_columns)
+            .field("profiles", &self.profiles)
             .finish()
     }
 }
 
+/// The profile's index among the [`PROFILE_SLOTS`] this build knows, which
+/// is also its slot in format 2. A format-3 package numbers its slots in
+/// [`Section::ProfileSlots`]: ask the package ([`PackageFile::profile_bit`]).
 pub fn profile_slot(profile: MobilityProfile) -> usize {
     match profile {
         MobilityProfile::Default => 0,
@@ -1131,8 +1191,326 @@ pub fn profile_slot(profile: MobilityProfile) -> usize {
     }
 }
 
-pub fn profile_bit(profile: MobilityProfile) -> u8 {
+/// The profile's bit in format 2's masks, and in a road graph's (which the
+/// compiler builds every mask in). A package's own bits come from
+/// [`PackageFile::profile_bit`].
+pub fn format_2_profile_bit(profile: MobilityProfile) -> u8 {
     1 << profile_slot(profile)
+}
+
+/// Profile codes of [`ProfileSlot::code`] (`docs/design/format-3.md`,
+/// section 5.1).
+pub mod profile_code {
+    pub const WHEELED: u16 = 1;
+    pub const TRACKED: u16 = 2;
+    pub const EMERGENCY: u16 = 3;
+    pub const ON_FOOT: u16 = 4;
+    pub const LEGGED: u16 = 5;
+    /// Reserved for a 1.x compiler: an engine that doesn't know a code keeps
+    /// its slot and matches no profile to it.
+    pub const BICYCLE: u16 = 6;
+    pub const HGV: u16 = 7;
+    pub const MOTORCYCLE: u16 = 8;
+    pub const BUS: u16 = 9;
+    /// Codes from here up are private.
+    pub const PRIVATE: u16 = 0x8000;
+}
+
+/// The profile code of `profile`; `Default` is the API's alias of
+/// `Wheeled` and shares its slot.
+pub fn profile_code(profile: MobilityProfile) -> u16 {
+    match profile {
+        MobilityProfile::Default | MobilityProfile::Wheeled => profile_code::WHEELED,
+        MobilityProfile::Tracked => profile_code::TRACKED,
+        MobilityProfile::Emergency => profile_code::EMERGENCY,
+        MobilityProfile::OnFoot => profile_code::ON_FOOT,
+        MobilityProfile::Legged => profile_code::LEGGED,
+    }
+}
+
+/// The profiles a format-3 compile gives a slot, in slot order.
+pub const FORMAT_3_SLOT_PROFILES: [MobilityProfile; 5] = [
+    MobilityProfile::Wheeled,
+    MobilityProfile::Tracked,
+    MobilityProfile::Emergency,
+    MobilityProfile::OnFoot,
+    MobilityProfile::Legged,
+];
+
+/// One entry of [`Section::ProfileSlots`]: profile code u16, flags u16
+/// (zero), stored column u32 ([`NO_SLOT_COLUMN`] when the engine derives
+/// the costs), heuristic cost per metre f64, 16 zero bytes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileSlot {
+    pub code: u16,
+    pub column: u32,
+    pub heuristic_cost_per_m: f64,
+}
+
+impl ProfileSlot {
+    pub fn to_bytes(self) -> [u8; PROFILE_SLOT_BYTES] {
+        let mut bytes = [0u8; PROFILE_SLOT_BYTES];
+        bytes[0..2].copy_from_slice(&self.code.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.column.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.heuristic_cost_per_m.to_le_bytes());
+        bytes
+    }
+
+    /// A slot's bytes; `None` when its flags or reserved bytes are not zero.
+    pub fn from_bytes(bytes: &[u8; PROFILE_SLOT_BYTES]) -> Option<Self> {
+        (bytes[2..4] == [0, 0] && bytes[16..].iter().all(|byte| *byte == 0)).then(|| Self {
+            code: u16::from_le_bytes([bytes[0], bytes[1]]),
+            column: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            heuristic_cost_per_m: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        })
+    }
+}
+
+/// The format-3 slots of a compile's format-2 header columns and bounds
+/// (indexed by [`profile_slot`]): one per [`FORMAT_3_SLOT_PROFILES`].
+pub fn format_3_slots(
+    profile_columns: [u8; PROFILE_SLOTS],
+    heuristic_cost_per_m: [f64; PROFILE_SLOTS],
+) -> Vec<ProfileSlot> {
+    FORMAT_3_SLOT_PROFILES
+        .iter()
+        .map(|profile| {
+            let column = profile_columns[profile_slot(*profile)];
+            ProfileSlot {
+                code: profile_code(*profile),
+                column: if column == NO_COLUMN {
+                    NO_SLOT_COLUMN
+                } else {
+                    u32::from(column)
+                },
+                heuristic_cost_per_m: heuristic_cost_per_m[profile_slot(*profile)],
+            }
+        })
+        .collect()
+}
+
+/// Format 3's slot bits of format-2 profile bits, for the slots of
+/// [`format_3_slots`]: format 2's `Default` bit goes (it always equals
+/// `Wheeled`'s, as their mode masks are the same) and the others move down
+/// one. Bits 6 and 7 are dropped.
+pub fn format_3_profile_bits(format_2_bits: u8) -> u16 {
+    u16::from(format_2_bits & crate::sar::ACCESS_PROFILE_BITS) >> 1
+}
+
+/// [`Section::EdgeAccess`] of a format-2 [`Section::EdgeProfileAccess`]
+/// byte: the slot bits ([`format_3_profile_bits`]) and the SAR bits moved
+/// from bits 6-7 to 14-15.
+pub fn format_3_edge_access(format_2_access: u8) -> u16 {
+    format_3_profile_bits(format_2_access)
+        | (u16::from(format_2_access & !crate::sar::ACCESS_PROFILE_BITS) << 8)
+}
+
+/// How a package's profiles map to its mask bits, stored columns and
+/// heuristic costs: format 2's fixed slots, or format 3's
+/// [`Section::ProfileSlots`] (where `Default` shares `Wheeled`'s slot and a
+/// profile without a slot has bit 0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileMap {
+    /// Per [`profile_slot`] index.
+    bits: [u16; PROFILE_SLOTS],
+    columns: [Option<usize>; PROFILE_SLOTS],
+    heuristic_cost_per_m: [f64; PROFILE_SLOTS],
+    /// The slots the masks' bits number, known profile or not.
+    slot_count: usize,
+}
+
+impl ProfileMap {
+    /// Format 2's fixed slots, with the header's columns and bounds.
+    pub fn format_2(
+        profile_columns: [u8; PROFILE_SLOTS],
+        heuristic_cost_per_m: [f64; PROFILE_SLOTS],
+    ) -> Self {
+        Self {
+            bits: std::array::from_fn(|slot| 1 << slot),
+            columns: profile_columns
+                .map(|column| (column != NO_COLUMN).then_some(usize::from(column))),
+            heuristic_cost_per_m,
+            slot_count: PROFILE_SLOTS,
+        }
+    }
+
+    /// Format 3's slots. A slot whose code this build doesn't know keeps
+    /// its bit and matches no profile; a known code may have one slot.
+    pub fn format_3(slots: &[ProfileSlot]) -> Result<Self, RoutingPackageError> {
+        let invalid = |message: &str| RoutingPackageError::Invalid(message.to_string());
+        if slots.len() > MAX_PROFILE_SLOTS {
+            return Err(invalid("too many profile slots"));
+        }
+        let mut map = Self {
+            bits: [0; PROFILE_SLOTS],
+            columns: [None; PROFILE_SLOTS],
+            heuristic_cost_per_m: [0.0; PROFILE_SLOTS],
+            slot_count: slots.len(),
+        };
+        let mut codes = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.iter().enumerate() {
+            if slot.code == 0 || codes.contains(&slot.code) {
+                return Err(invalid("profile slot codes are invalid"));
+            }
+            codes.push(slot.code);
+            if slot.heuristic_cost_per_m.is_nan() || slot.heuristic_cost_per_m < 0.0 {
+                return Err(invalid("profile slot heuristic cost is invalid"));
+            }
+            for profile in [
+                MobilityProfile::Default,
+                MobilityProfile::Wheeled,
+                MobilityProfile::Tracked,
+                MobilityProfile::Emergency,
+                MobilityProfile::OnFoot,
+                MobilityProfile::Legged,
+            ] {
+                if profile_code(profile) == slot.code {
+                    let at = profile_slot(profile);
+                    map.bits[at] = 1 << index;
+                    map.columns[at] = (slot.column != NO_SLOT_COLUMN)
+                        .then(|| usize::try_from(slot.column).unwrap_or(usize::MAX));
+                    map.heuristic_cost_per_m[at] = slot.heuristic_cost_per_m;
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    /// The profile's bit in the package's masks; 0 when it has no slot.
+    #[inline]
+    pub fn bit(&self, profile: MobilityProfile) -> u16 {
+        self.bits[profile_slot(profile)]
+    }
+
+    /// The profile's stored column; `None` when the engine derives its
+    /// costs (or it has no slot).
+    pub fn column(&self, profile: MobilityProfile) -> Option<usize> {
+        self.columns[profile_slot(profile)]
+    }
+
+    pub fn heuristic_cost_per_m(&self, profile: MobilityProfile) -> f64 {
+        self.heuristic_cost_per_m[profile_slot(profile)]
+    }
+
+    /// The number of slots the masks' bits number.
+    pub fn slot_count(&self) -> usize {
+        self.slot_count
+    }
+
+    /// Every bit a mask may set: one per slot.
+    pub fn slot_bits(&self) -> u16 {
+        ((1u32 << self.slot_count) - 1) as u16
+    }
+
+    fn stored_columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.columns.iter().flatten().copied()
+    }
+
+    fn heuristic_costs(&self) -> &[f64] {
+        &self.heuristic_cost_per_m
+    }
+}
+
+/// A section of profile masks, one per element: u8 in format 2, u16 slot
+/// bits in format 3. Test with a package's [`PackageFile::profile_bit`].
+#[derive(Debug, Clone, Copy)]
+pub enum ProfileMasks<'g> {
+    Narrow(&'g [u8]),
+    Wide(&'g [u16]),
+}
+
+impl ProfileMasks<'_> {
+    #[inline]
+    pub fn get(&self, index: usize) -> u16 {
+        match self {
+            Self::Narrow(masks) => u16::from(masks[index]),
+            Self::Wide(masks) => masks[index],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Narrow(masks) => masks.len(),
+            Self::Wide(masks) => masks.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every mask, widened.
+    pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
+        (0..self.len()).map(|index| self.get(index))
+    }
+}
+
+/// Per edge its profile bits and SAR bits: [`Section::EdgeProfileAccess`]
+/// (format 2: slot bits 0-5, SAR bits 6-7) or [`Section::EdgeAccess`]
+/// (format 3: slot bits 0-13, SAR bits 14-15).
+#[derive(Debug, Clone, Copy)]
+pub struct EdgeAccess<'g>(pub ProfileMasks<'g>);
+
+impl EdgeAccess<'_> {
+    /// The slot bits of the profiles with legal access to `edge`.
+    #[inline]
+    pub fn profiles(&self, edge: usize) -> u16 {
+        match self.0 {
+            ProfileMasks::Narrow(masks) => u16::from(masks[edge] & crate::sar::ACCESS_PROFILE_BITS),
+            ProfileMasks::Wide(masks) => masks[edge] & 0x3fff,
+        }
+    }
+
+    /// The SAR bits of `edge`, in format 2's places
+    /// ([`crate::sar::ACCESS_VEHICLE_PHYSICAL`],
+    /// [`crate::sar::ACCESS_WRONG_WAY`]) whatever the format.
+    #[inline]
+    pub fn sar(&self, edge: usize) -> u8 {
+        match self.0 {
+            ProfileMasks::Narrow(masks) => masks[edge] & !crate::sar::ACCESS_PROFILE_BITS,
+            ProfileMasks::Wide(masks) => {
+                (masks[edge] >> 8) as u8 & !crate::sar::ACCESS_PROFILE_BITS
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Per barrier node its [`crate::barrier::BarrierAccess`]: u16 in format 2
+/// ([`Section::BarrierAccess`]), u32 in format 3
+/// ([`Section::BarrierAccess32`]).
+#[derive(Debug, Clone, Copy)]
+pub enum BarrierAccesses<'g> {
+    Narrow(&'g [u16]),
+    Wide(&'g [u32]),
+}
+
+impl BarrierAccesses<'_> {
+    #[inline]
+    pub fn get(&self, index: usize) -> crate::barrier::BarrierAccess {
+        match self {
+            Self::Narrow(access) => crate::barrier::BarrierAccess::from_format_2(access[index]),
+            Self::Wide(access) => crate::barrier::BarrierAccess(access[index]),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Narrow(access) => access.len(),
+            Self::Wide(access) => access.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// What [`PackageFile::move_into_place`] puts before the unique part of the
@@ -1459,6 +1837,18 @@ impl PackageFile {
                 draft_revision: None,
             }
         };
+        let profiles = if header.version >= 3 {
+            let slots = section_bytes(Section::ProfileSlots)
+                .as_chunks::<PROFILE_SLOT_BYTES>()
+                .0
+                .iter()
+                .map(ProfileSlot::from_bytes)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| RoutingPackageError::Invalid("profile slots are invalid".into()))?;
+            ProfileMap::format_3(&slots)?
+        } else {
+            ProfileMap::format_2(header.profile_columns, header.heuristic_cost_per_m)
+        };
         let graph = Self {
             storage,
             counts: header.counts,
@@ -1469,8 +1859,7 @@ impl PackageFile {
             unknown_sections: header.unknown_sections,
             metadata,
             params,
-            profile_columns: header.profile_columns,
-            heuristic_cost_per_m: header.heuristic_cost_per_m,
+            profiles,
             format_version: header.version,
             edge_id_lookup: OnceLock::new(),
         };
@@ -1529,6 +1918,19 @@ impl PackageFile {
             c.column_count.checked_mul(c.node_count.div_ceil(64))
         };
         let stored_edge_ids = if format_3 { 0 } else { c.edge_count };
+        let (simple_mask, complex_mask, edge_access) = if format_3 {
+            (
+                Section::SimpleMask16,
+                Section::ComplexMask16,
+                Section::EdgeAccess,
+            )
+        } else {
+            (
+                Section::SimpleMask,
+                Section::ComplexMask,
+                Section::EdgeProfileAccess,
+            )
+        };
         let fixed = [
             (Section::NodeFirstOut, plus_one(c.node_count)),
             (Section::NodeXyzFixed, mul(c.node_count, 3)),
@@ -1550,15 +1952,15 @@ impl PackageFile {
             (Section::SimpleFrom, Some(c.simple_restriction_count)),
             (Section::SimpleTo, Some(c.simple_restriction_count)),
             (Section::SimpleVia, Some(c.simple_restriction_count)),
-            (Section::SimpleMask, Some(c.simple_restriction_count)),
+            (simple_mask, Some(c.simple_restriction_count)),
             (Section::ComplexTo, Some(c.complex_restriction_count)),
-            (Section::ComplexMask, Some(c.complex_restriction_count)),
+            (complex_mask, Some(c.complex_restriction_count)),
             (
                 Section::ComplexPrefixStart,
                 plus_one(c.complex_restriction_count),
             ),
             (Section::EdgeTwin, Some(c.edge_count)),
-            (Section::EdgeProfileAccess, Some(c.edge_count)),
+            (edge_access, Some(c.edge_count)),
             (Section::Reserved1, Some(0)),
             (Section::Reserved2, Some(0)),
             (Section::Reserved3, Some(0)),
@@ -1639,22 +2041,20 @@ impl PackageFile {
         }
         let barrier_nodes = self.slice::<u32>(Section::BarrierNode);
         let barrier_classes = self.slice::<u8>(Section::BarrierClass);
-        let barrier_access = self.slice::<u16>(Section::BarrierAccess);
+        let barrier_access = self.barrier_accesses();
+        let slot_count = self.profiles.slot_count();
         if barrier_nodes.len() != barrier_classes.len()
             || barrier_nodes.len() != barrier_access.len()
             || barrier_nodes.windows(2).any(|pair| pair[0] >= pair[1])
             || barrier_nodes
                 .last()
                 .is_some_and(|node| *node as usize >= c.node_count)
-            || barrier_classes
-                .iter()
-                .zip(barrier_access)
-                .any(|(class, access)| {
-                    let access = crate::barrier::BarrierAccess(*access);
-                    (*class != 0 && crate::sar::SarBarrierClass::from_code(*class).is_none())
-                        || !access.is_valid()
-                        || (*class == 0 && !access.has_effect())
-                })
+            || barrier_classes.iter().enumerate().any(|(at, class)| {
+                let access = barrier_access.get(at);
+                (*class != 0 && crate::sar::SarBarrierClass::from_code(*class).is_none())
+                    || !access.is_valid(slot_count)
+                    || (*class == 0 && !access.has_effect())
+            })
         {
             return invalid("barrier nodes are invalid");
         }
@@ -1682,9 +2082,9 @@ impl PackageFile {
             return invalid("graph exceeds u32 indexing");
         }
         if self
-            .profile_columns
-            .iter()
-            .any(|column| *column != NO_COLUMN && usize::from(*column) >= c.column_count)
+            .profiles
+            .stored_columns()
+            .any(|column| column >= c.column_count)
         {
             return invalid("profile column out of range");
         }
@@ -1721,7 +2121,7 @@ impl PackageFile {
         if !non_negative(Section::EdgeCost)
             || !non_negative(Section::EdgeDuration)
             || !finite(Section::EdgeLength)
-            || !self.heuristic_cost_per_m.iter().all(|v| *v >= 0.0)
+            || !self.profiles.heuristic_costs().iter().all(|v| *v >= 0.0)
         {
             return invalid("edge costs, durations, lengths or bound factors are invalid");
         }
@@ -2030,8 +2430,41 @@ impl PackageFile {
         &self.metadata.graph_id
     }
 
+    /// Whether the package stores a cost column for the profile (else the
+    /// engine derives its costs).
     pub fn supports_profile(&self, profile: MobilityProfile) -> bool {
-        self.profile_columns[profile_slot(profile)] != NO_COLUMN
+        self.profiles.column(profile).is_some()
+    }
+
+    /// The profile's bit in the package's masks ([`ProfileMasks`],
+    /// [`EdgeAccess`], [`crate::barrier::BarrierAccess`]); 0 when the
+    /// package has no slot for it.
+    #[inline]
+    pub fn profile_bit(&self, profile: MobilityProfile) -> u16 {
+        self.profiles.bit(profile)
+    }
+
+    /// The package's profile slots.
+    pub fn profiles(&self) -> &ProfileMap {
+        &self.profiles
+    }
+
+    /// A mask section of the package's format: `narrow` in format 2, `wide`
+    /// in format 3.
+    pub fn profile_masks(&self, narrow: Section, wide: Section) -> ProfileMasks<'_> {
+        if self.format_version >= 3 {
+            ProfileMasks::Wide(self.slice(wide))
+        } else {
+            ProfileMasks::Narrow(self.slice(narrow))
+        }
+    }
+
+    fn barrier_accesses(&self) -> BarrierAccesses<'_> {
+        if self.format_version >= 3 {
+            BarrierAccesses::Wide(self.slice(Section::BarrierAccess32))
+        } else {
+            BarrierAccesses::Narrow(self.slice(Section::BarrierAccess))
+        }
     }
 
     pub fn byte_len(&self) -> usize {
@@ -2055,8 +2488,11 @@ impl PackageFile {
             && self.metadata.mode_mask_union & crate::MobilityMode::ALL_GROUND != 0
     }
 
+    /// Whether some edge may admit the profile: the package has a slot for
+    /// it and an edge of its modes.
     pub fn has_route_edges_for_profile(&self, profile: MobilityProfile) -> bool {
-        self.metadata.mode_mask_union & profile.mobility_mode_mask() != 0
+        self.profile_bit(profile) != 0
+            && self.metadata.mode_mask_union & profile.mobility_mode_mask() != 0
     }
 
     pub fn view(&self) -> Sections<'_> {
@@ -2096,15 +2532,17 @@ impl PackageFile {
             },
             simple_from: self.slice(Section::SimpleFrom),
             simple_to: self.slice(Section::SimpleTo),
-            simple_mask: self.slice(Section::SimpleMask),
+            simple_mask: self.profile_masks(Section::SimpleMask, Section::SimpleMask16),
             complex_to: self.slice(Section::ComplexTo),
-            complex_mask: self.slice(Section::ComplexMask),
+            complex_mask: self.profile_masks(Section::ComplexMask, Section::ComplexMask16),
             complex_prefix_start: self.slice(Section::ComplexPrefixStart),
             complex_prefix_pool: self.slice(Section::ComplexPrefixPool),
             edge_twin: self.slice(Section::EdgeTwin),
             lone_in_present: self.slice(Section::LoneInPresent),
             lone_in_edge: self.slice(Section::LoneInEdge),
-            edge_profile_access: self.slice(Section::EdgeProfileAccess),
+            edge_access: EdgeAccess(
+                self.profile_masks(Section::EdgeProfileAccess, Section::EdgeAccess),
+            ),
             shape_start: self.slice(Section::ShapeStart),
             shape_bytes: self.slice(Section::ShapeBytes),
             exact_shape_shared: self.slice(Section::ExactShapeShared),
@@ -2117,7 +2555,8 @@ impl PackageFile {
             si_legal_reason: self.slice(Section::SharedInfoLegalReason),
             barrier_node: self.slice(Section::BarrierNode),
             barrier_class: self.slice(Section::BarrierClass),
-            barrier_access: self.slice(Section::BarrierAccess),
+            barrier_access: self.barrier_accesses(),
+            profiles: &self.profiles,
             piece_kinds: PieceKinds {
                 chain: self.slice(Section::PieceChain),
                 tree: self.slice(Section::PieceTree),
@@ -2144,12 +2583,11 @@ impl PackageFile {
     }
 
     pub fn column_for(&self, profile: MobilityProfile) -> Option<usize> {
-        let column = self.profile_columns[profile_slot(profile)];
-        (column != NO_COLUMN).then_some(usize::from(column))
+        self.profiles.column(profile)
     }
 
     pub fn heuristic_cost_per_m(&self, profile: MobilityProfile) -> f64 {
-        self.heuristic_cost_per_m[profile_slot(profile)]
+        self.profiles.heuristic_cost_per_m(profile)
     }
 }
 
@@ -2392,14 +2830,9 @@ fn parse_header_v3(
         node_e7_derived: flags & u64::from(LAYOUT_NODE_E7_DERIVED) != 0,
         edge_id_base: read_u64(header, HEADER_V3_EDGE_ID_BASE),
     };
-    if HEADER_V3_ZERO
-        .iter()
-        .any(|range| header[range.clone()].iter().any(|byte| *byte != 0))
-    {
+    if header[HEADER_V3_ZERO].iter().any(|byte| *byte != 0) {
         return Err(invalid("reserved header bytes are not zero".into()));
     }
-    let (profile_columns, heuristic_cost_per_m) =
-        read_profiles(header, HEADER_V3_PROFILE_COLUMNS, HEADER_V3_HEURISTIC);
 
     let mut sections = [(0usize, 0usize); SECTION_COUNT];
     let mut present = [false; SECTION_COUNT];
@@ -2543,8 +2976,8 @@ fn parse_header_v3(
         version: 3,
         counts,
         layout,
-        profile_columns,
-        heuristic_cost_per_m,
+        profile_columns: [NO_COLUMN; PROFILE_SLOTS],
+        heuristic_cost_per_m: [0.0; PROFILE_SLOTS],
         sections,
         entries,
         table: (table_offset, table_len),
@@ -2597,9 +3030,10 @@ pub struct Sections<'g> {
     pub si_route_refs: RouteRefs<'g>,
     pub simple_from: &'g [u32],
     pub simple_to: &'g [u32],
-    pub simple_mask: &'g [u8],
+    /// Slot bits per simple restriction (test with [`Self::profile_bit`]).
+    pub simple_mask: ProfileMasks<'g>,
     pub complex_to: &'g [u32],
-    pub complex_mask: &'g [u8],
+    pub complex_mask: ProfileMasks<'g>,
     pub complex_prefix_start: &'g [u32],
     pub complex_prefix_pool: &'g [u32],
     /// Per edge its twin or [`NO_TWIN`] (see [`Section::EdgeTwin`]).
@@ -2610,7 +3044,9 @@ pub struct Sections<'g> {
     pub lone_in_edge: &'g [u32],
     /// Their end headings.
     pub lone_heading_end: &'g [u16],
-    pub edge_profile_access: &'g [u8],
+    /// Per edge the slot bits of the profiles with legal access, and the
+    /// SAR bits.
+    pub edge_access: EdgeAccess<'g>,
     /// Byte offsets of every [`SHAPE_START_STRIDE`]th shape in
     /// `shape_bytes`, then its length.
     pub shape_start: &'g [u32],
@@ -2631,7 +3067,9 @@ pub struct Sections<'g> {
     /// normal routing.
     pub barrier_node: &'g [u32],
     pub barrier_class: &'g [u8],
-    pub barrier_access: &'g [u16],
+    pub barrier_access: BarrierAccesses<'g>,
+    /// The package's profile slots.
+    pub profiles: &'g ProfileMap,
     /// Each stored column's marked chain and tree nodes.
     pub piece_kinds: PieceKinds<'g>,
     /// The package's SAR data.
@@ -2987,6 +3425,12 @@ pub fn chord_m(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 impl<'g> Sections<'g> {
+    /// The profile's bit in the package's masks; 0 without a slot.
+    #[inline]
+    pub fn profile_bit(&self, profile: MobilityProfile) -> u16 {
+        self.profiles.bit(profile)
+    }
+
     /// The edges into `node` with their sources, in ascending edge order:
     /// the twins of the node's out-edges, whose sources are those out-edges'
     /// targets, and the node's edges without a twin (see
@@ -3091,7 +3535,7 @@ impl<'g> Sections<'g> {
         let at = self.barrier_node.binary_search(&node).ok()?;
         Some((
             crate::sar::SarBarrierClass::from_code(self.barrier_class[at]),
-            crate::barrier::BarrierAccess(self.barrier_access[at]),
+            self.barrier_access.get(at),
         ))
     }
 
@@ -3666,7 +4110,9 @@ impl PackageWriter {
     }
 
     /// Sets the header, and in format 2 puts the [`RESERVED_ZERO_SECTIONS`]
-    /// its counts size. [`Self::new`] does this.
+    /// its counts size. [`Self::new`] does this. The profile columns and
+    /// heuristic costs are format 2's, by [`profile_slot`]: format 3 puts
+    /// them in [`Section::ProfileSlots`] ([`format_3_slots`]).
     pub fn set_header(
         &mut self,
         counts: PackageCounts,
@@ -3674,20 +4120,12 @@ impl PackageWriter {
         profile_columns: [u8; PROFILE_SLOTS],
         heuristic_cost_per_m: [f64; PROFILE_SLOTS],
     ) {
-        let (counts_at, flags_at, base_at, columns_at, heuristic_at) = match self.format {
-            PackageFormat::V2 => (
-                HEADER_COUNTS,
-                HEADER_LAYOUT_FLAGS,
-                HEADER_EDGE_ID_BASE,
-                HEADER_PROFILE_COLUMNS,
-                HEADER_HEURISTIC,
-            ),
+        let (counts_at, flags_at, base_at) = match self.format {
+            PackageFormat::V2 => (HEADER_COUNTS, HEADER_LAYOUT_FLAGS, HEADER_EDGE_ID_BASE),
             PackageFormat::V3 => (
                 HEADER_V3_COUNTS,
                 HEADER_V3_LAYOUT_FLAGS,
                 HEADER_V3_EDGE_ID_BASE,
-                HEADER_V3_PROFILE_COLUMNS,
-                HEADER_V3_HEURISTIC,
             ),
         };
         let mut header = vec![0u8; HEADER_FIXED_BYTES];
@@ -3720,12 +4158,22 @@ impl PackageWriter {
         };
         header[flags_at..flags_at + 4].copy_from_slice(&flags.to_le_bytes());
         header[base_at..base_at + 8].copy_from_slice(&layout.edge_id_base.to_le_bytes());
-        header[columns_at..columns_at + PROFILE_SLOTS].copy_from_slice(&profile_columns);
-        for (slot, value) in heuristic_cost_per_m.iter().enumerate() {
-            let at = heuristic_at + slot * 8;
-            header[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        if self.format == PackageFormat::V2 {
+            header[HEADER_PROFILE_COLUMNS..HEADER_PROFILE_COLUMNS + PROFILE_SLOTS]
+                .copy_from_slice(&profile_columns);
+            for (slot, value) in heuristic_cost_per_m.iter().enumerate() {
+                let at = HEADER_HEURISTIC + slot * 8;
+                header[at..at + 8].copy_from_slice(&value.to_le_bytes());
+            }
         }
         self.header = header;
+        if self.format == PackageFormat::V3 {
+            let slots = format_3_slots(profile_columns, heuristic_cost_per_m)
+                .into_iter()
+                .flat_map(ProfileSlot::to_bytes)
+                .collect::<Vec<u8>>();
+            self.put(Section::ProfileSlots, slots);
+        }
         self.node_e7_derived = layout.node_e7_derived;
         if self.format == PackageFormat::V2 {
             let words = counts.column_count * counts.node_count.div_ceil(64);
@@ -3784,6 +4232,60 @@ impl PackageWriter {
             len: bytes.len(),
             hash,
         });
+    }
+
+    /// Puts a section of format-2 profile masks (`narrow`, by
+    /// [`format_2_profile_bit`]): as is in format 2, as `wide` with
+    /// [`format_3_profile_bits`] in format 3.
+    pub fn put_profile_masks(&mut self, narrow: Section, wide: Section, masks: Vec<u8>) {
+        match self.format {
+            PackageFormat::V2 => self.put(narrow, masks),
+            PackageFormat::V3 => {
+                let wide_masks = masks
+                    .into_iter()
+                    .map(format_3_profile_bits)
+                    .collect::<Vec<u16>>();
+                self.put(wide, wide_masks);
+            }
+        }
+    }
+
+    /// Puts format 2's [`Section::EdgeProfileAccess`] bytes, or format 3's
+    /// [`Section::EdgeAccess`] of them ([`format_3_edge_access`]).
+    pub fn put_edge_access(&mut self, access: Vec<u8>) {
+        match self.format {
+            PackageFormat::V2 => self.put(Section::EdgeProfileAccess, access),
+            PackageFormat::V3 => {
+                let wide = access
+                    .into_iter()
+                    .map(format_3_edge_access)
+                    .collect::<Vec<u16>>();
+                self.put(Section::EdgeAccess, wide);
+            }
+        }
+    }
+
+    /// Puts format 2's [`Section::BarrierAccess`] values, or format 3's
+    /// [`Section::BarrierAccess32`] of them (both sets of bits through
+    /// [`format_3_profile_bits`]).
+    pub fn put_barrier_access(&mut self, access: Vec<u16>) {
+        match self.format {
+            PackageFormat::V2 => self.put(Section::BarrierAccess, access),
+            PackageFormat::V3 => {
+                let wide = access
+                    .into_iter()
+                    .map(|access| {
+                        let access = crate::barrier::BarrierAccess::from_format_2(access);
+                        crate::barrier::BarrierAccess::new(
+                            format_3_profile_bits(access.closed() as u8),
+                            format_3_profile_bits(access.gate() as u8),
+                        )
+                        .0
+                    })
+                    .collect::<Vec<u32>>();
+                self.put(Section::BarrierAccess32, wide);
+            }
+        }
     }
 
     pub fn put_metadata<Q: Serialize>(&mut self, metadata: &RoutingPackageMetadata<Q>) {

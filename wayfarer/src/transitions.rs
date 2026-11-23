@@ -28,16 +28,22 @@ pub fn gate_s(profile: MobilityProfile) -> f64 {
 /// A request's transition costs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Transitions {
-    profile_bit: u8,
+    profile_bit: u16,
     gate_s: f64,
     /// A SAR request's transition costs (R2 entry, R4 barriers).
     pub(crate) sar: Option<SarTransitions>,
 }
 
 impl Transitions {
-    pub(crate) fn of(options: &crate::types::RouteOptions, profile: MobilityProfile) -> Self {
+    /// The transitions of a request for `profile`, whose bit in the graph's
+    /// barrier access is `profile_bit`.
+    pub(crate) fn of(
+        options: &crate::types::RouteOptions,
+        profile: MobilityProfile,
+        profile_bit: u16,
+    ) -> Self {
         Self {
-            profile_bit: crate::package::profile_bit(profile),
+            profile_bit,
             gate_s: gate_s(profile),
             sar: SarTransitions::of(options, profile),
         }

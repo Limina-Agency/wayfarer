@@ -4,7 +4,6 @@ use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
 use crate::limits::{MAX_ISOCHRONE_CONTOURS, MAX_ISOCHRONE_ORIGINS};
 use crate::package::destination::relax_split_costs;
-use crate::package::profile_bit;
 use crate::package::search::analysis::{
     AnalysisContour, AnalysisCounters, AnalysisPoint, AnalysisQuery, ContourMetric,
     IsochroneOutcome, overlay_split_costs, request_cost_overrides, request_duration_overrides,
@@ -479,6 +478,7 @@ impl RoutingEngine {
             .with_transitions(crate::transitions::Transitions::of(
                 &request.options,
                 request.profile,
+                graph.profile_bit(request.profile),
             ));
         let column = handle.column(&view);
         let edges = candidates
@@ -537,7 +537,7 @@ impl RoutingEngine {
         };
         let query = AnalysisQuery {
             column,
-            profile_bit: profile_bit(request.profile),
+            profile_bit: view.profile_bit(request.profile),
             max_visited_edge_count: budget,
             cancellation: &request.options.cancellation,
             cost_overrides,
@@ -569,7 +569,7 @@ impl RoutingEngine {
                     },
                     potentials: false,
                     gates: &[],
-                    profile_bit: profile_bit(request.profile),
+                    profile_bit: view.profile_bit(request.profile),
                     origins: candidates,
                     destinations: &[],
                     origin_edges: &origin_edges,

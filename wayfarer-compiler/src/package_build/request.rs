@@ -7,7 +7,9 @@ use wayfarer_package::codec;
 use wayfarer_package::request::*;
 use wayfarer_road_graph::{RoadNetwork, SharedEdgeInfos};
 
-use wayfarer_package::format::{PackageWriter, RoutingPackageError, Section, profile_bit};
+use wayfarer_package::format::{
+    PackageWriter, RoutingPackageError, Section, format_2_profile_bit as profile_bit,
+};
 
 /// Inputs from the package build, in compact order.
 pub(crate) struct RequestBuildInput<'a> {
@@ -132,7 +134,11 @@ impl RequestSections {
         writer.put(Section::NodeIdWide, self.node_id_wide);
         writer.put(Section::ComponentExceptions, self.component_exceptions);
         writer.put(Section::ComponentSizes, self.component_sizes);
-        writer.put(Section::NodeReachSaturated, self.reach_saturated);
+        writer.put_profile_masks(
+            Section::NodeReachSaturated,
+            Section::NodeReachSaturated16,
+            self.reach_saturated,
+        );
         writer.put(Section::SharedInfoIdGaps, self.shared_id_gaps);
         writer.put(Section::SharedAttrClass, self.shared_attr_class);
         writer.put(Section::AttrClassStart, self.class_start);

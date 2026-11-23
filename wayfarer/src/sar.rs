@@ -678,7 +678,7 @@ impl SarTransitions {
         let Some(entry_s) = self.wrong_way_entry_s else {
             return 0.0;
         };
-        let wrong = |edge: u32| g.edge_profile_access[edge as usize] & ACCESS_WRONG_WAY != 0;
+        let wrong = |edge: u32| g.edge_access.sar(edge as usize) & ACCESS_WRONG_WAY != 0;
         if wrong(next) && !wrong(previous) {
             entry_s
         } else {
@@ -1144,7 +1144,7 @@ pub(crate) fn route_report(
     let mut uses = Vec::<(usize, RouteSarUse)>::new();
     let graph = view.routing_package().view();
     if let Some(penalty_s) = sar.turn_restriction_penalty_s() {
-        let bit = crate::package::profile_bit(profile);
+        let bit = graph.profile_bit(profile);
         // Restriction contexts: the traversed edges between connectors, an
         // edge split into several pieces counting once.
         let mut contexts = Vec::<Vec<usize>>::new();
@@ -1302,7 +1302,7 @@ fn physical_uses(
     if relaxations.is_none() && transitions.is_none() {
         return;
     }
-    let bit = crate::package::profile_bit(profile);
+    let bit = graph.profile_bit(profile);
     let policy = crate::costing::CostingPolicy::new(profile, options);
     let compact = |piece: &RoutePiece<'_>| piece_edge(*graph, piece);
     // The stretch each kind extends, while consecutive pieces continue it.
@@ -1315,10 +1315,13 @@ fn physical_uses(
             continue;
         };
         let info = &piece.record.shared_info;
-        let access = graph.edge_profile_access[edge as usize];
+        let (access, sar_bits) = (
+            graph.edge_access.profiles(edge as usize),
+            graph.edge_access.sar(edge as usize),
+        );
         let shared = graph.edge_shared_info[edge as usize] as usize;
         let facts = SarEdgeFacts::from_cost_classes(
-            access,
+            sar_bits,
             graph.legal_reason(shared),
             graph.si_cost_classes[graph.cost_tuple(shared)],
         );
@@ -1330,8 +1333,8 @@ fn physical_uses(
             && !piece.after_connector
         {
             if let Some(entry) = transitions.wrong_way_entry_s
-                && access & ACCESS_WRONG_WAY != 0
-                && graph.edge_profile_access[from as usize] & ACCESS_WRONG_WAY == 0
+                && sar_bits & ACCESS_WRONG_WAY != 0
+                && graph.edge_access.sar(from as usize) & ACCESS_WRONG_WAY == 0
             {
                 entry_s = entry;
             }
