@@ -135,7 +135,7 @@ pub(crate) fn potential_plan<'g>(
     let (base, factor) = column.potential?;
     let metric = match base {
         PotentialBase::Stored(column) => PlanMetric::Stored(
-            potentials.metrics.get(column)?,
+            potentials.stored_metric(&g, column)?,
             g.edge_cost
                 .get(column * g.edge_count..(column + 1) * g.edge_count)?,
         ),
