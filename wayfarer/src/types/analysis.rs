@@ -159,3 +159,81 @@ pub struct RouteIsochroneResult {
     #[serde(default)]
     pub truncated: bool,
 }
+
+/// Which way a nearest-targets request measures travel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum NearestDirection {
+    /// From the source to each target (where can I get to soonest).
+    #[default]
+    FromSource,
+    /// From each target to the source (which targets get here soonest).
+    ToSource,
+}
+
+/// The `k` targets cheapest to travel to from `source` (or from which to
+/// travel to it), by route cost ([`crate::RoutingEngine::nearest`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NearestRequest {
+    pub source: GeoPoint,
+    pub targets: Vec<GeoPoint>,
+    /// How many targets to return, at least 1 and at most `targets`' count.
+    pub k: usize,
+    pub profile: MobilityProfile,
+    #[serde(default)]
+    pub direction: NearestDirection,
+    #[serde(default)]
+    pub options: RouteOptions,
+}
+
+impl NearestRequest {
+    pub fn new(
+        source: GeoPoint,
+        targets: Vec<GeoPoint>,
+        k: usize,
+        profile: MobilityProfile,
+    ) -> Self {
+        Self {
+            source,
+            targets,
+            k,
+            profile,
+            direction: NearestDirection::FromSource,
+            options: RouteOptions::default(),
+        }
+    }
+}
+
+/// One of the nearest targets: its matrix cell's path between the source
+/// and the target, in the request's direction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct NearestHit {
+    pub target_index: usize,
+    pub cost: f64,
+    pub distance_m: f64,
+    pub duration_s: f64,
+    pub edge_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct NearestResult {
+    pub target_count: usize,
+    /// At most `k` targets, cheapest first (ties by target index): the `k`
+    /// cheapest reachable cells of the matrix between the source and every
+    /// target. Fewer when fewer targets are reachable.
+    pub hits: Vec<NearestHit>,
+    /// Targets with no road within the correlation radius.
+    #[serde(default)]
+    pub no_candidate_target_indexes: Vec<usize>,
+    /// Matrix rows searched (a row's cells may be searched one by one).
+    pub row_count: usize,
+    /// Out-edges examined, summed over every search.
+    pub visited_edge_count: usize,
+}

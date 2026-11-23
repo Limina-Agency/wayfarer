@@ -169,6 +169,18 @@
     "geometryPointCount",
     "maneuverCount"
   ],
+  "nearest": [
+    "hits",
+    "hits[].cost",
+    "hits[].distanceM",
+    "hits[].durationS",
+    "hits[].edgeIds",
+    "hits[].targetIndex",
+    "noCandidateTargetIndexes",
+    "rowCount",
+    "targetCount",
+    "visitedEdgeCount"
+  ],
   "open": [
     "byteLen",
     "costingModelVersion",

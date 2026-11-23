@@ -71,6 +71,7 @@ pub mod limits;
 mod map_matching;
 mod matrix;
 mod navigation;
+mod nearest;
 mod overlay;
 mod package;
 mod queries;
@@ -161,10 +162,11 @@ pub use trip::{
 pub use types::{
     CompactEdgeHint, CorrelatedLocation, CorrelationMode, CorrelationPolicy,
     CorrelationRejectReason, CorrelationRoadClassPreference, CorrelationScoreBreakdown,
-    CorrelationSide, GeoPoint, LegRequest, LegResult, MobilityProfile, PreferredRoadSide,
-    RejectedCorrelationCandidate, RouteAlternative, RouteAlternativeLabel, RouteAlternativePolicy,
-    RouteCostBreakdown, RouteCostDriverKind, RouteCostDriverSummary, RouteCostSummary,
-    RouteCostingOptions, RouteDiagnostics, RouteDynamicEndpointKind, RouteDynamicOverlay,
+    CorrelationSide, GeoPoint, LegRequest, LegResult, MobilityProfile, NearestDirection,
+    NearestHit, NearestRequest, NearestResult, PreferredRoadSide, RejectedCorrelationCandidate,
+    RouteAlternative, RouteAlternativeLabel, RouteAlternativePolicy, RouteCostBreakdown,
+    RouteCostDriverKind, RouteCostDriverSummary, RouteCostSummary, RouteCostingOptions,
+    RouteDiagnostics, RouteDynamicEndpointKind, RouteDynamicOverlay,
     RouteDynamicOverlayDiagnostics, RouteDynamicSplitEdgeRange, RouteDynamicVirtualEdge,
     RouteDynamicVirtualEdgeKind, RouteEdgeAttribution, RouteEdgeAvoidanceRange,
     RouteEdgeCostMultiplierRange, RouteEdgeRange, RouteEdgeSpeedOverrideRange,

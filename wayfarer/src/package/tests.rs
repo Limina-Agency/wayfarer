@@ -1396,6 +1396,195 @@ fn the_relaxed_matrix_pass_searches_only_retried_cells() {
     }
 }
 
+/// The 60 matrix targets of the one-to-many tests, a lattice over the grid.
+fn grid_lattice() -> Vec<GeoPoint> {
+    (0..60)
+        .map(|index| {
+            let (row, col) = (index / 8, index % 8);
+            GeoPoint::new(
+                0.0002 + 0.0040 * row as f64 / 7.0,
+                0.0003 + 0.0047 * col as f64 / 7.0,
+            )
+        })
+        .collect()
+}
+
+/// `engine.nearest` against the `k` cheapest reachable cells of the full
+/// matrix row (or column) searched by rows, as the early-stopping row is:
+/// the same targets in the same order, at the same costs. Returns the
+/// nearest search's visited edges and the full row's.
+fn assert_nearest_is_the_cheapest_cells(
+    engine: &RoutingEngine,
+    source: GeoPoint,
+    targets: &[GeoPoint],
+    k: usize,
+    profile: MobilityProfile,
+    direction: crate::NearestDirection,
+    configure: impl Fn(&mut crate::RouteOptions),
+) -> (usize, usize) {
+    use crate::matrix::{MatrixMode, test_mode};
+    let mut request = crate::NearestRequest::new(source, targets.to_vec(), k, profile);
+    request.direction = direction;
+    request.options.max_correlation_distance_m = 60;
+    configure(&mut request.options);
+    let (sources, cells_to) = match direction {
+        crate::NearestDirection::FromSource => (vec![source], targets.to_vec()),
+        crate::NearestDirection::ToSource => (targets.to_vec(), vec![source]),
+    };
+    let mut matrix_request = crate::RouteMatrixRequest::new(sources, cells_to, profile);
+    matrix_request.options = request.options.clone();
+    test_mode::set(Some(MatrixMode::Rows));
+    let full = engine.matrix(matrix_request);
+    test_mode::set(None);
+    let mut expected = full
+        .cells
+        .iter()
+        .filter(|cell| cell.status == crate::RouteMatrixCellStatus::Reachable)
+        .map(|cell| {
+            let target = match direction {
+                crate::NearestDirection::FromSource => cell.target_index,
+                crate::NearestDirection::ToSource => cell.source_index,
+            };
+            (target, cell.cost.unwrap(), cell.edge_ids.clone())
+        })
+        .collect::<Vec<_>>();
+    expected.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    expected.truncate(k);
+
+    test_mode::set(Some(MatrixMode::Rows));
+    let result = engine.nearest(request).unwrap();
+    test_mode::set(None);
+    let context = format!("{profile:?} {direction:?} k={k} from {source:?}");
+    assert_eq!(
+        result
+            .hits
+            .iter()
+            .map(|hit| hit.target_index)
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(target, _, _)| *target)
+            .collect::<Vec<_>>(),
+        "{context}"
+    );
+    for (hit, (_, cost, edge_ids)) in result.hits.iter().zip(&expected) {
+        assert!(
+            (hit.cost - cost).abs() <= 1e-9 * cost.max(1.0),
+            "{context}: target {} costs {} against {cost}",
+            hit.target_index,
+            hit.cost
+        );
+        assert_eq!(&hit.edge_ids, edge_ids, "{context}");
+    }
+    (result.visited_edge_count, full.visited_edge_count)
+}
+
+/// Nearest targets are the cheapest cells of the matrix row (or column),
+/// for every `k`, and a row that stops early examines fewer edges than the
+/// full row.
+#[test]
+fn nearest_targets_are_the_cheapest_matrix_cells_on_grid() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_graph(), &dir.path().join("grid.mrt"));
+    let (_, compact) = engines(&reader);
+    let targets = grid_lattice();
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        let (mut early, mut full) = (0, 0);
+        for source in grid_points() {
+            for k in [1, 3, 10, 60] {
+                for direction in [
+                    crate::NearestDirection::FromSource,
+                    crate::NearestDirection::ToSource,
+                ] {
+                    let (visited, full_visited) = assert_nearest_is_the_cheapest_cells(
+                        &compact,
+                        source,
+                        &targets,
+                        k,
+                        profile,
+                        direction,
+                        |_| {},
+                    );
+                    if k == 1 && direction == crate::NearestDirection::FromSource {
+                        early += visited;
+                        full += full_visited;
+                    }
+                }
+            }
+        }
+        assert!(
+            early * 4 < full,
+            "{profile:?}: nearest visited {early} edges, the full rows {full}"
+        );
+    }
+}
+
+/// With destination-only pockets the cells are the strict matrix's: a
+/// target inside the private block is reached as a route to it is, and the
+/// others never cross the block, though the relaxed row that bounds the
+/// search does.
+#[test]
+fn nearest_targets_keep_the_matrix_destination_only_semantics() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_with_private_block(), &dir.path().join("grid.mrt"));
+    let (_, compact) = engines(&reader);
+    let mut targets = grid_lattice();
+    targets.push(GeoPoint::new(0.0023, 0.00465));
+    for source in [GeoPoint::new(0.0023, 0.0008), GeoPoint::new(0.0027, 0.0051)] {
+        for k in [1, 2, 5, 20, 61] {
+            assert_nearest_is_the_cheapest_cells(
+                &compact,
+                source,
+                &targets,
+                k,
+                MobilityProfile::Wheeled,
+                crate::NearestDirection::FromSource,
+                |options| options.max_correlation_distance_m = 15,
+            );
+        }
+    }
+}
+
+#[test]
+fn nearest_requests_are_validated() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_graph(), &dir.path().join("grid.mrt"));
+    let (_, compact) = engines(&reader);
+    let source = grid_points()[0];
+    let request = |k, targets: Vec<GeoPoint>| {
+        compact.nearest(crate::NearestRequest::new(
+            source,
+            targets,
+            k,
+            MobilityProfile::Wheeled,
+        ))
+    };
+    for (k, targets) in [(0, grid_points()), (9, grid_points()[..3].to_vec())] {
+        assert!(matches!(
+            request(k, targets),
+            Err(crate::RouteError::InvalidRequest { .. })
+        ));
+    }
+    assert!(matches!(
+        request(1, vec![source; crate::limits::MAX_NEAREST_TARGETS + 1]),
+        Err(crate::RouteError::RequestTooLarge { .. })
+    ));
+    // A target off the network is listed, not an error; the source is one.
+    let far = GeoPoint::new(0.5, 0.5);
+    let result = request(2, vec![far, grid_points()[1], grid_points()[2]]).unwrap();
+    assert_eq!(result.no_candidate_target_indexes, vec![0]);
+    assert_eq!(result.hits.len(), 2);
+    assert!(matches!(
+        compact.nearest(crate::NearestRequest::new(
+            far,
+            grid_points(),
+            1,
+            MobilityProfile::Wheeled
+        )),
+        Err(crate::RouteError::NoCandidate { endpoint: "origin" })
+    ));
+}
+
 /// A target no source can reach in a strict pass (ringed by destination-only
 /// ways) leaves the strict rows instead of making each flood the grid; every
 /// cell is the one the flooding rows gave.

@@ -478,6 +478,10 @@ pub(crate) struct MatrixRow {
     pub paths: Vec<Option<AnalysisPath>>,
     pub counters: AnalysisCounters,
     pub budget_exceeded: bool,
+    /// When the row stopped early (`stop_after`): each target it left open,
+    /// with a lower bound on its path's cost. Those targets have no path in
+    /// `paths`, found or not.
+    pub open_bounds: Vec<(usize, f64)>,
 }
 
 /// The outcome of one matrix cell searched on its own.
@@ -852,6 +856,12 @@ pub(crate) fn matrix_cell(
 
 /// Shortest paths from one matrix source (its correlated candidates) to every
 /// target (each a set of candidates), sharing one expansion across targets.
+///
+/// With `stop_after`, the row stops once that many targets have their final
+/// path (targets settle in the order of their costs with both approach
+/// costs, ties together), and reports a lower bound for each target still
+/// open (see [`MatrixRow::open_bounds`]). Rows that stop are searched with
+/// no approach costs, so a bound holds for every candidate pair.
 pub(crate) fn matrix_row(
     graph: SearchGraph<'_>,
     state: &mut SearchState,
@@ -859,6 +869,7 @@ pub(crate) fn matrix_row(
     origins: &[AnalysisPoint],
     candidates: &[MatrixTargetCandidate],
     target_count: usize,
+    stop_after: Option<usize>,
 ) -> MatrixRow {
     let scratch = std::mem::take(&mut state.cch_scratch).map(std::cell::RefCell::new);
     let row = matrix_row_with(
@@ -868,6 +879,7 @@ pub(crate) fn matrix_row(
         origins,
         candidates,
         target_count,
+        stop_after,
         &scratch,
     );
     state.cch_scratch = scratch.map(std::cell::RefCell::into_inner);
@@ -875,6 +887,7 @@ pub(crate) fn matrix_row(
 }
 
 /// [`matrix_row`] with the CCH potential scratch taken out of `state`.
+#[allow(clippy::too_many_arguments)]
 fn matrix_row_with(
     graph: SearchGraph<'_>,
     state: &mut SearchState,
@@ -882,6 +895,7 @@ fn matrix_row_with(
     origins: &[AnalysisPoint],
     candidates: &[MatrixTargetCandidate],
     target_count: usize,
+    stop_after: Option<usize>,
     scratch: &[std::cell::RefCell<PotentialScratch>; 4],
 ) -> MatrixRow {
     let mut search = Expansion {
@@ -895,6 +909,7 @@ fn matrix_row_with(
         paths: vec![None; target_count],
         counters: AnalysisCounters::default(),
         budget_exceeded: false,
+        open_bounds: Vec::new(),
     };
 
     // A destination ahead of an origin on the same edge is reached directly;
@@ -1065,6 +1080,18 @@ fn matrix_row_with(
             .fold(f64::INFINITY, f64::min)
     };
     let mut settle_at = least_open_best(&best, &open);
+    // Targets settled with a path, and the priority the row stopped at.
+    let mut found = 0;
+    let mut stopped_at = None;
+    // With `stop_after`: per target, the least cost of any finish evaluated.
+    let mut floor = vec![
+        f64::INFINITY;
+        if stop_after.is_some() {
+            target_count
+        } else {
+            0
+        }
+    ];
     'search: while let Some((label_index, label, label_state, priority)) = search.pop() {
         if priority >= settle_at {
             let was_open = open_targets;
@@ -1074,9 +1101,14 @@ fn matrix_row_with(
                 if *open && best + tie_window(best) < priority {
                     *open = false;
                     open_targets -= 1;
+                    found += 1;
                 }
             }
             if open_targets == 0 {
+                break;
+            }
+            if stop_after.is_some_and(|after| found >= after) {
+                stopped_at = Some(priority);
                 break;
             }
             settle_at = least_open_best(&best, &open);
@@ -1134,6 +1166,9 @@ fn matrix_row_with(
                     + edge_cost * candidate.point.fraction.clamp(0.0, 1.0)
                     + candidate.point.approach
                     + penalty;
+                if let Some(floor) = floor.get_mut(candidate.target) {
+                    *floor = floor.min(cost);
+                }
                 // Ties go to the route search's order: fewer edges, then
                 // lexicographically smaller ids.
                 let key = |label: u32, destination: u32| {
@@ -1217,7 +1252,42 @@ fn matrix_row_with(
         }
     }
 
+    // A target left open gets no path, only a lower bound on its cost: the
+    // least of its finishes evaluated so far, its direct paths along one
+    // edge, and any finish from a label popped later. Such a label lies at
+    // the source node of one of the target's candidate edges, where the
+    // potential is 0, so it costs at least the priority the row stopped at
+    // (within a tie window). Without approach costs (see `RowStop`), that
+    // bounds the path between any of the source's candidates and any of the
+    // target's, here or on a pass whose edge costs are no lower.
+    if let Some(priority) = stopped_at {
+        let later = priority - tie_window(priority);
+        for target in (0..target_count).filter(|target| open[*target]) {
+            best[target] = None;
+            let direct = candidates
+                .iter()
+                .filter(|candidate| candidate.target == target)
+                .flat_map(|candidate| {
+                    origins
+                        .iter()
+                        .filter(move |origin| {
+                            origin.edge == candidate.point.edge
+                                && origin.fraction <= candidate.point.fraction
+                        })
+                        .map(move |origin| {
+                            f64::from(query.edge_cost(graph, origin.edge))
+                                * (candidate.point.fraction - origin.fraction).clamp(0.0, 1.0)
+                        })
+                })
+                .fold(f64::INFINITY, f64::min);
+            let bound = later.min(floor[target]).min(direct);
+            row.open_bounds.push((target, bound - tie_window(bound)));
+        }
+    }
     for (target, finish) in best.into_iter().enumerate() {
+        if stopped_at.is_some() && open[target] {
+            continue;
+        }
         let Some(finish) = finish else {
             row.paths[target] = direct[target].as_ref().map(|(_, path)| path.clone());
             continue;
