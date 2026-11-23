@@ -906,6 +906,7 @@ dependencies = [
  "wayfarer-compiler",
  "wayfarer-ffi",
  "wayfarer-package",
+ "wayfarer-road-graph",
  "wayfarer-service",
 ]
 

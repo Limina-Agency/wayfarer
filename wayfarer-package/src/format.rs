@@ -15,12 +15,18 @@ use crate::{GeoPoint, MobilityProfile, RoadType, TrafficControl, math};
 compile_error!("the routing package format assumes a little-endian target");
 
 pub const MAGIC: &[u8; 8] = b"MRRPKG\0\x01";
-/// Bump whenever the layout or the meaning of any section changes.
+/// The format the compiler writes by default. Bump whenever the layout or
+/// the meaning of any section changes.
 ///
 /// Format 2 added [`Section::CchRank`], the node order of CCH potentials, at
 /// the end of the section table, and stores no landmarks: format 1's
 /// landmark sections are [`Section::Reserved1`] to [`Section::Reserved12`],
 /// as a package without landmarks wrote them.
+///
+/// Format 3 (`docs/design/format-3.md`) is being built: a compile writes it
+/// only when asked ([`PackageFormat::V3`]), and those packages carry a draft
+/// revision ([`FORMAT_3_DRAFT_REVISION`]) that only a build of the same
+/// revision reads.
 pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 2;
 /// The oldest format this build still opens. A layout change bumps
 /// [`ROUTING_PACKAGE_FORMAT_VERSION`] and keeps reading the previous format
@@ -28,8 +34,61 @@ pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 2;
 /// format, which the release notes must say. Format 1 (landmark distances,
 /// no CCH order) is no longer read.
 pub const MIN_READ_FORMAT_VERSION: u32 = 2;
+/// The newest format this build opens: format 3, of its own draft revision
+/// only, while format 3 is being built.
+pub const MAX_READ_FORMAT_VERSION: u32 = 3;
+/// The draft revision of format 3 this build writes and reads
+/// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
+/// its release raises it; the release removes the key.
+pub const FORMAT_3_DRAFT_REVISION: u64 = 1;
 pub const HEADER_FIXED_BYTES: usize = 256;
+/// A format-2 section table entry: offset u64, length u64, blake3.
 pub const TABLE_ENTRY_BYTES: usize = 48;
+/// A format-3 section table entry: id u32, param u32, flags u32, element
+/// size u32, offset u64, length u64, blake3.
+pub const TABLE_ENTRY_BYTES_V3: usize = 64;
+/// The most entries a format-3 section table may have, so a hostile table
+/// can't make open allocate much.
+pub const MAX_TABLE_ENTRIES: usize = 4096;
+/// Format-3 entry flag: an engine that doesn't know the section must refuse
+/// the package (`TooNew`).
+pub const SECTION_REQUIRED: u32 = 1 << 0;
+/// Format-3 entry flag: the section is covered by the identity hash.
+pub const SECTION_IDENTITY: u32 = 1 << 1;
+/// Section ids from here up are experimental: never REQUIRED.
+pub const EXPERIMENTAL_SECTION_ID: u32 = 0x8000_0000;
+/// The domain tag the identity hash starts with.
+pub const IDENTITY_HASH_TAG: &[u8] = b"wayfarer.package.identity.3";
+
+/// The package format a writer produces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum PackageFormat {
+    /// Format 2: a positional section table after the header (the default).
+    #[default]
+    V2,
+    /// Format 3, draft [`FORMAT_3_DRAFT_REVISION`]: a tagged section table
+    /// after the sections, implied ids, [`Section::PackageParams`].
+    V3,
+}
+
+impl PackageFormat {
+    /// The version number in the header.
+    pub fn version(self) -> u32 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+
+    /// The format of a version number, if this build writes it.
+    pub fn from_version(version: u32) -> Option<Self> {
+        match version {
+            2 => Some(Self::V2),
+            3 => Some(Self::V3),
+            _ => None,
+        }
+    }
+}
 pub const SECTION_ALIGN: usize = 64;
 pub const PROFILE_SLOTS: usize = 6;
 pub const NO_COLUMN: u8 = u8::MAX;
@@ -227,9 +286,216 @@ pub enum Section {
     /// ([`crate::cch_order`]); empty when the package was written without
     /// one (searches then have no potentials).
     CchRank,
+    /// Format 3 (id 129): the scalars a query reads, as sorted 16-byte
+    /// entries `key u32, flags u32 (bit 0: must understand), value u64`
+    /// ([`PackageParams`]). Format 2 keeps them in the JSON metadata and
+    /// `RequestMeta`.
+    PackageParams,
 }
 
-pub const SECTION_COUNT: usize = Section::CchRank as usize + 1;
+/// Every section this build knows, of any format; the internal index of
+/// [`Section`] (not its format-3 id, see [`Section::id`]).
+pub const SECTION_COUNT: usize = Section::PackageParams as usize + 1;
+/// The sections a format-2 table lists, in slot order: `Metadata` to
+/// `CchRank`.
+pub const FORMAT2_SECTION_COUNT: usize = Section::CchRank as usize + 1;
+
+/// Every [`Section`], by internal index.
+pub const SECTIONS: [Section; SECTION_COUNT] = [
+    Section::Metadata,
+    Section::NodeFirstOut,
+    Section::NodeLatE7,
+    Section::NodeLngE7,
+    Section::NodeLatLng,
+    Section::EdgeTarget,
+    Section::EdgeId,
+    Section::EdgeLength,
+    Section::EdgeSharedInfo,
+    Section::EdgeHeadingStart,
+    Section::EdgeFlags,
+    Section::EdgeRoadRank,
+    Section::EdgeCost,
+    Section::EdgeDuration,
+    Section::SharedInfoWay,
+    Section::SharedInfoName,
+    Section::SharedInfoRef,
+    Section::SharedInfoRouteRefStart,
+    Section::SharedInfoRouteRefPool,
+    Section::SimpleFrom,
+    Section::SimpleTo,
+    Section::SimpleVia,
+    Section::SimpleMask,
+    Section::ComplexTo,
+    Section::ComplexMask,
+    Section::ComplexPrefixStart,
+    Section::ComplexPrefixPool,
+    Section::EdgeProfileAccess,
+    Section::Reserved1,
+    Section::Reserved2,
+    Section::Reserved3,
+    Section::Reserved4,
+    Section::ComplexFirst,
+    Section::ComplexByFirst,
+    Section::ShapeStart,
+    Section::ShapeBytes,
+    Section::ExactShapeShared,
+    Section::ExactShapeStart,
+    Section::ExactShapePoints,
+    Section::SharedInfoCostFlags,
+    Section::SharedInfoCostClasses,
+    Section::SharedInfoSpeeds,
+    Section::EdgeInferredSpeed,
+    Section::ConditionalEdges,
+    Section::ConditionalShared,
+    Section::ConditionalStart,
+    Section::ConditionalPool,
+    Section::RequestMeta,
+    Section::RequestGrid,
+    Section::GridCellStart,
+    Section::GridEntries,
+    Section::NodeIdDelta,
+    Section::NodeIdWide,
+    Section::ComponentExceptions,
+    Section::SharedInfoIdGaps,
+    Section::SharedAttrClass,
+    Section::AttrClassStart,
+    Section::AttrClassBytes,
+    Section::StringStart,
+    Section::StringBytes,
+    Section::OpposingExceptionEdge,
+    Section::OpposingExceptionValue,
+    Section::LegOpposingExceptionEdge,
+    Section::LegOpposingExceptionValue,
+    Section::NodeRoundaboutExits,
+    Section::ComponentSizes,
+    Section::NodeReachSaturated,
+    Section::ModeMaskExceptions,
+    Section::TierExceptions,
+    Section::EdgeJunction,
+    Section::Reserved5,
+    Section::Reserved6,
+    Section::NodeLatLngNodes,
+    Section::SharedInfoCostTuple,
+    Section::SharedInfoWayWideShared,
+    Section::SharedInfoWayWide,
+    Section::SharedInfoLegalReason,
+    Section::BarrierNode,
+    Section::BarrierClass,
+    Section::BarrierAccess,
+    Section::Reserved7,
+    Section::Reserved8,
+    Section::Reserved9,
+    Section::Reserved10,
+    Section::Reserved11,
+    Section::Reserved12,
+    Section::NodeXyzFixed,
+    Section::PieceChain,
+    Section::PieceTree,
+    Section::EdgeTwin,
+    Section::LoneInPresent,
+    Section::LoneInEdge,
+    Section::LoneHeadingEnd,
+    Section::CchRank,
+    Section::PackageParams,
+];
+
+/// Whether a section is in format-3 packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// In every format-3 package.
+    Mandatory,
+    /// In a format-3 package exactly when its header says so
+    /// (`NodeLatE7`, `NodeLngE7`: when positions are not derived).
+    Conditional,
+    /// Not in format 3; its id is never reused.
+    Retired,
+}
+
+impl Section {
+    /// The section with internal index `index`.
+    pub fn from_index(index: usize) -> Option<Self> {
+        SECTIONS.get(index).copied()
+    }
+
+    /// The format-3 section id: format 2's slot number for the sections
+    /// that keep their layout, ids from 128 up for the bump's new layouts
+    /// (`docs/design/format-3.md`, section 6).
+    pub const fn id(self) -> u32 {
+        match self {
+            Self::PackageParams => 129,
+            other => other as u32,
+        }
+    }
+
+    /// The known section with format-3 id `id`, retired or not.
+    pub fn from_id(id: u32) -> Option<Self> {
+        match id {
+            129 => Some(Self::PackageParams),
+            id if (id as usize) < FORMAT2_SECTION_COUNT => Self::from_index(id as usize),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        SECTION_NAMES[self as usize]
+    }
+
+    /// The element size in bytes.
+    pub fn element_bytes(self) -> usize {
+        SECTION_ELEMENT_BYTES[self as usize]
+    }
+
+    /// Whether a format-2 table lists the section.
+    pub fn in_format_2(self) -> bool {
+        (self as usize) < FORMAT2_SECTION_COUNT
+    }
+
+    /// Whether, and when, format-3 packages hold the section.
+    pub fn format_3_presence(self) -> Presence {
+        match self {
+            Self::EdgeId
+            | Self::Reserved1
+            | Self::Reserved2
+            | Self::Reserved3
+            | Self::Reserved4
+            | Self::RequestMeta
+            | Self::NodeIdDelta
+            | Self::NodeIdWide
+            | Self::Reserved5
+            | Self::Reserved6
+            | Self::Reserved7
+            | Self::Reserved8
+            | Self::Reserved9
+            | Self::Reserved10
+            | Self::Reserved11
+            | Self::Reserved12 => Presence::Retired,
+            Self::NodeLatE7 | Self::NodeLngE7 => Presence::Conditional,
+            _ => Presence::Mandatory,
+        }
+    }
+
+    /// The flags a format-3 entry of the section carries: every section a
+    /// format-3 package holds is REQUIRED; all but the JSON metadata (which
+    /// no query reads) are IDENTITY.
+    pub fn format_3_flags(self) -> u32 {
+        match self {
+            Self::Metadata => SECTION_REQUIRED,
+            _ => SECTION_REQUIRED | SECTION_IDENTITY,
+        }
+    }
+
+    /// Whether a package of `format` with `layout` holds the section.
+    pub fn is_written(self, format: PackageFormat, layout: PackageLayout) -> bool {
+        match format {
+            PackageFormat::V2 => self.in_format_2(),
+            PackageFormat::V3 => match self.format_3_presence() {
+                Presence::Mandatory => true,
+                Presence::Conditional => !layout.node_e7_derived,
+                Presence::Retired => false,
+            },
+        }
+    }
+}
 
 /// The reserved sections format 2 fills with `column_count *
 /// ceil(node_count / 64)` zeros (see [`Section::Reserved1`]).
@@ -266,40 +532,40 @@ pub mod junction {
 }
 
 pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
-    1, // Metadata (JSON)
-    4, // NodeFirstOut
-    4, // NodeLatE7 (empty when derived from NodeXyzFixed, see `PackageLayout`)
-    4, // NodeLngE7 (likewise)
-    8, // NodeLatLng: (lat, lng) f64 pairs of the NodeLatLngNodes
-    4, // EdgeTarget
-    4, // EdgeId: edge id - base (the header's edge id base)
-    4, // EdgeLength
-    4, // EdgeSharedInfo
-    2, // EdgeHeadingStart
-    1, // EdgeFlags
-    1, // EdgeRoadRank
-    4, // EdgeCost (f32, column-major)
-    4, // EdgeDuration (f32, column-major)
-    4, // SharedInfoWay: way id, or WAY_ID_WIDE
-    4, // SharedInfoName: name token per attribute class
-    4, // SharedInfoRef: ref token, likewise
-    4, // SharedInfoRouteRefStart: offsets into SharedInfoRouteRefPool per attribute class + 1
-    4, // SharedInfoRouteRefPool
-    4, // SimpleFrom
-    4, // SimpleTo
-    4, // SimpleVia
-    1, // SimpleMask
-    4, // ComplexTo
-    1, // ComplexMask
-    4, // ComplexPrefixStart
-    4, // ComplexPrefixPool
-    1, // EdgeProfileAccess (bit per profile slot: mobility mode mask overlap)
-    4, // Reserved1 (empty)
-    4, // Reserved2 (empty)
-    4, // Reserved3 (empty)
-    4, // Reserved4 (empty)
-    4, // ComplexFirst: first prefix edge per row of ComplexByFirst order
-    4, // ComplexByFirst: complex rows sorted by first prefix edge
+    1,  // Metadata (JSON)
+    4,  // NodeFirstOut
+    4,  // NodeLatE7 (empty when derived from NodeXyzFixed, see `PackageLayout`)
+    4,  // NodeLngE7 (likewise)
+    8,  // NodeLatLng: (lat, lng) f64 pairs of the NodeLatLngNodes
+    4,  // EdgeTarget
+    4,  // EdgeId: edge id - base (the header's edge id base)
+    4,  // EdgeLength
+    4,  // EdgeSharedInfo
+    2,  // EdgeHeadingStart
+    1,  // EdgeFlags
+    1,  // EdgeRoadRank
+    4,  // EdgeCost (f32, column-major)
+    4,  // EdgeDuration (f32, column-major)
+    4,  // SharedInfoWay: way id, or WAY_ID_WIDE
+    4,  // SharedInfoName: name token per attribute class
+    4,  // SharedInfoRef: ref token, likewise
+    4,  // SharedInfoRouteRefStart: offsets into SharedInfoRouteRefPool per attribute class + 1
+    4,  // SharedInfoRouteRefPool
+    4,  // SimpleFrom
+    4,  // SimpleTo
+    4,  // SimpleVia
+    1,  // SimpleMask
+    4,  // ComplexTo
+    1,  // ComplexMask
+    4,  // ComplexPrefixStart
+    4,  // ComplexPrefixPool
+    1,  // EdgeProfileAccess (bit per profile slot: mobility mode mask overlap)
+    4,  // Reserved1 (empty)
+    4,  // Reserved2 (empty)
+    4,  // Reserved3 (empty)
+    4,  // Reserved4 (empty)
+    4,  // ComplexFirst: first prefix edge per row of ComplexByFirst order
+    4,  // ComplexByFirst: complex rows sorted by first prefix edge
     4, // ShapeStart: byte offset of every SHAPE_START_STRIDEth shared-info shape in ShapeBytes, then its length
     1, // ShapeBytes: varint-encoded E7 polylines (see `encode_shape`)
     4, // ExactShapeShared: sorted shared infos whose shape is not exact E7
@@ -360,6 +626,7 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     4, // LoneInEdge: edges without a twin, sorted by (target, edge)
     2, // LoneHeadingEnd: their end headings
     4, // CchRank: [node] rank in the CCH elimination order (format 2)
+    16, // PackageParams: (key u32, flags u32, value u64) entries (format 3)
 ];
 
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
@@ -457,6 +724,7 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "LoneInEdge",
     "LoneHeadingEnd",
     "CchRank",
+    "PackageParams",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -508,6 +776,199 @@ pub struct RoutingPackageMetadata<Q = PackageQuality> {
     /// nodes, see [`crate::sar`]): the minimum factors of the SAR
     /// relaxations, which the bound metrics of SAR columns use.
     pub sar: crate::sar::SarPackageInfo,
+}
+
+/// Keys of [`Section::PackageParams`] (`docs/design/format-3.md`, section
+/// 5.4). Keys 8 (time zone) and 9 (country code) are reserved and not
+/// written yet.
+pub mod param_key {
+    /// The costing model the stored costs were baked with. Must understand.
+    pub const COSTING_MODEL_VERSION: u32 = 1;
+    /// The SAR minimum factors (f64 bits): legal access, wrong way, vehicle
+    /// on paths. Must understand.
+    pub const SAR_LEGAL_ACCESS_MIN_FACTOR: u32 = 2;
+    pub const SAR_WRONG_WAY_MIN_FACTOR: u32 = 3;
+    pub const SAR_VEHICLE_ON_PATHS_MIN_FACTOR: u32 = 4;
+    /// The union of every edge's mobility mode mask.
+    pub const MODE_MASK_UNION: u32 = 5;
+    /// The component most nodes belong to (`u32::MAX`: none). Must
+    /// understand.
+    pub const DEFAULT_COMPONENT: u32 = 6;
+    /// The reach cap `NodeReachSaturated` answers for. Must understand.
+    pub const REACH_CAP: u32 = 7;
+    /// The draft revision of format 3, only while format 3 is being built
+    /// ([`super::FORMAT_3_DRAFT_REVISION`]). Must understand.
+    pub const DRAFT_REVISION: u32 = 10;
+}
+
+/// [`Section::PackageParams`] entry flag: an engine that doesn't know the
+/// key must refuse the package.
+pub const PARAM_MUST_UNDERSTAND: u32 = 1 << 0;
+
+/// The scalars a query reads beyond the sections: [`Section::PackageParams`]
+/// in format 3; in format 2 the JSON metadata's costing model, SAR factors
+/// and mode mask union and `RequestMeta`'s default component and reach cap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackageParams {
+    pub costing_model_version: u32,
+    pub sar: crate::sar::SarPackageInfo,
+    pub mode_mask_union: u32,
+    /// The component most nodes belong to (`u32::MAX`: none).
+    pub default_component: u32,
+    /// The reach cap `NodeReachSaturated` answers for.
+    pub reach_cap: u64,
+    /// Format 3's draft revision; `None` in format 2 (and in released
+    /// format 3).
+    pub draft_revision: Option<u64>,
+}
+
+impl PackageParams {
+    /// Whether key `key` must be understood, for the keys this build knows.
+    fn known_key_flags(key: u32) -> Option<u32> {
+        use param_key::*;
+        match key {
+            COSTING_MODEL_VERSION
+            | SAR_LEGAL_ACCESS_MIN_FACTOR
+            | SAR_WRONG_WAY_MIN_FACTOR
+            | SAR_VEHICLE_ON_PATHS_MIN_FACTOR
+            | DEFAULT_COMPONENT
+            | REACH_CAP
+            | DRAFT_REVISION => Some(PARAM_MUST_UNDERSTAND),
+            MODE_MASK_UNION => Some(0),
+            _ => None,
+        }
+    }
+
+    /// The section's words: two per entry (`key | flags << 32`, value),
+    /// sorted by key.
+    pub fn to_section(&self) -> Vec<u64> {
+        use param_key::*;
+        let mut entries = vec![
+            (COSTING_MODEL_VERSION, u64::from(self.costing_model_version)),
+            (
+                SAR_LEGAL_ACCESS_MIN_FACTOR,
+                self.sar.legal_access_min_factor.to_bits(),
+            ),
+            (
+                SAR_WRONG_WAY_MIN_FACTOR,
+                self.sar.wrong_way_min_factor.to_bits(),
+            ),
+            (
+                SAR_VEHICLE_ON_PATHS_MIN_FACTOR,
+                self.sar.vehicle_on_paths_min_factor.to_bits(),
+            ),
+            (MODE_MASK_UNION, u64::from(self.mode_mask_union)),
+            (DEFAULT_COMPONENT, u64::from(self.default_component)),
+            (REACH_CAP, self.reach_cap),
+        ];
+        if let Some(revision) = self.draft_revision {
+            entries.push((DRAFT_REVISION, revision));
+        }
+        entries
+            .into_iter()
+            .flat_map(|(key, value)| {
+                let flags = Self::known_key_flags(key).unwrap_or(0);
+                [u64::from(key) | (u64::from(flags) << 32), value]
+            })
+            .collect()
+    }
+
+    /// Reads a [`Section::PackageParams`] section: entries sorted by key,
+    /// known keys with their flags, every known key but the draft revision
+    /// present, an unknown must-understand key `TooNew`, and the draft
+    /// revision this build's ([`FORMAT_3_DRAFT_REVISION`]).
+    pub fn from_section(bytes: &[u8]) -> Result<Self, RoutingPackageError> {
+        use param_key::*;
+        let invalid = |message: String| RoutingPackageError::Invalid(message);
+        if !bytes.len().is_multiple_of(16) {
+            return Err(invalid("package parameters are malformed".into()));
+        }
+        let mut values = std::collections::BTreeMap::new();
+        let mut previous = None;
+        for entry in bytes.as_chunks::<16>().0 {
+            let key = u32::from_le_bytes(entry[0..4].try_into().unwrap());
+            let flags = u32::from_le_bytes(entry[4..8].try_into().unwrap());
+            let value = u64::from_le_bytes(entry[8..16].try_into().unwrap());
+            if previous.is_some_and(|previous| previous >= key) {
+                return Err(invalid("package parameters are not sorted by key".into()));
+            }
+            previous = Some(key);
+            if flags & !PARAM_MUST_UNDERSTAND != 0 {
+                return Err(invalid(format!(
+                    "package parameter {key} has unknown flags"
+                )));
+            }
+            match Self::known_key_flags(key) {
+                Some(expected) if expected != flags => {
+                    return Err(invalid(format!(
+                        "package parameter {key} has the wrong flags"
+                    )));
+                }
+                Some(_) => {
+                    values.insert(key, value);
+                }
+                None if flags & PARAM_MUST_UNDERSTAND != 0 => {
+                    return Err(RoutingPackageError::TooNew(format!(
+                        "the package needs parameter {key}, which this build doesn't read"
+                    )));
+                }
+                None => {}
+            }
+        }
+        // A released format 3 has no draft revision: it is newer than any
+        // draft.
+        match values.get(&DRAFT_REVISION) {
+            Some(revision) if *revision < FORMAT_3_DRAFT_REVISION => {
+                return Err(RoutingPackageError::Outdated(format!(
+                    "format 3 draft revision {revision}, this build reads draft revision {FORMAT_3_DRAFT_REVISION}"
+                )));
+            }
+            Some(revision) if *revision > FORMAT_3_DRAFT_REVISION => {
+                return Err(RoutingPackageError::TooNew(format!(
+                    "format 3 draft revision {revision}, this build reads draft revision {FORMAT_3_DRAFT_REVISION}"
+                )));
+            }
+            Some(_) => {}
+            None => {
+                return Err(RoutingPackageError::TooNew(format!(
+                    "released format 3, this build reads format 3 draft revision {FORMAT_3_DRAFT_REVISION} only"
+                )));
+            }
+        }
+        let get = |key: u32| {
+            values
+                .get(&key)
+                .copied()
+                .ok_or_else(|| invalid(format!("package parameter {key} is missing")))
+        };
+        let get_u32 = |key: u32| {
+            u32::try_from(get(key)?)
+                .map_err(|_| invalid(format!("package parameter {key} is out of range")))
+        };
+        Ok(Self {
+            costing_model_version: get_u32(COSTING_MODEL_VERSION)?,
+            sar: crate::sar::SarPackageInfo {
+                legal_access_min_factor: f64::from_bits(get(SAR_LEGAL_ACCESS_MIN_FACTOR)?),
+                wrong_way_min_factor: f64::from_bits(get(SAR_WRONG_WAY_MIN_FACTOR)?),
+                vehicle_on_paths_min_factor: f64::from_bits(get(SAR_VEHICLE_ON_PATHS_MIN_FACTOR)?),
+            },
+            mode_mask_union: get_u32(MODE_MASK_UNION)?,
+            default_component: get_u32(DEFAULT_COMPONENT)?,
+            reach_cap: get(REACH_CAP)?,
+            draft_revision: values.get(&DRAFT_REVISION).copied(),
+        })
+    }
+}
+
+/// A section of a format-3 package this build doesn't know (and that isn't
+/// REQUIRED, so the package opened without it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSection {
+    pub id: u32,
+    pub param: u32,
+    pub flags: u32,
+    pub element_bytes: u32,
+    pub byte_len: u64,
 }
 
 /// What readers use of the road graph's quality manifest.
@@ -602,15 +1063,45 @@ pub const HEADER_HEURISTIC: usize = 104; // 6 x f64
 pub const HEADER_ROOT_CHECKSUM: usize = 152; // 32 bytes
 pub const LAYOUT_NODE_E7_DERIVED: u32 = 1 << 0;
 
+// Format 3 header (little endian; `docs/design/format-3.md`, section 2.1).
+// The magic and version are where format 2 has them, and the table entry
+// count is where format 2 has its section count.
+pub const HEADER_V3_TABLE_OFFSET: usize = 16; // u64, 64-aligned
+pub const HEADER_V3_COUNTS: usize = 24; // 6 x u64 (see [`PackageCounts`])
+/// u64; bit 0 [`LAYOUT_NODE_E7_DERIVED`], every other bit must be zero.
+pub const HEADER_V3_LAYOUT_FLAGS: usize = 72;
+pub const HEADER_V3_EDGE_ID_BASE: usize = 80;
+/// Draft revision 1 keeps format 2's profile columns (6 x u8) and heuristic
+/// costs (6 x f64) at format 2's offsets, inside the header's zero area,
+/// until `ProfileSlots` replaces them.
+pub const HEADER_V3_PROFILE_COLUMNS: usize = HEADER_PROFILE_COLUMNS;
+pub const HEADER_V3_HEURISTIC: usize = HEADER_HEURISTIC;
+pub const HEADER_V3_ROOT_CHECKSUM: usize = 224; // 32 bytes
+/// The format-3 header bytes that must be zero.
+const HEADER_V3_ZERO: [std::ops::Range<usize>; 3] = [
+    88..HEADER_V3_PROFILE_COLUMNS,
+    HEADER_V3_PROFILE_COLUMNS + PROFILE_SLOTS..HEADER_V3_HEURISTIC,
+    HEADER_V3_HEURISTIC + PROFILE_SLOTS * 8..HEADER_V3_ROOT_CHECKSUM,
+];
+
 /// A validated routing package file: its storage, header and section table.
 /// The engine wraps it with its query-time state.
 pub struct PackageFile {
     pub(crate) storage: Storage,
     pub(crate) counts: PackageCounts,
     pub(crate) layout: PackageLayout,
+    /// Each known section's (offset, length); (0, 0) for one the package
+    /// doesn't hold.
     pub(crate) sections: [(usize, usize); SECTION_COUNT],
+    /// The identity hash (format 3), or the root checksum (format 2).
     pub(crate) dataset_hash: String,
+    /// The root checksum.
+    pub(crate) content_hash: String,
+    pub(crate) unknown_sections: Vec<UnknownSection>,
+    /// In format 3 the costing model, SAR factors and mode mask union come
+    /// from [`Section::PackageParams`] (see [`Self::params`]), not the JSON.
     pub(crate) metadata: RoutingPackageMetadata,
+    pub(crate) params: PackageParams,
     pub(crate) profile_columns: [u8; PROFILE_SLOTS],
     pub(crate) heuristic_cost_per_m: [f64; PROFILE_SLOTS],
     pub(crate) format_version: u32,
@@ -710,7 +1201,11 @@ fn remove_replaced(path: &Path) {
 /// One section's size and hash, as the section table records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingPackageSection {
+    /// The section's name; `"unknown"` for a format-3 section this build
+    /// doesn't know.
     pub name: &'static str,
+    /// The format-3 section id (format 2: the slot number).
+    pub id: u32,
     pub byte_len: u64,
     pub blake3_hex: String,
 }
@@ -718,9 +1213,13 @@ pub struct RoutingPackageSection {
 /// What [`PackageFile::verify`] checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingPackageVerification {
-    /// The root checksum (the package's dataset hash).
+    /// The package's dataset hash: the identity hash in format 3, the root
+    /// checksum in format 2.
     pub dataset_hash: String,
+    /// The root checksum.
+    pub content_hash: String,
     pub byte_len: u64,
+    /// In file order.
     pub sections: Vec<RoutingPackageSection>,
 }
 
@@ -765,17 +1264,31 @@ impl PackageFile {
     /// and the sections' structure. Reads the whole file once; meant for the
     /// install-time check of a package that came over a network.
     pub fn verify(path: &Path) -> Result<RoutingPackageVerification, RoutingPackageError> {
+        use std::io::{Seek, SeekFrom};
         let mut file = File::open(path)?;
         let byte_len = file.metadata()?.len();
-        let mut prefix = vec![0u8; HEADER_FIXED_BYTES.min(byte_len as usize)];
+        let file_len = usize::try_from(byte_len)
+            .map_err(|_| RoutingPackageError::Invalid("file exceeds the address space".into()))?;
+        let mut prefix = vec![0u8; HEADER_FIXED_BYTES.min(file_len)];
         file.read_exact(&mut prefix)?;
-        let header = parse_header(&prefix, byte_len as usize, |len| {
+        let header = parse_header(&prefix, file_len, |offset, len| {
             let mut table = vec![0u8; len];
+            file.seek(SeekFrom::Start(offset as u64))?;
             file.read_exact(&mut table)?;
             Ok(table)
         })?;
-        let mut sections = Vec::with_capacity(SECTION_COUNT);
-        let mut at = header.table_end;
+        // The table and the sections in file order, with the padding between
+        // them; the table itself is covered by the root checksum.
+        let mut regions = header
+            .entries
+            .iter()
+            .map(|entry| (entry.offset, entry.len, Some(entry)))
+            .chain(std::iter::once((header.table.0, header.table.1, None)))
+            .collect::<Vec<_>>();
+        regions.sort_by_key(|(offset, len, _)| (*offset, *offset + *len));
+        file.seek(SeekFrom::Start(HEADER_FIXED_BYTES as u64))?;
+        let mut sections = Vec::with_capacity(header.entries.len());
+        let mut at = HEADER_FIXED_BYTES;
         let mut buffer = vec![0u8; 1 << 20];
         let skip_padding = |file: &mut File, at: &mut usize, to: usize| {
             let mut padding = vec![0u8; to - *at];
@@ -788,15 +1301,10 @@ impl PackageFile {
             *at = to;
             Ok(())
         };
-        for (index, ((offset, len), expected)) in header
-            .sections
-            .iter()
-            .zip(&header.section_hashes)
-            .enumerate()
-        {
-            skip_padding(&mut file, &mut at, *offset)?;
+        for (offset, len, entry) in regions {
+            skip_padding(&mut file, &mut at, offset)?;
             let mut hasher = blake3::Hasher::new();
-            let mut remaining = *len;
+            let mut remaining = len;
             while remaining > 0 {
                 let chunk = remaining.min(buffer.len());
                 file.read_exact(&mut buffer[..chunk])?;
@@ -804,24 +1312,30 @@ impl PackageFile {
                 remaining -= chunk;
             }
             at += len;
+            let Some(entry) = entry else {
+                continue;
+            };
             let hash = hasher.finalize();
-            if hash.as_bytes() != expected {
+            let name = entry.section.map_or("unknown", Section::name);
+            if hash.as_bytes() != &entry.hash {
                 return Err(RoutingPackageError::Invalid(format!(
-                    "section {} does not match its checksum",
-                    SECTION_NAMES[index]
+                    "section {name} (id {}) does not match its checksum",
+                    entry.id
                 )));
             }
             sections.push(RoutingPackageSection {
-                name: SECTION_NAMES[index],
-                byte_len: *len as u64,
+                name,
+                id: entry.id,
+                byte_len: len as u64,
                 blake3_hex: hash.to_hex().to_string(),
             });
         }
-        skip_padding(&mut file, &mut at, byte_len as usize)?;
+        skip_padding(&mut file, &mut at, file_len)?;
         // Structure (bounds, monotone offsets, index ranges) on the hashed bytes.
         let graph = Self::open(path)?;
         Ok(RoutingPackageVerification {
             dataset_hash: graph.dataset_hash,
+            content_hash: graph.content_hash,
             byte_len,
             sections,
         })
@@ -904,22 +1418,57 @@ impl PackageFile {
                 "storage is not 8-byte aligned".into(),
             ));
         }
-        let header = parse_header(bytes, bytes.len(), |len| {
-            Ok(bytes[HEADER_FIXED_BYTES..HEADER_FIXED_BYTES + len].to_vec())
+        let header = parse_header(bytes, bytes.len(), |offset, len| {
+            Ok(bytes[offset..offset + len].to_vec())
         })?;
-        let metadata_bytes = {
-            let (offset, len) = header.sections[Section::Metadata as usize];
+        let section_bytes = |section: Section| {
+            let (offset, len) = header.sections[section as usize];
             &bytes[offset..offset + len]
         };
-        let metadata = serde_json::from_slice::<RoutingPackageMetadata>(metadata_bytes)
-            .map_err(|error| RoutingPackageError::Invalid(format!("metadata: {error}")))?;
+        let mut metadata =
+            serde_json::from_slice::<RoutingPackageMetadata>(section_bytes(Section::Metadata))
+                .map_err(|error| RoutingPackageError::Invalid(format!("metadata: {error}")))?;
+        let params = if header.version >= 3 {
+            // The JSON is informational: queries read the parameters.
+            let params = PackageParams::from_section(section_bytes(Section::PackageParams))?;
+            metadata.costing_model_version = params.costing_model_version;
+            metadata.sar = params.sar;
+            metadata.mode_mask_union = params.mode_mask_union;
+            params
+        } else {
+            let meta = section_bytes(Section::RequestMeta);
+            let word = |at: usize| {
+                meta.get(at * 8..at * 8 + 8)
+                    .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            };
+            if meta.len() != crate::request::META_LEN * 8
+                || word(0) != Some(crate::request::REQUEST_LAYOUT)
+            {
+                return Err(RoutingPackageError::Invalid(
+                    "request metadata is missing or of another layout".into(),
+                ));
+            }
+            PackageParams {
+                costing_model_version: metadata.costing_model_version,
+                sar: metadata.sar,
+                mode_mask_union: metadata.mode_mask_union,
+                default_component: u32::try_from(word(3).unwrap_or_default()).map_err(|_| {
+                    RoutingPackageError::Invalid("request sections are inconsistent".into())
+                })?,
+                reach_cap: word(5).unwrap_or_default(),
+                draft_revision: None,
+            }
+        };
         let graph = Self {
             storage,
             counts: header.counts,
             layout: header.layout,
             sections: header.sections,
-            dataset_hash: header.root_checksum_hex,
+            dataset_hash: header.identity_hash_hex,
+            content_hash: header.root_checksum_hex,
+            unknown_sections: header.unknown_sections,
             metadata,
+            params,
             profile_columns: header.profile_columns,
             heuristic_cost_per_m: header.heuristic_cost_per_m,
             format_version: header.version,
@@ -972,14 +1521,21 @@ impl PackageFile {
             .slice::<u32>(Section::AttrClassStart)
             .len()
             .saturating_sub(1);
-        let reserved_words = c.column_count.checked_mul(c.node_count.div_ceil(64));
+        // Format 3 implies the edge ids and drops format 1's reserved slots.
+        let format_3 = self.format_version >= 3;
+        let reserved_words = if format_3 {
+            Some(0)
+        } else {
+            c.column_count.checked_mul(c.node_count.div_ceil(64))
+        };
+        let stored_edge_ids = if format_3 { 0 } else { c.edge_count };
         let fixed = [
             (Section::NodeFirstOut, plus_one(c.node_count)),
             (Section::NodeXyzFixed, mul(c.node_count, 3)),
             (Section::NodeLatE7, Some(stored_nodes)),
             (Section::NodeLngE7, Some(stored_nodes)),
             (Section::EdgeTarget, Some(c.edge_count)),
-            (Section::EdgeId, Some(c.edge_count)),
+            (Section::EdgeId, Some(stored_edge_ids)),
             (Section::EdgeLength, Some(c.edge_count)),
             (Section::EdgeSharedInfo, Some(c.edge_count)),
             (Section::EdgeHeadingStart, Some(c.edge_count)),
@@ -1432,9 +1988,38 @@ impl PackageFile {
         self.counts
     }
 
-    /// The package's root checksum, in hex: identifies its content.
+    /// The package's dataset hash, in hex: what overlay sets, results and
+    /// bundle indexes bind to. In format 3 the identity hash, over the header
+    /// and the sections flagged IDENTITY (adding or moving any other section
+    /// keeps it); in format 2 the root checksum ([`Self::content_hash`]).
     pub fn dataset_hash(&self) -> &str {
         &self.dataset_hash
+    }
+
+    /// The package's root checksum, in hex: covers every byte of the file.
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    /// The format a writer would write this package in.
+    pub fn package_format(&self) -> PackageFormat {
+        PackageFormat::from_version(self.format_version).unwrap_or_default()
+    }
+
+    /// The scalars queries read beyond the sections.
+    pub fn params(&self) -> &PackageParams {
+        &self.params
+    }
+
+    /// The format-3 sections this build doesn't know, which it skipped.
+    pub fn unknown_sections(&self) -> &[UnknownSection] {
+        &self.unknown_sections
+    }
+
+    /// Whether the package holds `section` (in format 3 retired sections and
+    /// a conditional section its header leaves out are absent).
+    pub fn has_section(&self, section: Section) -> bool {
+        section.is_written(self.package_format(), self.layout)
     }
 
     pub fn metadata(&self) -> &RoutingPackageMetadata {
@@ -1453,12 +2038,13 @@ impl PackageFile {
         self.storage.bytes().len()
     }
 
-    /// Every section's name and size (the section table), for size reports.
+    /// The name and size of every known section the package holds, for size
+    /// reports.
     pub fn section_sizes(&self) -> Vec<(&'static str, usize)> {
-        SECTION_NAMES
+        SECTIONS
             .iter()
-            .zip(&self.sections)
-            .map(|(name, (_, len))| (*name, *len))
+            .filter(|section| self.has_section(**section))
+            .map(|section| (section.name(), self.sections[*section as usize].1))
             .collect()
     }
 
@@ -1483,6 +2069,7 @@ impl PackageFile {
             node_lat_lng_nodes: self.slice(Section::NodeLatLngNodes),
             edge_target: self.slice(Section::EdgeTarget),
             edge_id_delta: self.slice(Section::EdgeId),
+            edge_ids_implied: self.format_version >= 3,
             built_edge_id_lookup: &self.edge_id_lookup,
             edge_id_base: self.layout.edge_id_base,
             edge_length: self.slice(Section::EdgeLength),
@@ -1572,41 +2159,124 @@ pub struct ParsedHeader {
     layout: PackageLayout,
     profile_columns: [u8; PROFILE_SLOTS],
     heuristic_cost_per_m: [f64; PROFILE_SLOTS],
+    /// Each known section's (offset, length); (0, 0) when absent.
     sections: [(usize, usize); SECTION_COUNT],
-    section_hashes: Vec<[u8; 32]>,
+    /// Every table entry, in table order.
+    entries: Vec<TableEntry>,
+    /// The section table's (offset, length).
+    table: (usize, usize),
+    unknown_sections: Vec<UnknownSection>,
     root_checksum_hex: String,
-    table_end: usize,
+    identity_hash_hex: String,
+}
+
+/// One section table entry, as read.
+struct TableEntry {
+    id: u32,
+    /// The known section of that id.
+    section: Option<Section>,
+    offset: usize,
+    len: usize,
+    hash: [u8; 32],
 }
 
 /// Parses and checks the header and section table of a `file_len`-byte
-/// package whose first bytes are `header`; `read_table` returns the
-/// section table's bytes.
+/// package whose first bytes are `header`; `read_table(offset, len)` returns
+/// the section table's bytes.
 pub fn parse_header(
     header: &[u8],
     file_len: usize,
-    read_table: impl FnOnce(usize) -> Result<Vec<u8>, RoutingPackageError>,
+    read_table: impl FnOnce(usize, usize) -> Result<Vec<u8>, RoutingPackageError>,
 ) -> Result<ParsedHeader, RoutingPackageError> {
-    let invalid = |message: &str| RoutingPackageError::Invalid(message.to_string());
     if header.len() < HEADER_FIXED_BYTES || &header[0..8] != MAGIC {
-        return Err(invalid("not a routing package (missing header magic)"));
+        return Err(RoutingPackageError::Invalid(
+            "not a routing package (missing header magic)".into(),
+        ));
     }
-    let read_u32 = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
-    let read_u64 = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
-    let read_f64 = |at: usize| f64::from_le_bytes(header[at..at + 8].try_into().unwrap());
-    let version = read_u32(HEADER_VERSION);
-    let readable = MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION;
+    let version = u32::from_le_bytes(
+        header[HEADER_VERSION..HEADER_VERSION + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let readable = MIN_READ_FORMAT_VERSION..=MAX_READ_FORMAT_VERSION;
     if version < MIN_READ_FORMAT_VERSION {
         return Err(RoutingPackageError::Outdated(format!(
             "routing package format {version}, this build reads formats {readable:?}"
         )));
     }
-    if version > ROUTING_PACKAGE_FORMAT_VERSION {
+    if version > MAX_READ_FORMAT_VERSION {
         return Err(RoutingPackageError::TooNew(format!(
             "routing package format {version}, this build reads formats {readable:?}"
         )));
     }
-    let listed = SECTION_COUNT;
-    if read_u32(HEADER_SECTION_COUNT) as usize != listed {
+    if version == 2 {
+        parse_header_v2(header, file_len, read_table)
+    } else {
+        parse_header_v3(header, file_len, read_table)
+    }
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+fn read_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+/// The root checksum: blake3 over the header with its checksum field (at
+/// `checksum_at`) zeroed, then the table.
+fn root_checksum(header: &[u8], checksum_at: usize, table: &[u8]) -> blake3::Hash {
+    let mut zeroed = header[..HEADER_FIXED_BYTES].to_vec();
+    zeroed[checksum_at..checksum_at + 32].fill(0);
+    let mut root = blake3::Hasher::new();
+    root.update(&zeroed);
+    root.update(table);
+    root.finalize()
+}
+
+/// The six counts at `at` (u64 each).
+fn read_counts(header: &[u8], at: usize) -> Result<PackageCounts, RoutingPackageError> {
+    // `as usize` would truncate on 32-bit targets.
+    let count = |slot: usize| {
+        usize::try_from(read_u64(header, at + slot * 8)).map_err(|_| {
+            RoutingPackageError::Invalid("header count exceeds this target's address space".into())
+        })
+    };
+    Ok(PackageCounts {
+        node_count: count(0)?,
+        edge_count: count(1)?,
+        shared_info_count: count(2)?,
+        simple_restriction_count: count(3)?,
+        complex_restriction_count: count(4)?,
+        column_count: count(5)?,
+    })
+}
+
+fn read_profiles(
+    header: &[u8],
+    columns_at: usize,
+    heuristic_at: usize,
+) -> ([u8; PROFILE_SLOTS], [f64; PROFILE_SLOTS]) {
+    let mut profile_columns = [NO_COLUMN; PROFILE_SLOTS];
+    profile_columns.copy_from_slice(&header[columns_at..columns_at + PROFILE_SLOTS]);
+    let mut heuristic_cost_per_m = [0.0; PROFILE_SLOTS];
+    for (slot, value) in heuristic_cost_per_m.iter_mut().enumerate() {
+        *value = f64::from_bits(read_u64(header, heuristic_at + slot * 8));
+    }
+    (profile_columns, heuristic_cost_per_m)
+}
+
+/// Format 2: a positional table of [`FORMAT2_SECTION_COUNT`] entries right
+/// after the header, sections in table order.
+fn parse_header_v2(
+    header: &[u8],
+    file_len: usize,
+    read_table: impl FnOnce(usize, usize) -> Result<Vec<u8>, RoutingPackageError>,
+) -> Result<ParsedHeader, RoutingPackageError> {
+    let invalid = |message: &str| RoutingPackageError::Invalid(message.to_string());
+    let listed = FORMAT2_SECTION_COUNT;
+    if read_u32(header, HEADER_SECTION_COUNT) as usize != listed {
         return Err(invalid("unexpected section count"));
     }
     let table_len = listed * TABLE_ENTRY_BYTES;
@@ -1614,54 +2284,29 @@ pub fn parse_header(
     if file_len < table_end {
         return Err(invalid("truncated section table"));
     }
-    let table = read_table(table_len)?;
-    let mut zeroed = header[..HEADER_FIXED_BYTES].to_vec();
-    zeroed[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32].fill(0);
-    let mut root = blake3::Hasher::new();
-    root.update(&zeroed);
-    root.update(&table);
-    let root = root.finalize();
+    let table = read_table(HEADER_FIXED_BYTES, table_len)?;
+    let root = root_checksum(header, HEADER_ROOT_CHECKSUM, &table);
     if root.as_bytes()[..] != header[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32] {
         return Err(invalid(
             "header or section table does not match the root checksum",
         ));
     }
-    // `as usize` would truncate on 32-bit targets.
-    let count = |slot: usize| {
-        usize::try_from(read_u64(HEADER_COUNTS + slot * 8))
-            .map_err(|_| invalid("header count exceeds this target's address space"))
-    };
-    let counts = PackageCounts {
-        node_count: count(0)?,
-        edge_count: count(1)?,
-        shared_info_count: count(2)?,
-        simple_restriction_count: count(3)?,
-        complex_restriction_count: count(4)?,
-        column_count: count(5)?,
-    };
-    if read_u64(HEADER_COUNTS + 6 * 8) != 0 {
+    let counts = read_counts(header, HEADER_COUNTS)?;
+    if read_u64(header, HEADER_COUNTS + 6 * 8) != 0 {
         return Err(invalid("reserved header count is not zero"));
     }
     let layout = PackageLayout {
-        node_e7_derived: read_u32(HEADER_LAYOUT_FLAGS) & LAYOUT_NODE_E7_DERIVED != 0,
-        edge_id_base: read_u64(HEADER_EDGE_ID_BASE),
+        node_e7_derived: read_u32(header, HEADER_LAYOUT_FLAGS) & LAYOUT_NODE_E7_DERIVED != 0,
+        edge_id_base: read_u64(header, HEADER_EDGE_ID_BASE),
     };
-    let mut profile_columns = [NO_COLUMN; PROFILE_SLOTS];
-    profile_columns
-        .copy_from_slice(&header[HEADER_PROFILE_COLUMNS..HEADER_PROFILE_COLUMNS + PROFILE_SLOTS]);
-    let mut heuristic_cost_per_m = [0.0; PROFILE_SLOTS];
-    for (slot, value) in heuristic_cost_per_m.iter_mut().enumerate() {
-        *value = read_f64(HEADER_HEURISTIC + slot * 8);
-    }
-    // Sections a format does not list stay empty.
+    let (profile_columns, heuristic_cost_per_m) =
+        read_profiles(header, HEADER_PROFILE_COLUMNS, HEADER_HEURISTIC);
     let mut sections = [(0usize, 0usize); SECTION_COUNT];
-    let mut section_hashes = Vec::with_capacity(listed);
+    let mut entries = Vec::with_capacity(listed);
     let mut previous_end = table_end;
     for (index, section) in sections.iter_mut().enumerate().take(listed) {
         let entry = &table[index * TABLE_ENTRY_BYTES..(index + 1) * TABLE_ENTRY_BYTES];
-        let read = |at: usize| {
-            usize::try_from(u64::from_le_bytes(entry[at..at + 8].try_into().unwrap())).ok()
-        };
+        let read = |at: usize| usize::try_from(read_u64(entry, at)).ok();
         let (Some(offset), Some(len)) = (read(0), read(8)) else {
             return Err(invalid("section out of bounds or misaligned"));
         };
@@ -1675,21 +2320,237 @@ pub fn parse_header(
         }
         previous_end = offset + len;
         *section = (offset, len);
-        section_hashes.push(entry[16..48].try_into().unwrap());
+        entries.push(TableEntry {
+            id: index as u32,
+            section: Section::from_index(index),
+            offset,
+            len,
+            hash: entry[16..48].try_into().unwrap(),
+        });
     }
     if previous_end.next_multiple_of(SECTION_ALIGN) != file_len {
         return Err(invalid("file length does not match the section table"));
     }
+    let root_checksum_hex = root.to_hex().to_string();
     Ok(ParsedHeader {
-        version,
+        version: 2,
         counts,
         layout,
         profile_columns,
         heuristic_cost_per_m,
         sections,
-        section_hashes,
+        entries,
+        table: (HEADER_FIXED_BYTES, table_len),
+        unknown_sections: Vec::new(),
+        identity_hash_hex: root_checksum_hex.clone(),
+        root_checksum_hex,
+    })
+}
+
+/// Format 3 (`docs/design/format-3.md`, section 2): a tagged table anywhere
+/// after the header (its offset is in the header), entries sorted by (id,
+/// param), sections in any order, packed with zero padding to 64 bytes.
+fn parse_header_v3(
+    header: &[u8],
+    file_len: usize,
+    read_table: impl FnOnce(usize, usize) -> Result<Vec<u8>, RoutingPackageError>,
+) -> Result<ParsedHeader, RoutingPackageError> {
+    let invalid = |message: String| RoutingPackageError::Invalid(message);
+    let entry_count = read_u32(header, HEADER_SECTION_COUNT) as usize;
+    if entry_count > MAX_TABLE_ENTRIES {
+        return Err(invalid(format!(
+            "the section table has {entry_count} entries, more than {MAX_TABLE_ENTRIES}"
+        )));
+    }
+    let table_len = entry_count * TABLE_ENTRY_BYTES_V3;
+    let table_offset = usize::try_from(read_u64(header, HEADER_V3_TABLE_OFFSET))
+        .ok()
+        .filter(|offset| {
+            offset.is_multiple_of(SECTION_ALIGN)
+                && *offset >= HEADER_FIXED_BYTES
+                && offset
+                    .checked_add(table_len)
+                    .is_some_and(|end| end <= file_len)
+        })
+        .ok_or_else(|| invalid("section table out of bounds or misaligned".into()))?;
+    let table = read_table(table_offset, table_len)?;
+    let root = root_checksum(header, HEADER_V3_ROOT_CHECKSUM, &table);
+    if root.as_bytes()[..] != header[HEADER_V3_ROOT_CHECKSUM..HEADER_V3_ROOT_CHECKSUM + 32] {
+        return Err(invalid(
+            "header or section table does not match the root checksum".into(),
+        ));
+    }
+    let counts = read_counts(header, HEADER_V3_COUNTS)?;
+    let flags = read_u64(header, HEADER_V3_LAYOUT_FLAGS);
+    let unknown_flags = flags & !u64::from(LAYOUT_NODE_E7_DERIVED);
+    if unknown_flags != 0 {
+        return Err(RoutingPackageError::TooNew(format!(
+            "the package needs layout flags {unknown_flags:#x}, which this build doesn't read"
+        )));
+    }
+    let layout = PackageLayout {
+        node_e7_derived: flags & u64::from(LAYOUT_NODE_E7_DERIVED) != 0,
+        edge_id_base: read_u64(header, HEADER_V3_EDGE_ID_BASE),
+    };
+    if HEADER_V3_ZERO
+        .iter()
+        .any(|range| header[range.clone()].iter().any(|byte| *byte != 0))
+    {
+        return Err(invalid("reserved header bytes are not zero".into()));
+    }
+    let (profile_columns, heuristic_cost_per_m) =
+        read_profiles(header, HEADER_V3_PROFILE_COLUMNS, HEADER_V3_HEURISTIC);
+
+    let mut sections = [(0usize, 0usize); SECTION_COUNT];
+    let mut present = [false; SECTION_COUNT];
+    let mut entries = Vec::with_capacity(entry_count);
+    let mut unknown_sections = Vec::new();
+    let mut identity = blake3::Hasher::new();
+    identity.update(IDENTITY_HASH_TAG);
+    let mut identity_header = header[..HEADER_FIXED_BYTES].to_vec();
+    // The entry count and table offset change when a non-identity section is
+    // added or moved; the checksum covers those.
+    identity_header[HEADER_SECTION_COUNT..HEADER_V3_COUNTS].fill(0);
+    identity_header[HEADER_V3_ROOT_CHECKSUM..].fill(0);
+    identity.update(&identity_header);
+    let mut previous_key = None;
+    for raw in table.as_chunks::<TABLE_ENTRY_BYTES_V3>().0 {
+        let (id, param, flags, elem) = (
+            read_u32(raw, 0),
+            read_u32(raw, 4),
+            read_u32(raw, 8),
+            read_u32(raw, 12),
+        );
+        if previous_key.is_some_and(|key| key >= (id, param)) {
+            return Err(invalid(
+                "section table entries are not sorted by (id, param) or repeat one".into(),
+            ));
+        }
+        previous_key = Some((id, param));
+        let (Some(offset), Some(len)) = (
+            usize::try_from(read_u64(raw, 16)).ok(),
+            usize::try_from(read_u64(raw, 24)).ok(),
+        ) else {
+            return Err(invalid(format!("section {id} out of bounds or misaligned")));
+        };
+        if flags & !(SECTION_REQUIRED | SECTION_IDENTITY) != 0 {
+            return Err(invalid(format!(
+                "section {id} has unknown flags {flags:#x}"
+            )));
+        }
+        if elem == 0
+            || !offset.is_multiple_of(SECTION_ALIGN)
+            || offset < HEADER_FIXED_BYTES
+            || offset.checked_add(len).is_none_or(|end| end > file_len)
+            || !len.is_multiple_of(elem as usize)
+        {
+            return Err(invalid(format!("section {id} out of bounds or misaligned")));
+        }
+        let section = Section::from_id(id);
+        match section {
+            Some(known) => {
+                if known.format_3_presence() == Presence::Retired {
+                    return Err(invalid(format!(
+                        "section {id} ({}) is retired in format 3",
+                        known.name()
+                    )));
+                }
+                if elem as usize != known.element_bytes()
+                    || flags != known.format_3_flags()
+                    || param != 0
+                {
+                    return Err(invalid(format!(
+                        "section {id} ({}) has the wrong element size, flags or parameter",
+                        known.name()
+                    )));
+                }
+                // (id, param) are distinct and param is 0: one entry per id.
+                sections[known as usize] = (offset, len);
+                present[known as usize] = true;
+            }
+            None if flags & SECTION_REQUIRED != 0 && id >= EXPERIMENTAL_SECTION_ID => {
+                return Err(invalid(format!(
+                    "experimental section {id:#x} is flagged REQUIRED"
+                )));
+            }
+            None if flags & SECTION_REQUIRED != 0 => {
+                return Err(RoutingPackageError::TooNew(format!(
+                    "the package needs section {id}, which this build doesn't read"
+                )));
+            }
+            None => unknown_sections.push(UnknownSection {
+                id,
+                param,
+                flags,
+                element_bytes: elem,
+                byte_len: len as u64,
+            }),
+        }
+        let hash: [u8; 32] = raw[32..64].try_into().unwrap();
+        if flags & SECTION_IDENTITY != 0 {
+            identity.update(&raw[0..16]);
+            identity.update(&raw[24..32]);
+            identity.update(&hash);
+        }
+        entries.push(TableEntry {
+            id,
+            section,
+            offset,
+            len,
+            hash,
+        });
+    }
+    // The header, the table and the sections, in file order: each starts
+    // where the one before ends, rounded up to 64 bytes, so they don't
+    // overlap and only padding lies between them; the file ends at the last
+    // end rounded up.
+    let mut regions = entries
+        .iter()
+        .map(|entry| (entry.offset, entry.len))
+        .chain([(0, HEADER_FIXED_BYTES), (table_offset, table_len)])
+        .collect::<Vec<_>>();
+    regions.sort_unstable_by_key(|(offset, len)| (*offset, *offset + *len));
+    let mut end = 0usize;
+    for (offset, len) in regions {
+        if offset != end.next_multiple_of(SECTION_ALIGN) {
+            return Err(invalid(
+                "sections overlap, or leave more than padding between them".into(),
+            ));
+        }
+        end = offset + len;
+    }
+    if end.next_multiple_of(SECTION_ALIGN) != file_len {
+        return Err(invalid(
+            "file length does not match the section table".into(),
+        ));
+    }
+    for section in SECTIONS {
+        let expected = section.is_written(PackageFormat::V3, layout);
+        if present[section as usize] != expected {
+            return Err(invalid(format!(
+                "section {} ({}) is {}",
+                section.id(),
+                section.name(),
+                if expected {
+                    "missing"
+                } else {
+                    "present against its rule"
+                }
+            )));
+        }
+    }
+    Ok(ParsedHeader {
+        version: 3,
+        counts,
+        layout,
+        profile_columns,
+        heuristic_cost_per_m,
+        sections,
+        entries,
+        table: (table_offset, table_len),
+        unknown_sections,
         root_checksum_hex: root.to_hex().to_string(),
-        table_end,
+        identity_hash_hex: identity.finalize().to_hex().to_string(),
     })
 }
 
@@ -1711,8 +2572,11 @@ pub struct Sections<'g> {
     /// The sorted nodes that are not their E7 position.
     pub node_lat_lng_nodes: &'g [u32],
     pub edge_target: &'g [u32],
-    /// Edge id - `edge_id_base` per edge (see [`Self::edge_id`]).
+    /// Edge id - `edge_id_base` per edge (see [`Self::edge_id`]); empty
+    /// when the ids are implied.
     pub edge_id_delta: &'g [u32],
+    /// Edge `i` has id `edge_id_base + i` (format 3).
+    pub edge_ids_implied: bool,
     /// The id lookup, built on first use (see [`Self::edge_id_lookup`]).
     pub built_edge_id_lookup: &'g OnceLock<Vec<u32>>,
     pub edge_id_base: u64,
@@ -2251,6 +3115,9 @@ impl<'g> Sections<'g> {
     /// The id of compact edge `edge`.
     #[inline]
     pub fn edge_id(&self, edge: usize) -> u64 {
+        if self.edge_ids_implied {
+            return self.edge_id_base + edge as u64;
+        }
         self.edge_id_base + u64::from(self.edge_id_delta[edge])
     }
 
@@ -2259,6 +3126,9 @@ impl<'g> Sections<'g> {
     /// that carry compact edges pass them as hints and never build the lookup.
     #[inline]
     pub fn edge_for_id_hinted(&self, hint: Option<u32>, edge_id: u64) -> Option<u32> {
+        if self.edge_ids_implied {
+            return self.edge_for_id(edge_id);
+        }
         hint.filter(|edge| {
             self.edge_id_delta
                 .get(*edge as usize)
@@ -2271,6 +3141,11 @@ impl<'g> Sections<'g> {
     #[inline]
     pub fn edge_for_id(&self, edge_id: u64) -> Option<u32> {
         let slot = edge_id.checked_sub(self.edge_id_base)?;
+        if self.edge_ids_implied {
+            return u32::try_from(slot)
+                .ok()
+                .filter(|edge| (*edge as usize) < self.edge_count);
+        }
         self.edge_id_lookup()
             .get(usize::try_from(slot).ok()?)
             .copied()
@@ -2279,7 +3154,8 @@ impl<'g> Sections<'g> {
 
     /// The compact edge per (edge id - base), `u32::MAX` for none: built
     /// from the edge ids on first use (one pass over them, under a lock that
-    /// other threads wait on).
+    /// other threads wait on). Empty when the ids are implied (and so is the
+    /// lookup).
     pub fn edge_id_lookup(&self) -> &'g [u32] {
         if self.edge_id_delta.is_empty() {
             return &[];
@@ -2707,15 +3583,34 @@ enum SectionData {
 /// destination, or, for a writer made with [`PackageWriter::spilling`], go
 /// to a spill file as they are put, so a build holds only the sections it
 /// still reads.
+///
+/// A writer writes format 2 unless [`Self::with_format`] says otherwise.
+/// Format 2 puts the table after the header and the sections in slot order;
+/// format 3 puts the sections in id order after the header and the table
+/// after them. A section the format doesn't hold is dropped when it is put.
 pub struct PackageWriter {
+    format: PackageFormat,
     header: Vec<u8>,
+    /// Whether node E7 positions are derived (from the header's layout):
+    /// format 3 then leaves `NodeLatE7` and `NodeLngE7` out.
+    node_e7_derived: bool,
     sections: Vec<Option<SectionData>>,
     /// The spill file and its length so far.
     spill: Option<(File, u64)>,
     /// The first failed spill write, reported by [`Self::write_to`].
     spill_error: Option<std::io::Error>,
     /// Section hashes and the final header, computed once by `seal`.
-    sealed: OnceLock<(Vec<u8>, Vec<u8>)>,
+    sealed: OnceLock<Sealed>,
+}
+
+/// A writer's final header, table and layout.
+struct Sealed {
+    header: Vec<u8>,
+    table: Vec<u8>,
+    /// The sections the file holds, in file order, with their offsets.
+    order: Vec<(Section, usize)>,
+    table_offset: usize,
+    byte_len: usize,
 }
 
 impl PackageWriter {
@@ -2731,7 +3626,7 @@ impl PackageWriter {
     }
 
     /// A writer that writes each section to `spill` (an empty file, readable
-    /// and writable) as it is put, and copies them from there in table order
+    /// and writable) as it is put, and copies them from there in file order
     /// when the package is written. Call [`Self::set_header`] before
     /// sealing or writing it.
     pub fn spilling(spill: File) -> Self {
@@ -2744,9 +3639,25 @@ impl PackageWriter {
         Self::with_spill(None)
     }
 
+    /// The writer, writing `format`. Call it before putting any section.
+    pub fn with_format(mut self, format: PackageFormat) -> Self {
+        assert!(
+            self.header.is_empty() && self.sections.iter().all(Option::is_none),
+            "the package format is set before the header and the sections"
+        );
+        self.format = format;
+        self
+    }
+
+    pub fn format(&self) -> PackageFormat {
+        self.format
+    }
+
     fn with_spill(spill: Option<File>) -> Self {
         Self {
+            format: PackageFormat::V2,
             header: Vec::new(),
+            node_e7_derived: false,
             sections: (0..SECTION_COUNT).map(|_| None).collect(),
             spill: spill.map(|file| (file, 0)),
             spill_error: None,
@@ -2754,8 +3665,8 @@ impl PackageWriter {
         }
     }
 
-    /// Sets the header, and puts the [`RESERVED_ZERO_SECTIONS`] its counts
-    /// size. [`Self::new`] does this.
+    /// Sets the header, and in format 2 puts the [`RESERVED_ZERO_SECTIONS`]
+    /// its counts size. [`Self::new`] does this.
     pub fn set_header(
         &mut self,
         counts: PackageCounts,
@@ -2763,12 +3674,33 @@ impl PackageWriter {
         profile_columns: [u8; PROFILE_SLOTS],
         heuristic_cost_per_m: [f64; PROFILE_SLOTS],
     ) {
+        let (counts_at, flags_at, base_at, columns_at, heuristic_at) = match self.format {
+            PackageFormat::V2 => (
+                HEADER_COUNTS,
+                HEADER_LAYOUT_FLAGS,
+                HEADER_EDGE_ID_BASE,
+                HEADER_PROFILE_COLUMNS,
+                HEADER_HEURISTIC,
+            ),
+            PackageFormat::V3 => (
+                HEADER_V3_COUNTS,
+                HEADER_V3_LAYOUT_FLAGS,
+                HEADER_V3_EDGE_ID_BASE,
+                HEADER_V3_PROFILE_COLUMNS,
+                HEADER_V3_HEURISTIC,
+            ),
+        };
         let mut header = vec![0u8; HEADER_FIXED_BYTES];
         header[0..8].copy_from_slice(MAGIC);
         header[HEADER_VERSION..HEADER_VERSION + 4]
-            .copy_from_slice(&ROUTING_PACKAGE_FORMAT_VERSION.to_le_bytes());
-        header[HEADER_SECTION_COUNT..HEADER_SECTION_COUNT + 4]
-            .copy_from_slice(&(SECTION_COUNT as u32).to_le_bytes());
+            .copy_from_slice(&self.format.version().to_le_bytes());
+        // Format 3's entry count and table offset are set when sealing.
+        if self.format == PackageFormat::V2 {
+            header[HEADER_SECTION_COUNT..HEADER_SECTION_COUNT + 4]
+                .copy_from_slice(&(FORMAT2_SECTION_COUNT as u32).to_le_bytes());
+        }
+        // Format 2 has a seventh, reserved count (format 1's landmark
+        // count), zero.
         let values = [
             counts.node_count,
             counts.edge_count,
@@ -2776,11 +3708,9 @@ impl PackageWriter {
             counts.simple_restriction_count,
             counts.complex_restriction_count,
             counts.column_count,
-            // Reserved (format 1's landmark count).
-            0,
         ];
         for (index, value) in values.iter().enumerate() {
-            let at = HEADER_COUNTS + index * 8;
+            let at = counts_at + index * 8;
             header[at..at + 8].copy_from_slice(&(*value as u64).to_le_bytes());
         }
         let flags = if layout.node_e7_derived {
@@ -2788,30 +3718,50 @@ impl PackageWriter {
         } else {
             0
         };
-        header[HEADER_LAYOUT_FLAGS..HEADER_LAYOUT_FLAGS + 4].copy_from_slice(&flags.to_le_bytes());
-        header[HEADER_EDGE_ID_BASE..HEADER_EDGE_ID_BASE + 8]
-            .copy_from_slice(&layout.edge_id_base.to_le_bytes());
-        header[HEADER_PROFILE_COLUMNS..HEADER_PROFILE_COLUMNS + PROFILE_SLOTS]
-            .copy_from_slice(&profile_columns);
+        header[flags_at..flags_at + 4].copy_from_slice(&flags.to_le_bytes());
+        header[base_at..base_at + 8].copy_from_slice(&layout.edge_id_base.to_le_bytes());
+        header[columns_at..columns_at + PROFILE_SLOTS].copy_from_slice(&profile_columns);
         for (slot, value) in heuristic_cost_per_m.iter().enumerate() {
-            let at = HEADER_HEURISTIC + slot * 8;
+            let at = heuristic_at + slot * 8;
             header[at..at + 8].copy_from_slice(&value.to_le_bytes());
         }
         self.header = header;
-        let words = counts.column_count * counts.node_count.div_ceil(64);
-        for section in RESERVED_ZERO_SECTIONS {
-            match SECTION_ELEMENT_BYTES[section as usize] {
-                8 => self.put(section, vec![0u64; words]),
-                _ => self.put(section, vec![0u32; words]),
+        self.node_e7_derived = layout.node_e7_derived;
+        if self.format == PackageFormat::V2 {
+            let words = counts.column_count * counts.node_count.div_ceil(64);
+            for section in RESERVED_ZERO_SECTIONS {
+                match SECTION_ELEMENT_BYTES[section as usize] {
+                    8 => self.put(section, vec![0u64; words]),
+                    _ => self.put(section, vec![0u32; words]),
+                }
             }
         }
     }
 
+    /// Whether the package holds `section`: in the writer's format, and,
+    /// for `NodeLatE7` and `NodeLngE7` in format 3, not derived.
+    fn writes(&self, section: Section) -> bool {
+        section.is_written(
+            self.format,
+            PackageLayout {
+                node_e7_derived: self.node_e7_derived,
+                edge_id_base: 0,
+            },
+        )
+    }
+
+    /// Puts a section. One the writer's format doesn't hold is dropped.
     pub fn put<T: Pod + Send + Sync>(&mut self, section: Section, data: Vec<T>) {
-        debug_assert_eq!(
-            std::mem::size_of::<T>(),
-            SECTION_ELEMENT_BYTES[section as usize]
+        debug_assert!(
+            SECTION_ELEMENT_BYTES[section as usize].is_multiple_of(std::mem::size_of::<T>())
         );
+        let held = match self.format {
+            PackageFormat::V2 => section.in_format_2(),
+            PackageFormat::V3 => section.format_3_presence() != Presence::Retired,
+        };
+        if !held {
+            return;
+        }
         let Some((file, end)) = &mut self.spill else {
             self.sections[section as usize] = Some(SectionData::Memory(Box::new(data)));
             return;
@@ -2860,49 +3810,112 @@ impl PackageWriter {
         }
     }
 
+    /// Where a format-2 package's first section starts.
     pub fn first_section_offset() -> usize {
-        (HEADER_FIXED_BYTES + SECTION_COUNT * TABLE_ENTRY_BYTES).next_multiple_of(SECTION_ALIGN)
+        (HEADER_FIXED_BYTES + FORMAT2_SECTION_COUNT * TABLE_ENTRY_BYTES)
+            .next_multiple_of(SECTION_ALIGN)
+    }
+
+    /// The sections the package holds, in file order (by id: format 2's slot
+    /// order, then format 3's new ids), each with its offset; the table's
+    /// offset; the file's length.
+    fn layout(&self) -> (Vec<(Section, usize)>, usize, usize) {
+        let mut sections = SECTIONS
+            .into_iter()
+            .filter(|section| self.writes(*section))
+            .collect::<Vec<_>>();
+        sections.sort_by_key(|section| section.id());
+        let (table_len, mut offset) = match self.format {
+            PackageFormat::V2 => (
+                FORMAT2_SECTION_COUNT * TABLE_ENTRY_BYTES,
+                Self::first_section_offset(),
+            ),
+            PackageFormat::V3 => (sections.len() * TABLE_ENTRY_BYTES_V3, HEADER_FIXED_BYTES),
+        };
+        let mut order = Vec::with_capacity(sections.len());
+        for section in sections {
+            order.push((section, offset));
+            offset = (offset + self.section_len(section as usize)).next_multiple_of(SECTION_ALIGN);
+        }
+        match self.format {
+            PackageFormat::V2 => (order, HEADER_FIXED_BYTES, offset),
+            PackageFormat::V3 => (
+                order,
+                offset,
+                (offset + table_len).next_multiple_of(SECTION_ALIGN),
+            ),
+        }
     }
 
     /// Total encoded size.
     pub fn byte_len(&self) -> usize {
-        let mut offset = Self::first_section_offset();
-        for index in 0..SECTION_COUNT {
-            offset = (offset + self.section_len(index)).next_multiple_of(SECTION_ALIGN);
-        }
-        offset
+        self.layout().2
     }
 
-    /// The final header and section table: every section in memory hashed
-    /// (in parallel; spilled ones were hashed when put), then the root
-    /// checksum over the header and table.
-    pub fn seal(&self) -> &(Vec<u8>, Vec<u8>) {
+    /// The final header and section table (computed once: every section
+    /// hashed, then the root checksum).
+    pub fn seal(&self) -> (&[u8], &[u8]) {
+        let sealed = self.sealed();
+        (&sealed.header, &sealed.table)
+    }
+
+    /// Every section in memory hashed (in parallel; spilled ones were hashed
+    /// when put), then the table, then the root checksum over the header and
+    /// table.
+    fn sealed(&self) -> &Sealed {
         assert!(!self.header.is_empty(), "the package header is not set");
         self.sealed.get_or_init(|| {
             use rayon::prelude::*;
-            let hashes = (0..SECTION_COUNT)
-                .into_par_iter()
-                .map(|index| match &self.sections[index] {
+            let (order, table_offset, byte_len) = self.layout();
+            let hashes = order
+                .par_iter()
+                .map(|(section, _)| match &self.sections[*section as usize] {
                     Some(SectionData::Spilled { hash, .. }) => *hash,
-                    _ => *hash_section(self.section_bytes(index).unwrap_or_default()).as_bytes(),
+                    _ => *hash_section(self.section_bytes(*section as usize).unwrap_or_default())
+                        .as_bytes(),
                 })
                 .collect::<Vec<_>>();
-            let mut table = Vec::with_capacity(SECTION_COUNT * TABLE_ENTRY_BYTES);
-            let mut offset = Self::first_section_offset();
-            for (index, hash) in hashes.iter().enumerate() {
-                let len = self.section_len(index);
-                table.extend_from_slice(&(offset as u64).to_le_bytes());
-                table.extend_from_slice(&(len as u64).to_le_bytes());
-                table.extend_from_slice(hash);
-                offset = (offset + len).next_multiple_of(SECTION_ALIGN);
-            }
             let mut header = self.header.clone();
-            let mut root = blake3::Hasher::new();
-            root.update(&header);
-            root.update(&table);
-            header[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32]
-                .copy_from_slice(root.finalize().as_bytes());
-            (header, table)
+            let mut table = Vec::new();
+            let checksum_at = match self.format {
+                PackageFormat::V2 => {
+                    for ((section, offset), hash) in order.iter().zip(&hashes) {
+                        table.extend_from_slice(&(*offset as u64).to_le_bytes());
+                        table.extend_from_slice(
+                            &(self.section_len(*section as usize) as u64).to_le_bytes(),
+                        );
+                        table.extend_from_slice(hash);
+                    }
+                    HEADER_ROOT_CHECKSUM
+                }
+                PackageFormat::V3 => {
+                    for ((section, offset), hash) in order.iter().zip(&hashes) {
+                        table.extend_from_slice(&section.id().to_le_bytes());
+                        table.extend_from_slice(&0u32.to_le_bytes());
+                        table.extend_from_slice(&section.format_3_flags().to_le_bytes());
+                        table.extend_from_slice(&(section.element_bytes() as u32).to_le_bytes());
+                        table.extend_from_slice(&(*offset as u64).to_le_bytes());
+                        table.extend_from_slice(
+                            &(self.section_len(*section as usize) as u64).to_le_bytes(),
+                        );
+                        table.extend_from_slice(hash);
+                    }
+                    header[HEADER_SECTION_COUNT..HEADER_SECTION_COUNT + 4]
+                        .copy_from_slice(&(order.len() as u32).to_le_bytes());
+                    header[HEADER_V3_TABLE_OFFSET..HEADER_V3_TABLE_OFFSET + 8]
+                        .copy_from_slice(&(table_offset as u64).to_le_bytes());
+                    HEADER_V3_ROOT_CHECKSUM
+                }
+            };
+            let root = root_checksum(&header, checksum_at, &table);
+            header[checksum_at..checksum_at + 32].copy_from_slice(root.as_bytes());
+            Sealed {
+                header,
+                table,
+                order,
+                table_offset,
+                byte_len,
+            }
         })
     }
 
@@ -2914,22 +3927,28 @@ impl PackageWriter {
                 format!("writing a package section to the spill file failed: {error}"),
             ));
         }
-        let (header, table) = self.seal();
+        let sealed = self.sealed();
         fn emit(out: &mut impl Write, written: &mut usize, bytes: &[u8]) -> std::io::Result<()> {
             out.write_all(bytes)?;
             *written += bytes.len();
             Ok(())
         }
-        fn pad(out: &mut impl Write, written: &mut usize) -> std::io::Result<()> {
+        fn pad_to(out: &mut impl Write, written: &mut usize, to: usize) -> std::io::Result<()> {
             let zeros = [0u8; SECTION_ALIGN];
-            let count = written.next_multiple_of(SECTION_ALIGN) - *written;
-            emit(out, written, &zeros[..count])
+            while *written < to {
+                let count = (to - *written).min(SECTION_ALIGN);
+                emit(out, written, &zeros[..count])?;
+            }
+            Ok(())
         }
         let mut written = 0usize;
-        emit(out, &mut written, header)?;
-        emit(out, &mut written, table)?;
-        for index in 0..SECTION_COUNT {
-            pad(out, &mut written)?;
+        emit(out, &mut written, &sealed.header)?;
+        if self.format == PackageFormat::V2 {
+            emit(out, &mut written, &sealed.table)?;
+        }
+        for (section, offset) in &sealed.order {
+            pad_to(out, &mut written, *offset)?;
+            let index = *section as usize;
             match (&self.sections[index], &self.spill) {
                 (Some(SectionData::Spilled { offset, len, .. }), Some((file, _))) => {
                     use std::io::{Seek, SeekFrom};
@@ -2951,7 +3970,11 @@ impl PackageWriter {
                 )?,
             }
         }
-        pad(out, &mut written)
+        if self.format == PackageFormat::V3 {
+            pad_to(out, &mut written, sealed.table_offset)?;
+            emit(out, &mut written, &sealed.table)?;
+        }
+        pad_to(out, &mut written, sealed.byte_len)
     }
 
     /// Encodes into an owned buffer (in-memory engines and tests).

@@ -32,11 +32,16 @@ pub(crate) struct RequestBuildInput<'a> {
     pub edge_profile_access: &'a [u8],
     /// Road graph shared-info index per compact shared info (in id order).
     pub shared_raw: &'a [u32],
+    /// Format 3: node and shared-info ids are implied (node `i` has id `i`,
+    /// shared info `i` id `i + 1`); the build checks that they are and
+    /// stores none.
+    pub implied_ids: bool,
 }
 
 /// Built request sections, ready for the writer.
 #[derive(Default)]
 pub(crate) struct RequestSections {
+    default_component: u32,
     meta: Vec<u64>,
     grid: Vec<f64>,
     cell_start: Vec<u32>,
@@ -90,6 +95,11 @@ impl RequestSections {
                 * 4
             + self.class_bytes.len()
             + self.string_bytes.len()
+    }
+
+    /// The component most nodes belong to (`NONE_U32`: none).
+    pub(crate) fn default_component(&self) -> u32 {
+        self.default_component
     }
 
     /// The attribute class of each shared info.
@@ -169,12 +179,21 @@ pub(crate) fn build_request_sections(
     let node_ids = (0..node_count)
         .map(|at| network.node_id(at))
         .collect::<Vec<_>>();
-    let (node_base, node_id_delta, node_id_wide) = match deltas(&node_ids) {
-        Some((base, deltas)) => {
-            drop(node_ids);
-            (base as i64, deltas, Vec::new())
+    let (node_base, node_id_delta, node_id_wide) = if input.implied_ids {
+        if node_ids.iter().enumerate().any(|(at, id)| *id != at as i64) {
+            return Err(RoutingPackageError::Unsupported(
+                "format 3 needs node ids in package order (node i has id i); renumber the graph first (`renumber_in_package_order`), as a compile does".into(),
+            ));
         }
-        None => (0, Vec::new(), node_ids),
+        (0, Vec::new(), Vec::new())
+    } else {
+        match deltas(&node_ids) {
+            Some((base, deltas)) => {
+                drop(node_ids);
+                (base as i64, deltas, Vec::new())
+            }
+            None => (0, Vec::new(), node_ids),
+        }
     };
     let roundabout_exits = (0..node_count)
         .filter(|at| network.node_roundabout_exit_count(*at) != 0)
@@ -235,6 +254,11 @@ pub(crate) fn build_request_sections(
         ));
     }
     let shared_base = shared_ids.first().copied().unwrap_or(0);
+    if input.implied_ids && shared_count > 0 && shared_base != 1 {
+        return Err(RoutingPackageError::Unsupported(
+            "format 3 needs shared-info ids from 1 (shared info i has id i + 1); renumber the graph first (`renumber_in_package_order`), as a compile does".into(),
+        ));
+    }
     let mut shared_id_gaps = Vec::new();
     let mut skipped = 0u64;
     for shared in 1..shared_count {
@@ -465,14 +489,21 @@ pub(crate) fn build_request_sections(
         );
     }
     Ok(RequestSections {
-        meta: vec![
-            REQUEST_LAYOUT,
-            node_base as u64,
-            shared_base,
-            u64::from(default_component),
-            0,
-            SATURATION_CAP as u64,
-        ],
+        default_component,
+        // Format 3 keeps the default component and the reach cap in
+        // `PackageParams` and implies the id bases.
+        meta: if input.implied_ids {
+            Vec::new()
+        } else {
+            vec![
+                REQUEST_LAYOUT,
+                node_base as u64,
+                shared_base,
+                u64::from(default_component),
+                0,
+                SATURATION_CAP as u64,
+            ]
+        },
         grid: vec![
             grid.min_lat,
             grid.min_lng,

@@ -41,6 +41,7 @@ pub(crate) fn info(args: InfoArgs) -> Result<(), Failure> {
         "graphId": metadata.graph_id,
         "countryCode": metadata.country_code,
         "datasetHash": package.dataset_hash(),
+        "contentHash": package.content_hash(),
         "byteLen": package.byte_len(),
         "nodeCount": counts.node_count,
         "edgeCount": counts.edge_count,
@@ -50,6 +51,11 @@ pub(crate) fn info(args: InfoArgs) -> Result<(), Failure> {
             "status": metadata.quality.status,
             "reasons": metadata.quality.reasons,
         },
+        "unknownSections": package.unknown_sections().iter().map(|section| json!({
+            "id": section.id,
+            "param": section.param,
+            "byteLen": section.byte_len,
+        })).collect::<Vec<_>>(),
     }))
 }
 
@@ -59,9 +65,11 @@ pub(crate) fn verify(args: VerifyArgs) -> Result<(), Failure> {
         .map_err(|error| Failure::new(format!("{}: {error}", path.display())))?;
     print_json(&json!({
         "datasetHash": verification.dataset_hash,
+        "contentHash": verification.content_hash,
         "byteLen": verification.byte_len,
         "sections": verification.sections.iter().map(|section| json!({
             "name": section.name,
+            "id": section.id,
             "byteLen": section.byte_len,
             "blake3": section.blake3_hex,
         })).collect::<Vec<_>>(),

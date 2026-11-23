@@ -75,7 +75,9 @@ versioned separately:
   `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2; 0.2.0
   dropped format 1, whose landmark sections are now reserved); a
   layout change keeps reading the previous format for at least one release,
-  and raising the minimum drops a format.
+  and raising the minimum drops a format. Format 3 is being built behind a
+  compiler switch: its draft packages open only in a build of the same draft
+  revision (`FORMAT_3_DRAFT_REVISION`).
 - A package records the costing model its stored costs were baked with. An
   engine re-costs a package of an older model from its stored costing inputs
   and refuses a newer one, so a change to stored costs ships the compiler and

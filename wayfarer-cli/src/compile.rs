@@ -17,6 +17,7 @@ use wayfarer_compiler::{
 
 use crate::query::parse_profile;
 use crate::{Failure, print_json, protocol};
+use wayfarer_package::format::PackageFormat;
 
 /// The exit status of a cancelled compile (as for SIGINT).
 pub(crate) const CANCELLED_STATUS: i32 = 130;
@@ -82,6 +83,16 @@ pub(crate) struct CompileArgs {
         conflicts_with = "request"
     )]
     profiles: Option<Vec<MobilityProfile>>,
+    /// The package format to write (2, or 3: format 3's current draft,
+    /// which only a build of the same draft revision opens).
+    #[arg(
+        long,
+        value_name = "N",
+        hide = true,
+        value_parser = parse_package_format,
+        conflicts_with = "request"
+    )]
+    package_format: Option<PackageFormat>,
     /// Take the compile as JSON from FILE, or from stdin with `-`.
     #[arg(long, value_name = "FILE")]
     request: Option<PathBuf>,
@@ -108,8 +119,17 @@ impl CompileArgs {
         };
         request.threads = self.threads.map(NonZeroUsize::get);
         request.profiles = self.profiles.clone();
+        request.package_format = self.package_format.unwrap_or_default();
         Some(request)
     }
+}
+
+fn parse_package_format(value: &str) -> Result<PackageFormat, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .and_then(PackageFormat::from_version)
+        .ok_or_else(|| format!("unknown package format {value} (2 or 3)"))
 }
 
 pub(crate) fn run(args: CompileArgs) -> Result<(), Failure> {

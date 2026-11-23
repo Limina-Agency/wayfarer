@@ -383,9 +383,8 @@ fn package_round_trips_and_rejects_outdated_or_corrupt_bytes() {
         assert!(error.to_string().contains("recompile"), "{error}");
     }
     let mut newer = bytes.to_vec();
-    newer[HEADER_VERSION..HEADER_VERSION + 4].copy_from_slice(
-        &(wayfarer_package::format::ROUTING_PACKAGE_FORMAT_VERSION + 1).to_le_bytes(),
-    );
+    newer[HEADER_VERSION..HEADER_VERSION + 4]
+        .copy_from_slice(&(wayfarer_package::format::MAX_READ_FORMAT_VERSION + 1).to_le_bytes());
     assert!(matches!(
         RoutingPackage::from_bytes(&newer),
         Err(RoutingPackageError::TooNew(_))

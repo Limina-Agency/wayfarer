@@ -19,6 +19,14 @@
 //! every section's hash, the root checksum covers every byte of the file.
 //! It doubles as the package's dataset hash.
 //!
+//! Format 3 (a draft, written only when a compile asks for it; see
+//! `docs/design/format-3.md`) tags each table entry with a section id,
+//! flags (REQUIRED, IDENTITY) and an element size, puts the table after the
+//! sections, implies edge, node and shared-info ids and keeps the scalars
+//! queries read in `PackageParams`. Its dataset hash is the identity hash
+//! over the header and the IDENTITY entries; the root checksum is its content
+//! hash.
+//!
 //! [`RoutingPackage::open`] checks the header, the root checksum over the
 //! header and table, and the sections' bounds and structure; it never hashes
 //! the sections themselves. [`RoutingPackage::verify`] re-hashes every

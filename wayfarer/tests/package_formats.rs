@@ -7,9 +7,9 @@ use std::sync::Arc;
 use wayfarer::{GeoPoint, LegRequest, MobilityProfile, RouteStatus, RoutingEngine, RoutingPackage};
 use wayfarer_compiler::package_build::{PackageBuildOptions, write_package};
 use wayfarer_package::format::{
-    HEADER_COUNTS, HEADER_EDGE_ID_BASE, HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM,
-    MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION, SECTION_COUNT, Section,
-    TABLE_ENTRY_BYTES,
+    FORMAT2_SECTION_COUNT, HEADER_COUNTS, HEADER_EDGE_ID_BASE, HEADER_FIXED_BYTES,
+    HEADER_ROOT_CHECKSUM, MIN_READ_FORMAT_VERSION, PackageFile, ROUTING_PACKAGE_FORMAT_VERSION,
+    Section, TABLE_ENTRY_BYTES,
 };
 use wayfarer_road_graph::{
     DirectionalAccess, RoadGraphBuilder, RoadType, RoutableWay, build_road_graph_manifest,
@@ -87,7 +87,7 @@ fn short_road_request(profile: MobilityProfile) -> LegRequest {
 /// `bytes` with a root checksum that matches its header and section table, as
 /// a hostile package would carry: the checksum guards against corruption only.
 fn resigned(mut bytes: Vec<u8>) -> Vec<u8> {
-    let table_end = HEADER_FIXED_BYTES + SECTION_COUNT * TABLE_ENTRY_BYTES;
+    let table_end = HEADER_FIXED_BYTES + FORMAT2_SECTION_COUNT * TABLE_ENTRY_BYTES;
     let mut header = bytes[..HEADER_FIXED_BYTES].to_vec();
     header[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32].fill(0);
     let mut root = blake3::Hasher::new();

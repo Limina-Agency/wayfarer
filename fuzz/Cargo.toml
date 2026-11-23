@@ -19,6 +19,7 @@ wayfarer-compiler = { path = "../wayfarer-compiler" }
 # allocation.
 wayfarer-ffi = { path = "../wayfarer-ffi", default-features = false }
 wayfarer-package = { path = "../wayfarer-package" }
+wayfarer-road-graph = { path = "../wayfarer-road-graph" }
 wayfarer-service = { path = "../wayfarer-service" }
 
 # Its own workspace: built with nightly by cargo fuzz, never with the main one.
@@ -31,6 +32,13 @@ debug = 1
 [[bin]]
 name = "package"
 path = "fuzz_targets/package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "package_table"
+path = "fuzz_targets/package_table.rs"
 test = false
 doc = false
 bench = false
