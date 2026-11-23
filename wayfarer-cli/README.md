@@ -78,7 +78,10 @@ BLAKE3) as JSON.
 wayfarer route <routing.mrt> --from LAT,LNG [--via LAT,LNG ...] --to LAT,LNG
                [--profile wheeled|on_foot|tracked|emergency|legged] [--geojson]
 wayfarer matrix <routing.mrt> --source LAT,LNG ... --target LAT,LNG ... [--profile P]
-wayfarer isochrone <routing.mrt> --from LAT,LNG --minutes N ... [--profile P]
+wayfarer nearest <routing.mrt> --source LAT,LNG --target LAT,LNG ... [-k N]
+                 [--direction from_source|to_source] [--profile P]
+wayfarer isochrone <routing.mrt> --from LAT,LNG [--minutes N ...] [--distance-m M ...]
+                   [--profile P]
 wayfarer snap <routing.mrt> --at LAT,LNG [--max-distance-m M] [--profile P]
 wayfarer match <routing.mrt> --request <trace.json | ->
 ```
@@ -86,7 +89,12 @@ wayfarer match <routing.mrt> --request <trace.json | ->
 Each prints the engine's result as JSON on stdout (keys camelCase, as the C
 ABI returns them). `route --geojson` prints a GeoJSON FeatureCollection
 instead: the route's line and where each location snapped, ready for QGIS or
-geojson.io. Every command except `match` also takes `--request <file | ->`
+geojson.io. `nearest` returns the `k` targets (1 by default) cheapest to reach
+from the source by route cost, cheapest first, each named by its index among
+the `--target`s; with `--direction to_source`, the targets that reach the
+source soonest. `isochrone` takes travel-time contours (`--minutes`), distance
+contours in metres along the cheapest path (`--distance-m`), or both, and
+returns one bucket per contour. Every command except `match` also takes `--request <file | ->`
 with the request JSON the C ABI takes (`schema/` in the repository describes
 each), which reaches what the flags don't: closures and other overlays,
 overlay sets, costing options, alternatives. For example, a route around a

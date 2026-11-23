@@ -68,11 +68,14 @@ if ! diff -u fixtures/monaco-info.json "$work/info.json"; then
   exit 1
 fi
 
-step "route, matrix and isochrone through the CLI"
+step "route, matrix, nearest and isochrone through the CLI"
 "$wayfarer" route "$work/monaco.mrt" --from 43.7397,7.4275 --via 43.7350,7.4210 \
   --to 43.7290,7.4160 --geojson >/dev/null
 "$wayfarer" matrix "$work/monaco.mrt" --source 43.7397,7.4275 --target 43.7290,7.4160 >/dev/null
-"$wayfarer" isochrone "$work/monaco.mrt" --from 43.7397,7.4275 --minutes 5 >/dev/null
+"$wayfarer" nearest "$work/monaco.mrt" --source 43.7397,7.4275 --target 43.7290,7.4160 \
+  --target 43.7350,7.4210 -k 1 >/dev/null
+"$wayfarer" isochrone "$work/monaco.mrt" --from 43.7397,7.4275 --minutes 5 \
+  --distance-m 1000 >/dev/null
 
 step "route and cancel through the C ABI"
 case "$(uname -s)" in
