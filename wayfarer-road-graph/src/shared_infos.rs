@@ -225,6 +225,66 @@ impl SharedInfoClasses {
     }
 }
 
+/// Shared infos to append to a [`SharedEdgeInfos`] at once
+/// ([`SharedEdgeInfos::append`]): built apart from it (across a thread pool,
+/// a batch each), then appended in order. Each info carries a key that names
+/// its class when it is appended, and its geometry ends and sparse entries
+/// count from the batch's start.
+#[derive(Debug, Default)]
+pub(crate) struct SharedInfoBatch {
+    edges: Vec<SharedEdge>,
+    points: Vec<(i32, i32)>,
+    exact_points: Vec<(u32, (f64, f64))>,
+    lineage: Vec<(u32, Box<[i64]>)>,
+    coverage: Vec<(u32, Arc<str>)>,
+}
+
+impl SharedInfoBatch {
+    pub(crate) fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Adds an info, as [`SharedEdgeInfos::push_with_class`] would, with
+    /// `key` for its class; returns its index in the batch.
+    pub(crate) fn push(
+        &mut self,
+        shared_edge_info_id: u64,
+        osm_way_id: i64,
+        geometry: &[(f64, f64)],
+        key: u32,
+    ) -> usize {
+        for &(lat, lng) in geometry {
+            let fixed = (to_fixed(lat), to_fixed(lng));
+            if !is_exact_fixed((lat, lng), fixed) {
+                self.exact_points
+                    .push((pool_index(self.points.len()), (lat, lng)));
+            }
+            self.points.push(fixed);
+        }
+        self.edges.push(SharedEdge {
+            shared_edge_info_id,
+            osm_way_id,
+            class: key,
+            geometry_end: pool_index(self.points.len()),
+        });
+        self.edges.len() - 1
+    }
+
+    /// [`SharedEdgeInfos::set_source_lineage_ids`] of the batch's info at
+    /// `index`, which has no lineage set yet.
+    pub(crate) fn set_source_lineage_ids(&mut self, index: usize, lineage: &[i64]) {
+        if lineage != [self.edges[index].osm_way_id] {
+            self.lineage.push((pool_index(index), lineage.into()));
+        }
+    }
+
+    /// [`SharedEdgeInfos::set_coverage_id`] of the batch's info at `index`,
+    /// which has none set yet.
+    pub(crate) fn set_coverage_id(&mut self, index: usize, coverage_id: Arc<str>) {
+        self.coverage.push((pool_index(index), coverage_id));
+    }
+}
+
 /// The graph's shared infos, in the order they were added.
 #[derive(Debug, Clone, Default)]
 pub struct SharedEdgeInfos {
@@ -400,6 +460,55 @@ impl SharedEdgeInfos {
     ) {
         assert!((class as usize) < self.classes.len(), "unknown class");
         self.push_edge(shared_edge_info_id, osm_way_id, geometry, class);
+    }
+
+    /// Appends a batch's infos in its order, as pushing each with
+    /// [`Self::push_with_class`] (class `class_of(key)`) and then setting its
+    /// lineage and coverage would.
+    pub(crate) fn append(&mut self, batch: SharedInfoBatch, class_of: impl Fn(u32) -> u32) {
+        let first = self.edges.len();
+        let first_point = self.points.len();
+        pool_index(first_point + batch.points.len());
+        pool_index(first + batch.edges.len());
+        self.points.extend_from_slice(&batch.points);
+        self.exact_points.extend(
+            batch
+                .exact_points
+                .into_iter()
+                .map(|(at, point)| (at + first_point as u32, point)),
+        );
+        let classes = self.classes.len();
+        self.edges.extend(batch.edges.into_iter().map(|edge| {
+            let class = class_of(edge.class);
+            assert!((class as usize) < classes, "unknown class");
+            SharedEdge {
+                class,
+                geometry_end: edge.geometry_end + first_point as u32,
+                ..edge
+            }
+        }));
+        debug_assert!(
+            self.lineage
+                .last()
+                .is_none_or(|(at, _)| (*at as usize) < first)
+        );
+        self.lineage.extend(
+            batch
+                .lineage
+                .into_iter()
+                .map(|(at, lineage)| (at + first as u32, lineage)),
+        );
+        debug_assert!(
+            self.coverage
+                .last()
+                .is_none_or(|(at, _)| (*at as usize) < first)
+        );
+        self.coverage.extend(
+            batch
+                .coverage
+                .into_iter()
+                .map(|(at, coverage)| (at + first as u32, coverage)),
+        );
     }
 
     /// The class of `attrs`, added if new (see [`SharedInfoClasses::intern`]).

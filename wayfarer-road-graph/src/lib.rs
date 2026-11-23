@@ -64,6 +64,7 @@ mod enhance;
 mod geometry;
 mod graph;
 mod network;
+use network::EdgeBatch;
 mod plazas;
 mod quality;
 mod report;
@@ -82,6 +83,7 @@ pub use network::{Adjacency, EdgeColumn, NodeColumn, RoadEdgeRef, RoadNetwork};
 use plazas::*;
 pub use quality::*;
 pub use report::*;
+use shared_infos::SharedInfoBatch;
 pub use shared_infos::{
     InfoGeometry, SharedEdge, SharedEdgeInfos, SharedInfoClasses, SharedInfoRef,
 };

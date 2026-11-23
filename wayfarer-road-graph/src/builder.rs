@@ -450,17 +450,58 @@ impl RoadGraphBuilder {
             .map(|template| SegmentTemplate::new(&template.way, country_code.as_deref()))
             .collect::<Vec<_>>();
 
-        // A chunk of ways is planned (segments, lengths, controls) across the
-        // pool while the one before it is added to the graph in order.
+        // Where each chunk's shared infos and edges start: a way's segments
+        // are its visits after its first point, and each adds one shared
+        // info and its template's edges.
+        let chunk_counts = (0..ways.len())
+            .into_par_iter()
+            .map(|chunk| {
+                let mut point = layout.point_starts[chunk];
+                let (mut infos, mut edges) = (0, 0);
+                for way in &ways[chunk] {
+                    let len = way.points.len();
+                    let segments = visit_count(&flags[point + 1..point + len]);
+                    infos += segments;
+                    edges +=
+                        segments * segment_templates[way.template as usize].edges_per_segment();
+                    point += len;
+                }
+                (infos, edges)
+            })
+            .collect::<Vec<_>>();
+        let mut id_starts = Vec::with_capacity(ways.len());
+        let (mut next_info, mut next_edge) = (self.next_shared_edge_info_id, self.next_edge_id);
+        for (infos, edges) in chunk_counts {
+            id_starts.push((next_info, next_edge));
+            next_info += infos as u64;
+            next_edge += edges as u64;
+        }
+
+        // A chunk of ways is planned into ready columns (segments, lengths,
+        // controls, shared infos and edges) across the pool while the one
+        // before it is appended to the graph in order.
         let planner = SegmentPlanner {
             flags: &flags,
             visit_nodes: &visit_nodes,
             node_positions: node_positions.as_deref(),
             traffic_controls: &self.traffic_controls,
+            templates: &templates,
+            segment_templates: &segment_templates,
         };
         let plan = |(index, chunk): (usize, Vec<PendingWay>)| {
-            let plans = planner.plan(&chunk, layout.point_starts[index], visit_starts[index]);
-            (chunk, plans)
+            let (first_info, first_edge) = id_starts[index];
+            let batches = planner.plan(
+                &chunk,
+                SegmentIds {
+                    point: layout.point_starts[index],
+                    visit: visit_starts[index],
+                    info: first_info,
+                    edge: first_edge,
+                },
+            );
+            // The chunk's ways are freed here, across the pool.
+            drop(chunk);
+            batches
         };
         let mut emitter = SegmentEmitter {
             templates: &templates,
@@ -471,22 +512,25 @@ impl RoadGraphBuilder {
         };
         let mut chunks = ways.into_iter().enumerate();
         let mut current = chunks.next().map(plan);
-        while let Some((chunk, plans)) = current.take() {
+        while let Some(batches) = current.take() {
             let (next, ()) = rayon::join(
                 || chunks.next().map(plan),
-                || {
-                    emitter.emit(
-                        &chunk,
-                        plans,
-                        &mut graph,
-                        &mut self.next_edge_id,
-                        &mut self.next_shared_edge_info_id,
-                        &mut self.report,
-                    )
-                },
+                || emitter.emit(batches, &mut graph, &mut self.report),
             );
             current = next;
         }
+        assert_eq!(
+            (
+                graph.shared_edge_infos.len() as u64,
+                graph.graph.edge_count() as u64
+            ),
+            (
+                next_info - self.next_shared_edge_info_id,
+                next_edge - self.next_edge_id
+            ),
+            "the chunks add the shared infos and edges they counted"
+        );
+        (self.next_shared_edge_info_id, self.next_edge_id) = (next_info, next_edge);
         drop(flags);
         drop(visit_nodes);
         drop(node_positions);
@@ -1123,6 +1167,14 @@ impl SegmentTemplate {
     }
 }
 
+impl SegmentTemplate {
+    /// The directed edges each segment of a way of this template adds.
+    fn edges_per_segment(&self) -> usize {
+        usize::from(self.osm_forward_mode_mask != 0 || self.physical_forward)
+            + usize::from(self.osm_reverse_mode_mask != 0 || self.physical_backward)
+    }
+}
+
 /// One segment of a way, planned: its nodes, the end of its points in its
 /// way's [`WayPlan::geometry`], its length and its end controls.
 struct SegmentPlan {
@@ -1141,7 +1193,65 @@ struct WayPlan {
     geometry: Vec<(f64, f64)>,
 }
 
-/// Splits ways into segments, independently of every other way.
+/// Where a run of ways starts: its first point and visit among all ways',
+/// and the ids of its first shared info and edge.
+#[derive(Debug, Clone, Copy)]
+struct SegmentIds {
+    point: usize,
+    visit: usize,
+    info: u64,
+    edge: u64,
+}
+
+/// Ways are planned into a [`SegmentBatch`] this many at a time.
+const SEGMENT_BATCH_WAYS: usize = 256;
+
+/// A pedestrian area's way, for its plaza: its way id, template and points.
+type PlazaWay = (i64, u32, Vec<(f64, f64)>);
+
+/// A run of ways' segments, ready to append to the graph: their shared infos
+/// (keyed by template) and directed edges, the templates in the order the
+/// infos first use them, and their report counts.
+#[derive(Default)]
+struct SegmentBatch {
+    infos: SharedInfoBatch,
+    edges: EdgeBatch,
+    first_uses: Vec<u32>,
+    /// The pedestrian areas' ways, in order.
+    plazas: Vec<PlazaWay>,
+    traffic_controlled_edges: usize,
+    sar_only_edges: usize,
+    zero_access_edges: usize,
+    /// How many edges have each (OSM, mobility) mode mask pair, in the order
+    /// the pairs come.
+    access_masks: Vec<(ModeMask, ModeMask, usize)>,
+}
+
+impl SegmentBatch {
+    fn count_access_mask(&mut self, osm_mode_mask: ModeMask, mobility_mode_mask: ModeMask) {
+        count_access_mask(&mut self.access_masks, osm_mode_mask, mobility_mode_mask, 1);
+    }
+}
+
+/// Adds `count` to the (OSM, mobility) pair's entry of `access_masks`, which
+/// lists the pairs in the order they come.
+fn count_access_mask(
+    access_masks: &mut Vec<(ModeMask, ModeMask, usize)>,
+    osm_mode_mask: ModeMask,
+    mobility_mode_mask: ModeMask,
+    count: usize,
+) {
+    match access_masks
+        .iter_mut()
+        .find(|(osm, mobility, _)| (*osm, *mobility) == (osm_mode_mask, mobility_mode_mask))
+    {
+        Some((_, _, total)) => *total += count,
+        None => access_masks.push((osm_mode_mask, mobility_mode_mask, count)),
+    }
+}
+
+/// Splits ways into segments and builds their shared infos and edges,
+/// independently of every other way.
 struct SegmentPlanner<'a> {
     flags: &'a [u8],
     visit_nodes: &'a [u32],
@@ -1149,53 +1259,208 @@ struct SegmentPlanner<'a> {
     /// point (see `finish_with_report`).
     node_positions: Option<&'a [(f64, f64)]>,
     traffic_controls: &'a FxHashMap<(i32, i32), TrafficControlPoint>,
+    templates: &'a [Template],
+    segment_templates: &'a [SegmentTemplate],
 }
 
 impl SegmentPlanner<'_> {
-    /// The chunk's ways' plans, in order, built in parallel: the chunk's
-    /// points start at `first_point` and its visits at `first_visit`.
-    fn plan(&self, chunk: &[PendingWay], first_point: usize, first_visit: usize) -> Vec<WayPlan> {
-        // Where each way's points and visits start.
-        let mut starts = Vec::with_capacity(chunk.len());
-        let (mut point, mut visit) = (first_point, first_visit);
-        for way in chunk {
-            starts.push((point, visit));
-            visit += visit_count(&self.flags[point..point + way.points.len()]);
-            point += way.points.len();
+    /// The chunk's segments, in batches of consecutive ways built in
+    /// parallel, in order: the chunk starts at `first`.
+    fn plan(&self, chunk: &[PendingWay], first: SegmentIds) -> Vec<SegmentBatch> {
+        // Where each batch's ways start.
+        let mut starts = Vec::with_capacity(chunk.len().div_ceil(SEGMENT_BATCH_WAYS));
+        let mut at = first;
+        for (index, way) in chunk.iter().enumerate() {
+            if index % SEGMENT_BATCH_WAYS == 0 {
+                starts.push(at);
+            }
+            let len = way.points.len();
+            let segments = visit_count(&self.flags[at.point + 1..at.point + len]);
+            at.point += len;
+            at.visit += segments + 1;
+            at.info += segments as u64;
+            at.edge += (segments
+                * self.segment_templates[way.template as usize].edges_per_segment())
+                as u64;
         }
         chunk
-            .par_iter()
+            .par_chunks(SEGMENT_BATCH_WAYS)
             .zip(starts)
-            .map(|(way, (point, visit))| self.plan_way(way, point, visit))
+            .map(|(ways, start)| self.batch(ways, start))
             .collect()
     }
 
-    fn plan_way(&self, way: &PendingWay, first_point: usize, first_visit: usize) -> WayPlan {
+    /// The segments of consecutive ways starting at `start`.
+    fn batch(&self, ways: &[PendingWay], start: SegmentIds) -> SegmentBatch {
+        let mut batch = SegmentBatch::default();
+        let mut used = FxHashSet::default();
+        let SegmentIds {
+            mut point,
+            mut visit,
+            info: mut next_info,
+            edge: mut next_edge,
+        } = start;
+        let (mut plan, mut scratch) = (WayPlan::default(), PlanScratch::default());
+        for pending in ways {
+            if self.segment_templates[pending.template as usize].pedestrian_area {
+                let mut points = Vec::new();
+                pending.points.read_into(&mut points);
+                batch
+                    .plazas
+                    .push((pending.osm_way_id, pending.template, points));
+            }
+            self.plan_way(pending, point, visit, &mut plan, &mut scratch);
+            point += pending.points.len();
+            visit += plan.segments.len() + 1;
+            if plan.segments.is_empty() {
+                continue;
+            }
+            if used.insert(pending.template) {
+                batch.first_uses.push(pending.template);
+            }
+            let way = &self.templates[pending.template as usize].way;
+            let template = &self.segment_templates[pending.template as usize];
+            let osm_forward_mode_mask = template.osm_forward_mode_mask;
+            let osm_reverse_mode_mask = template.osm_reverse_mode_mask;
+            let base_cost_factor = way.road_type.cost_factor();
+            let mut geometry_start = 0usize;
+            for (segment_index, segment) in plan.segments.iter().enumerate() {
+                let geometry = &plan.geometry[geometry_start..segment.geometry_end as usize];
+                geometry_start = segment.geometry_end as usize;
+                let (start_node_idx, end_node_idx) = (
+                    NodeIndex::new(segment.start_node as usize),
+                    NodeIndex::new(segment.end_node as usize),
+                );
+                let distance = segment.distance;
+                let (forward_control, backward_control) =
+                    (segment.forward_control, segment.backward_control);
+                let segment_index = segment_index as u32;
+                batch.traffic_controlled_edges += usize::from(
+                    osm_forward_mode_mask != 0 && forward_control != TrafficControl::None,
+                ) + usize::from(
+                    osm_reverse_mode_mask != 0 && backward_control != TrafficControl::None,
+                );
+                let shared_edge_info_id = next_info;
+                next_info += 1;
+                let info_index = batch.infos.push(
+                    shared_edge_info_id,
+                    pending.osm_way_id,
+                    geometry,
+                    pending.template,
+                );
+                if !pending.source_lineage_ids.is_empty() {
+                    batch
+                        .infos
+                        .set_source_lineage_ids(info_index, &pending.source_lineage_ids);
+                }
+                if let Some(coverage_id) = &way.coverage_id {
+                    batch
+                        .infos
+                        .set_coverage_id(info_index, Arc::clone(coverage_id));
+                }
+
+                for (allowed, osm_mode_mask, from, to, direction, end_control) in [
+                    (
+                        osm_forward_mode_mask != 0 || template.physical_forward,
+                        osm_forward_mode_mask,
+                        start_node_idx,
+                        end_node_idx,
+                        TraversalDirection::Forward,
+                        forward_control,
+                    ),
+                    (
+                        osm_reverse_mode_mask != 0 || template.physical_backward,
+                        osm_reverse_mode_mask,
+                        end_node_idx,
+                        start_node_idx,
+                        TraversalDirection::Backward,
+                        backward_control,
+                    ),
+                ] {
+                    if !allowed {
+                        continue;
+                    }
+                    let edge_id = next_edge;
+                    next_edge += 1;
+                    let mobility_mode_mask = mobility_mode_mask_from_osm(osm_mode_mask);
+                    batch.edges.push(
+                        from,
+                        to,
+                        RoadEdge {
+                            edge_id,
+                            shared_edge_info_id,
+                            distance_m: distance as f32,
+                            base_cost: distance as f32 * base_cost_factor * template.road_factor,
+                            mobility_mode_mask,
+                            osm_forward_mode_mask,
+                            osm_reverse_mode_mask,
+                            hierarchy_tier: template.hierarchy_tier,
+                            traversal_direction: direction,
+                            segment_index,
+                            end_control,
+                            ..Default::default()
+                        },
+                    );
+                    if osm_mode_mask == 0 {
+                        batch.sar_only_edges += 1;
+                    } else {
+                        batch.count_access_mask(osm_mode_mask, mobility_mode_mask);
+                        if mobility_mode_mask == 0 {
+                            batch.zero_access_edges += 1;
+                        }
+                    }
+                }
+            }
+        }
+        batch
+    }
+
+    /// Plans `way` into `plan` (cleared first), with `scratch` for its
+    /// points.
+    fn plan_way(
+        &self,
+        way: &PendingWay,
+        first_point: usize,
+        first_visit: usize,
+        plan: &mut WayPlan,
+        scratch: &mut PlanScratch,
+    ) {
+        plan.segments.clear();
+        plan.geometry.clear();
         let flags = &self.flags[first_point..first_point + way.points.len()];
         let mut visit_nodes = self.visit_nodes[first_visit..].iter().copied();
-        let mut points = Vec::new();
-        let points = way.points.read_into(&mut points);
-        let mut plan = WayPlan {
-            segments: Vec::new(),
-            geometry: Vec::with_capacity(points.len()),
-        };
+        let PlanScratch {
+            points,
+            segment_points,
+            steps,
+        } = scratch;
+        let points = way.points.read_into(points);
         let place_controls = !self.traffic_controls.is_empty();
-        let mut current_segment_points = Vec::with_capacity(points.len());
-        current_segment_points.push(points[0]);
+        segment_points.clear();
+        steps.clear();
+        segment_points.push(points[0]);
         let mut segment_start = 0usize;
         let mut start_node = visit_nodes.next().expect("a way starts at a node");
         for (index, &point) in points.iter().enumerate().skip(1) {
-            current_segment_points.push(point);
+            // Each step's length once: the segment's length is their sum in
+            // order, as `calculate_path_distance` adds them.
+            steps.push(calculate_path_distance(&[
+                *segment_points.last().expect("a segment has a point"),
+                point,
+            ]));
+            segment_points.push(point);
             // A shared point (a junction), a barrier with an effect, or the
             // way's end closes a segment.
             if flags[index] & VISIT_POINT == 0 {
                 continue;
             }
             let end_node = visit_nodes.next().expect("a segment ends at a node");
-            let distance = calculate_path_distance(&current_segment_points);
+            let distance = steps.iter().fold(0.0, |length, step| length + step);
             let (forward_control, backward_control) = if place_controls {
                 segment_end_controls(
-                    &current_segment_points,
+                    segment_points,
+                    steps,
+                    distance,
                     self.traffic_controls,
                     flags[segment_start] & MOTOR_JUNCTION_POINT != 0,
                     flags[index] & MOTOR_JUNCTION_POINT != 0,
@@ -1203,7 +1468,7 @@ impl SegmentPlanner<'_> {
             } else {
                 (TrafficControl::None, TrafficControl::None)
             };
-            plan.geometry.extend_from_slice(&current_segment_points);
+            plan.geometry.extend_from_slice(segment_points);
             plan.segments.push(SegmentPlan {
                 start_node,
                 end_node,
@@ -1217,16 +1482,27 @@ impl SegmentPlanner<'_> {
                 Some(positions) => positions[start_node as usize],
                 None => point,
             };
-            current_segment_points.clear();
-            current_segment_points.push(continuation);
+            segment_points.clear();
+            steps.clear();
+            segment_points.push(continuation);
             segment_start = index;
         }
-        plan
     }
 }
 
-/// Adds planned segments to the graph, in push order: their shared infos
-/// (classes interned as they come), their directed edges and their counts.
+/// Buffers [`SegmentPlanner::plan_way`] reuses from way to way.
+#[derive(Default)]
+struct PlanScratch {
+    points: Vec<(f64, f64)>,
+    /// The current segment's points, and the length of each step between
+    /// them.
+    segment_points: Vec<(f64, f64)>,
+    steps: Vec<f64>,
+}
+
+/// Appends planned segments to the graph, in push order: their shared
+/// infos (classes interned as they come), their directed edges and their
+/// counts.
 struct SegmentEmitter<'a> {
     templates: &'a [Template],
     segment_templates: &'a [SegmentTemplate],
@@ -1241,36 +1517,17 @@ struct SegmentEmitter<'a> {
 }
 
 impl SegmentEmitter<'_> {
-    fn count_access_mask(&mut self, osm_mode_mask: ModeMask, mobility_mode_mask: ModeMask) {
-        match self
-            .access_masks
-            .iter_mut()
-            .find(|(osm, mobility, _)| (*osm, *mobility) == (osm_mode_mask, mobility_mode_mask))
-        {
-            Some((_, _, count)) => *count += 1,
-            None => self
-                .access_masks
-                .push((osm_mode_mask, mobility_mode_mask, 1)),
-        }
-    }
-
     fn emit(
         &mut self,
-        chunk: &[PendingWay],
-        plans: Vec<WayPlan>,
+        batches: Vec<SegmentBatch>,
         graph: &mut RoadGraph,
-        next_edge_id: &mut u64,
-        next_shared_edge_info_id: &mut u64,
         report: &mut RoadGraphBuildReport,
     ) {
-        for (pending, plan) in chunk.iter().zip(plans) {
-            let way = &self.templates[pending.template as usize].way;
-            let template = &self.segment_templates[pending.template as usize];
-            if template.pedestrian_area {
-                let mut points = Vec::new();
-                pending.points.read_into(&mut points);
+        for batch in batches {
+            for (osm_way_id, template, points) in batch.plazas {
+                let way = &self.templates[template as usize].way;
                 self.plaza_accumulators
-                    .entry(pending.osm_way_id)
+                    .entry(osm_way_id)
                     .or_insert_with(|| PlazaAccumulator {
                         highway: way.highway.as_deref().map(str::to_string),
                         surface: way.surface.clone(),
@@ -1280,119 +1537,32 @@ impl SegmentEmitter<'_> {
                     .segments
                     .push(points);
             }
-            let osm_forward_mode_mask = template.osm_forward_mode_mask;
-            let osm_reverse_mode_mask = template.osm_reverse_mode_mask;
-            let mut geometry_start = 0usize;
-            for (segment_index, segment) in plan.segments.iter().enumerate() {
-                let geometry = &plan.geometry[geometry_start..segment.geometry_end as usize];
-                geometry_start = segment.geometry_end as usize;
-                let (start_node_idx, end_node_idx) = (
-                    NodeIndex::new(segment.start_node as usize),
-                    NodeIndex::new(segment.end_node as usize),
-                );
-                let distance = segment.distance;
-                let (forward_control, backward_control) =
-                    (segment.forward_control, segment.backward_control);
-                let segment_index = segment_index as u32;
-                report.traffic_controlled_edge_count += usize::from(
-                    osm_forward_mode_mask != 0 && forward_control != TrafficControl::None,
-                ) + usize::from(
-                    osm_reverse_mode_mask != 0 && backward_control != TrafficControl::None,
-                );
-                let shared_edge_info_id = *next_shared_edge_info_id;
-                *next_shared_edge_info_id += 1;
-                let template_class = &mut self.template_classes[pending.template as usize];
-                if *template_class == u32::MAX {
-                    *template_class = graph.shared_edge_infos.intern(template.info.clone());
-                }
-                let template_class = *template_class;
-                graph.shared_edge_infos.push_with_class(
-                    shared_edge_info_id,
-                    pending.osm_way_id,
-                    geometry,
-                    template_class,
-                );
-                let info_index = graph.shared_edge_infos.len() - 1;
-                if !pending.source_lineage_ids.is_empty() {
-                    graph
+            for &template in &batch.first_uses {
+                let class = &mut self.template_classes[template as usize];
+                if *class == u32::MAX {
+                    *class = graph
                         .shared_edge_infos
-                        .set_source_lineage_ids(info_index, pending.source_lineage_ids.to_vec());
+                        .intern(self.segment_templates[template as usize].info.clone());
                 }
-                if way.coverage_id.is_some() {
-                    graph
-                        .shared_edge_infos
-                        .set_coverage_id(info_index, way.coverage_id.clone());
-                }
-                report.created_shared_segment_count += 1;
-
-                if osm_forward_mode_mask != 0 || template.physical_forward {
-                    let edge_id = *next_edge_id;
-                    *next_edge_id += 1;
-                    let mobility_mode_mask = mobility_mode_mask_from_osm(osm_forward_mode_mask);
-                    graph.add_edge(
-                        start_node_idx,
-                        end_node_idx,
-                        RoadEdge {
-                            edge_id,
-                            shared_edge_info_id,
-                            distance_m: distance as f32,
-                            base_cost: distance as f32
-                                * way.road_type.cost_factor()
-                                * template.road_factor,
-                            mobility_mode_mask,
-                            osm_forward_mode_mask,
-                            osm_reverse_mode_mask,
-                            hierarchy_tier: template.hierarchy_tier,
-                            traversal_direction: TraversalDirection::Forward,
-                            segment_index,
-                            end_control: forward_control,
-                            ..Default::default()
-                        },
-                    );
-                    report.created_directed_edge_count += 1;
-                    if osm_forward_mode_mask == 0 {
-                        report.sar_only_edge_count += 1;
-                    } else {
-                        self.count_access_mask(osm_forward_mode_mask, mobility_mode_mask);
-                        if mobility_mode_mask == 0 {
-                            report.zero_access_edge_count += 1;
-                        }
-                    }
-                }
-                if osm_reverse_mode_mask != 0 || template.physical_backward {
-                    let edge_id = *next_edge_id;
-                    *next_edge_id += 1;
-                    let mobility_mode_mask = mobility_mode_mask_from_osm(osm_reverse_mode_mask);
-                    graph.add_edge(
-                        end_node_idx,
-                        start_node_idx,
-                        RoadEdge {
-                            edge_id,
-                            shared_edge_info_id,
-                            distance_m: distance as f32,
-                            base_cost: distance as f32
-                                * way.road_type.cost_factor()
-                                * template.road_factor,
-                            mobility_mode_mask,
-                            osm_forward_mode_mask,
-                            osm_reverse_mode_mask,
-                            hierarchy_tier: template.hierarchy_tier,
-                            traversal_direction: TraversalDirection::Backward,
-                            segment_index,
-                            end_control: backward_control,
-                            ..Default::default()
-                        },
-                    );
-                    report.created_directed_edge_count += 1;
-                    if osm_reverse_mode_mask == 0 {
-                        report.sar_only_edge_count += 1;
-                    } else {
-                        self.count_access_mask(osm_reverse_mode_mask, mobility_mode_mask);
-                        if mobility_mode_mask == 0 {
-                            report.zero_access_edge_count += 1;
-                        }
-                    }
-                }
+            }
+            let infos = batch.infos.len();
+            let template_classes = &self.template_classes;
+            graph
+                .shared_edge_infos
+                .append(batch.infos, |template| template_classes[template as usize]);
+            graph.graph.append_edges(&batch.edges);
+            report.created_shared_segment_count += infos;
+            report.created_directed_edge_count += batch.edges.len();
+            report.traffic_controlled_edge_count += batch.traffic_controlled_edges;
+            report.sar_only_edge_count += batch.sar_only_edges;
+            report.zero_access_edge_count += batch.zero_access_edges;
+            for (osm_mode_mask, mobility_mode_mask, count) in batch.access_masks {
+                count_access_mask(
+                    &mut self.access_masks,
+                    osm_mode_mask,
+                    mobility_mode_mask,
+                    count,
+                );
             }
         }
     }
@@ -1424,10 +1594,13 @@ fn plaza_node_map(
 
 /// The controls a vehicle meets on one segment before leaving it, (forward,
 /// backward): see [`RoadGraphBuilder::set_traffic_control_points`].
-/// `start_junction` and `end_junction` tell whether the segment's ends are
-/// junctions of motor roads.
+/// `steps` are the lengths between consecutive `points` and `length_m` their
+/// sum in order. `start_junction` and `end_junction` tell whether the
+/// segment's ends are junctions of motor roads.
 fn segment_end_controls(
     points: &[(f64, f64)],
+    steps: &[f64],
+    length_m: f64,
     controls: &FxHashMap<(i32, i32), TrafficControlPoint>,
     start_junction: bool,
     end_junction: bool,
@@ -1438,7 +1611,6 @@ fn segment_end_controls(
         let (lat, lng) = points[index];
         controls.get(&(to_fixed(lat), to_fixed(lng)))
     };
-    let length_m = calculate_path_distance(points);
     let signalled_node = |index: usize| {
         control_at(index).is_some_and(|point| point.control == TrafficControl::TrafficSignals)
     };
@@ -1460,7 +1632,7 @@ fn segment_end_controls(
     }
     let mut along_m = 0.0;
     for index in 1..last {
-        along_m += calculate_path_distance(&points[index - 1..=index]);
+        along_m += steps[index - 1];
         let Some(point) = control_at(index) else {
             continue;
         };
