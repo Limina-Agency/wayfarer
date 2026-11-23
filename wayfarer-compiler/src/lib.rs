@@ -478,6 +478,10 @@ pub(crate) struct OsmRoadNetworkCollector {
     /// Ferries whose `duration` becomes their speed once their length is
     /// known, with the position of their line in `builder`.
     ferries: Vec<(usize, Box<PendingFerry>)>,
+    /// Link ways with no `junction:ref`, as (their entry in the way facts'
+    /// index, their departure node): a motorway junction node there gives
+    /// them its exit number ([`apply_junction_exits`]).
+    exit_links: Vec<(usize, i64)>,
     turn_restrictions: Vec<RoadTurnRestriction>,
     route_memberships: CollectedRouteMemberships,
     way_facts: EncodedWayFacts,
@@ -678,12 +682,19 @@ impl OsmRoadNetworkCollector {
     fn place(mut self, located: LocatedNodes) -> Result<UnfinishedRoadInputs, String> {
         let mut barrier_node_tags = HashMap::new();
         let mut traffic_controls = Vec::new();
+        let mut junctions = HashMap::new();
         for node in &located.tagged_nodes {
             if let Some(tags) = barrier_node_tags_from_tags(&node.tags) {
                 barrier_node_tags.insert(node.node_id, tags);
             }
             traffic_controls.extend(traffic_control_point(node));
+            if let Some(junction) = junction_exit_from_tags(&node.tags) {
+                junctions.insert(node.node_id, junction);
+            }
         }
+        apply_junction_exits(&mut self.way_facts, &self.exit_links, &junctions)?;
+        drop(junctions);
+        drop(std::mem::take(&mut self.exit_links));
         let locations = &located.locations;
         let inputs = self.builder.inputs_mut();
         // The lines with nodes the file does not hold, cut there, by position.
@@ -940,6 +951,9 @@ impl OsmRoadNetworkCollector {
             let facts_entry = self.way_facts.index.len();
             if let Some(facts) = way.encoded_facts {
                 self.way_facts.insert_encoded(way.way_id, &facts);
+                if let Some(node_id) = way.exit_node {
+                    self.exit_links.push((facts_entry, node_id));
+                }
             }
             if let Some(UnplacedWay { input, ferry }) = way.unplaced {
                 if let Some(mut ferry) = ferry {
@@ -989,6 +1003,9 @@ struct CollectedWay {
     encoded_facts: Option<Vec<u8>>,
     /// The routable line, when the way is one, still to be located.
     unplaced: Option<UnplacedWay>,
+    /// For a link way with facts and no `junction:ref`, the node it leaves
+    /// from ([`link_departure_node`]).
+    exit_node: Option<i64>,
 }
 
 fn collect_way(way: osm_pbf_ingest::NormalizedWay) -> Result<CollectedWay, String> {
@@ -1004,6 +1021,7 @@ fn collect_way(way: osm_pbf_ingest::NormalizedWay) -> Result<CollectedWay, Strin
             way_id: way.way_id,
             encoded_facts: encode(facts)?,
             unplaced: None,
+            exit_node: None,
         });
     }
     // A ferry's `duration` becomes its speed over the whole crossing, carried
@@ -1024,6 +1042,9 @@ fn collect_way(way: osm_pbf_ingest::NormalizedWay) -> Result<CollectedWay, Strin
         ),
         (facts, _) => (encode(facts)?, None),
     };
+    let exit_node = encoded_facts
+        .as_ref()
+        .and_then(|_| link_departure_node(&way.tags, &way.node_ids));
     let road_class = road_class(&way.tags);
     let attrs = routing_topology_attrs(&way.tags, road_class);
     let routing = road_routing_attrs(&way.tags, road_class);
@@ -1046,7 +1067,83 @@ fn collect_way(way: osm_pbf_ingest::NormalizedWay) -> Result<CollectedWay, Strin
             },
             ferry,
         }),
+        exit_node,
     })
+}
+
+/// The node a link way (`highway=*_link`) with no `junction:ref` leaves
+/// from: its first node, or its last for `oneway=-1`. A motorway junction
+/// node there numbers the exit the link takes; the far end is where it
+/// joins, so an on-ramp ending at a junction node is never an exit.
+fn link_departure_node(tags: &(impl PbfTagLookup + ?Sized), node_ids: &[i64]) -> Option<i64> {
+    if !tags
+        .tag("highway")
+        .is_some_and(|value| value.ends_with("_link"))
+        || tags
+            .tag("junction:ref")
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return None;
+    }
+    if matches!(tags.tag("oneway"), Some("-1" | "reverse")) {
+        node_ids.last().copied()
+    } else {
+        node_ids.first().copied()
+    }
+}
+
+/// A `highway=motorway_junction` node's exit number (`ref`) and, from
+/// `exit_to`, where the exit leads.
+struct JunctionExit {
+    exit_ref: String,
+    exit_to: Option<String>,
+}
+
+fn junction_exit_from_tags(tags: &(impl PbfTagLookup + ?Sized)) -> Option<JunctionExit> {
+    if tags.tag("highway") != Some("motorway_junction") {
+        return None;
+    }
+    let non_empty = |key: &str| {
+        tags.tag(key)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    Some(JunctionExit {
+        exit_ref: non_empty("ref")?,
+        exit_to: non_empty("exit_to"),
+    })
+}
+
+/// Gives each link way that leaves from a motorway junction node, and has
+/// no `junction:ref` of its own, the node's `ref` as its `junction_ref`,
+/// and its `exit_to` as its `destination` when it has none. The facts are
+/// encoded again in the same index entries, in collection order, so the
+/// result does not depend on threads or map order.
+fn apply_junction_exits(
+    way_facts: &mut EncodedWayFacts,
+    exit_links: &[(usize, i64)],
+    junctions: &HashMap<i64, JunctionExit>,
+) -> Result<(), String> {
+    if junctions.is_empty() {
+        return Ok(());
+    }
+    for &(entry, node_id) in exit_links {
+        let Some(junction) = junctions.get(&node_id) else {
+            continue;
+        };
+        let (way_id, offset) = way_facts.index[entry];
+        let (mut facts, _): (RoadWayFacts, _) =
+            codec::take_from_slice(&way_facts.bytes()[offset as usize..])
+                .map_err(|error| format!("Failed to decode way facts for way {way_id}: {error}"))?;
+        facts.junction_ref = Some(junction.exit_ref.clone());
+        if facts.destination.is_none() {
+            facts.destination.clone_from(&junction.exit_to);
+        }
+        let encoded = encode_way_facts(way_id, &facts)?;
+        way_facts.fill(entry, &encoded);
+    }
+    Ok(())
 }
 
 fn encode_way_facts(way_id: i64, facts: &RoadWayFacts) -> Result<Vec<u8>, String> {
@@ -1567,9 +1664,12 @@ fn is_barrier_node(tags: &(impl PbfTagLookup + ?Sized)) -> bool {
     barrier_tag(tags).is_some()
 }
 
-/// The nodes the ingest keeps: barriers and traffic controls.
+/// The nodes the ingest keeps: barriers, traffic controls and numbered
+/// motorway junctions.
 fn is_kept_node(tags: &(impl PbfTagLookup + ?Sized)) -> bool {
-    is_barrier_node(tags) || traffic_control_from_tags(tags).is_some()
+    is_barrier_node(tags)
+        || traffic_control_from_tags(tags).is_some()
+        || junction_exit_from_tags(tags).is_some()
 }
 
 /// The traffic control an OSM node's tags describe: `highway=traffic_signals`
@@ -2266,6 +2366,17 @@ mod tests {
         ways: &[FixtureWay<'_>],
         relations: &[FixtureRelation<'_>],
     ) {
+        write_osm_pbf_with_node_tags(path, nodes, &[], ways, relations);
+    }
+
+    /// [`write_osm_pbf`], with tags on the nodes `node_tags` names.
+    fn write_osm_pbf_with_node_tags(
+        path: &std::path::Path,
+        nodes: &[(i64, f64, f64)],
+        node_tags: &[(i64, FixtureTags<'_>)],
+        ways: &[FixtureWay<'_>],
+        relations: &[FixtureRelation<'_>],
+    ) {
         let mut file = Vec::new();
         let mut header = Vec::new();
         protobuf_bytes(4, b"OsmSchema-V0.6", &mut header);
@@ -2296,6 +2407,9 @@ mod tests {
         for &(id, lat, lon) in nodes {
             let mut node = Vec::new();
             protobuf_uint(1, zigzag(id), &mut node);
+            if let Some((_, tags)) = node_tags.iter().find(|(node_id, _)| *node_id == id) {
+                tag_fields(&mut strings, tags, &mut node);
+            }
             protobuf_uint(8, zigzag((lat * 1e7).round() as i64), &mut node);
             protobuf_uint(9, zigzag((lon * 1e7).round() as i64), &mut node);
             protobuf_bytes(1, &node, &mut node_group);
@@ -2355,9 +2469,19 @@ mod tests {
         ways: &[FixtureWay<'_>],
         relations: &[FixtureRelation<'_>],
     ) -> RoadGraphCompileResult {
+        compile_fixture_graph_with_node_tags(nodes, &[], ways, relations)
+    }
+
+    /// [`compile_fixture_graph`], with tags on the nodes `node_tags` names.
+    fn compile_fixture_graph_with_node_tags(
+        nodes: &[(i64, f64, f64)],
+        node_tags: &[(i64, FixtureTags<'_>)],
+        ways: &[FixtureWay<'_>],
+        relations: &[FixtureRelation<'_>],
+    ) -> RoadGraphCompileResult {
         let dir = tempfile::tempdir().unwrap();
         let pbf = dir.path().join("fixture.osm.pbf");
-        write_osm_pbf(&pbf, nodes, ways, relations);
+        write_osm_pbf_with_node_tags(&pbf, nodes, node_tags, ways, relations);
         let never = || false;
         let mut ignore = |_: &job::Report| {};
         compile_road_graph_from_pbf(
@@ -3097,6 +3221,106 @@ mod tests {
         assert_eq!(osm_duration_s("P1DT2H"), Some(93_600.0));
         assert_eq!(osm_duration_s("soon"), None);
         assert_eq!(osm_duration_s("PT"), None);
+    }
+
+    #[test]
+    fn links_leaving_a_motorway_junction_take_its_exit_number() {
+        // The motorway 1-2-3 with junction 2 ("7A", exit to Tarnów). Way 10
+        // leaves it at 2; way 11 joins it at 2 (an on-ramp); way 12 leaves it
+        // at 2 drawn backwards (oneway=-1); way 13 has its own junction:ref
+        // and way 14 its own destination; way 15 is no link.
+        let junction = [
+            ("highway", "motorway_junction"),
+            ("ref", "7A"),
+            ("exit_to", "Tarnów"),
+        ];
+        let link = |oneway: &'static str| [("highway", "motorway_link"), ("oneway", oneway)];
+        let compiled = compile_fixture_graph_with_node_tags(
+            &[
+                (1, 52.0, 21.0),
+                (2, 52.0, 21.001),
+                (3, 52.0, 21.002),
+                (4, 52.001, 21.002),
+                (5, 51.999, 21.0),
+                (6, 52.002, 21.002),
+                (7, 51.998, 21.002),
+                (8, 51.997, 21.002),
+                (9, 52.003, 21.002),
+                (10, 52.004, 21.002),
+            ],
+            &[(2, &junction)],
+            &[
+                FixtureWay {
+                    id: 1,
+                    nodes: &[1, 2, 3],
+                    tags: &[("highway", "motorway"), ("oneway", "yes")],
+                },
+                FixtureWay {
+                    id: 10,
+                    nodes: &[2, 4],
+                    tags: &link("yes"),
+                },
+                FixtureWay {
+                    id: 11,
+                    nodes: &[5, 2],
+                    tags: &link("yes"),
+                },
+                FixtureWay {
+                    id: 12,
+                    nodes: &[6, 2],
+                    tags: &link("-1"),
+                },
+                FixtureWay {
+                    id: 13,
+                    nodes: &[2, 7],
+                    tags: &[
+                        ("highway", "motorway_link"),
+                        ("oneway", "yes"),
+                        ("junction:ref", "8"),
+                    ],
+                },
+                FixtureWay {
+                    id: 14,
+                    nodes: &[2, 8],
+                    tags: &[
+                        ("highway", "motorway_link"),
+                        ("oneway", "yes"),
+                        ("destination", "Rzeszów"),
+                    ],
+                },
+                FixtureWay {
+                    id: 15,
+                    nodes: &[2, 9, 10],
+                    tags: &[("highway", "primary")],
+                },
+            ],
+            &[],
+        );
+        let graph = &compiled.road_graph;
+        let signs = |way_id: i64| {
+            let info = graph
+                .graph
+                .edge_references()
+                .map(|edge| {
+                    graph
+                        .shared_edge_info(edge.weight().shared_edge_info_id)
+                        .unwrap()
+                })
+                .find(|info| info.osm_way_id == way_id)
+                .unwrap_or_else(|| panic!("no edge of way {way_id}"));
+            (
+                info.attrs.junction_ref.as_deref().map(str::to_string),
+                info.attrs.destination.as_deref().map(str::to_string),
+            )
+        };
+        let some = |value: &str| Some(value.to_string());
+        assert_eq!(signs(10), (some("7A"), some("Tarnów")));
+        assert_eq!(signs(11), (None, None));
+        assert_eq!(signs(12), (some("7A"), some("Tarnów")));
+        assert_eq!(signs(13), (some("8"), None));
+        assert_eq!(signs(14), (some("7A"), some("Rzeszów")));
+        assert_eq!(signs(15), (None, None));
+        assert_eq!(signs(1), (None, None));
     }
 
     #[test]

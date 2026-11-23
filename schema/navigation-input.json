@@ -47,6 +47,17 @@
         "format": "double"
       }
     },
+    "shapeSegmentSpeedLimitsKph": {
+      "description": "The speed limit (km/h) of each of `shape_segments`' edges, `null`\nwhere unknown or for a connector, for progress's `speedLimitKph`.",
+      "type": "array",
+      "items": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "format": "float"
+      }
+    },
     "shapeSegments": {
       "type": "array",
       "default": [],
