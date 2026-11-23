@@ -146,7 +146,8 @@ table behind an off-by-default compiler switch (#82), two-phase snapping
 (QW-2, #83), `wayfarer nearest` and distance contours in the CLI (#84),
 multi-origin isochrones (FEAT-A2 core, #85), parallel customization (#86),
 structured guidance with modifiers, exit numbers and signs (FEAT-G0,
-FEAT-G4a, #87), and path-order sums (#90).
+FEAT-G4a, #87), path-order sums (#90), and fastest-time isochrones as an
+option (FEAT-A10, #91).
 
 ## 3. Gap analysis
 
@@ -859,7 +860,7 @@ Sub-lanes run independently of each other.
 | FEAT-A7 | Map matching attributes per sample. **Done in 0.4** (#73) | P2 | — |
 | FEAT-A8 | Polygon reachability (time to reach an area, coverage of an area) | P1 | FEAT-A2, FEAT-A4 |
 | FEAT-A9 | Distance contours. **Done in 0.4** (#77); CLI flag on `main` (#84) | P1 | — |
-| FEAT-A10 | Fastest-time (duration-ordered) isochrones as an option | P1 | FEAT-A2 |
+| FEAT-A10 | Fastest-time (duration-ordered) isochrones as an option. On `main` (#91) | P1 | FEAT-A2 |
 | FEAT-A11 | Overlays on matrix and isochrone requests. **Done in 0.4** (#77) | P1 | — |
 
 **`FEAT-G` Guidance**
@@ -992,8 +993,8 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.2 | Released 2026-11-19: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
-| 0.5 | Under way: format 3 behind an off-by-default switch (FMT 1 on `main`), FEAT-A2 core, FEAT-G0 and G4a, two-phase snapping (QW-2), parallel customization, matrix and compile speed-ups (all on `main`); then FEAT-D2 (clip), approach offsets (QW-3), the route request options, lean leg records; FEAT-P0a, P0d and W0 after decisions D2 and D3; FEAT-X1 after QW-2 and QW-3 |
-| 0.6 – 0.9 | FEAT-X1 if not in 0.5, X2a, X1b, A10, A1, A3, A8, A5, D3, G5a; FEAT-T1 reader behind `experimental-elevation`; API-0b (builders, `apiVersion` and `warnings`, one release tag); QA-2 and QA-3 scheduled; QA-4 |
+| 0.5 | Under way: format 3 behind an off-by-default switch (FMT 1 on `main`), FEAT-A2 core, FEAT-A10, FEAT-G0 and G4a, two-phase snapping (QW-2), parallel customization, matrix and compile speed-ups (all on `main`); then FEAT-D2 (clip), approach offsets (QW-3), the route request options, lean leg records; FEAT-P0a, P0d and W0 after decisions D2 and D3; FEAT-X1 after QW-2 and QW-3 |
+| 0.6 – 0.9 | FEAT-X1 if not in 0.5, X2a, X1b, A1, A3, A8, A5, D3, G5a; FEAT-T1 reader behind `experimental-elevation`; API-0b (builders, `apiVersion` and `warnings`, one release tag); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; format 3 (layout changes only); FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
 | After the bump | Optional sections as each is ready: FEAT-T1/T2/T4/T5, X2, X3a then X3, P1, P2 extras, G4b, W4 |
