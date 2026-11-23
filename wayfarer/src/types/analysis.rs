@@ -44,6 +44,10 @@ fn include_edge_ids() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn is_true(value: &bool) -> bool {
     *value
 }
@@ -115,6 +119,28 @@ pub enum RouteIsochroneMetric {
     DistanceM,
 }
 
+/// How an isochrone expansion orders the paths it extends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RouteIsochroneOrder {
+    /// By cost, as routes choose: each edge is reached along its cheapest
+    /// path, and time and distance contours measure that path.
+    #[default]
+    Cost,
+    /// By travel time (fastest-time contours): each edge is reached along
+    /// its fastest path, and cost and distance contours measure that path.
+    /// Time starts at each origin's nearest road (farther candidates are
+    /// not seeded), plus the origin's `startOffsetS`.
+    Time,
+}
+
+impl RouteIsochroneOrder {
+    fn is_cost(&self) -> bool {
+        *self == Self::Cost
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +187,16 @@ pub struct RouteIsochroneRequest {
     /// theirs (the search is the same; the output is smaller).
     #[serde(default = "include_edge_ids", skip_serializing_if = "is_true")]
     pub include_edge_ids: bool,
+    /// How the expansion orders paths: by cost (default) or by travel time
+    /// (fastest-time contours, which start offsets need).
+    #[serde(default, skip_serializing_if = "RouteIsochroneOrder::is_cost")]
+    pub order: RouteIsochroneOrder,
+    /// `true` reports which origin reaches each edge first on each bucket's
+    /// metric (`edgeOrigins`, parallel to `edgeIds`) and which origin's
+    /// path each boundary fragment ends (`origin`); 0 is `origin`, 1 the
+    /// first of `origins`, and so on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_origins: bool,
 }
 
 /// One more origin of a multi-origin isochrone (see
@@ -170,11 +206,19 @@ pub struct RouteIsochroneRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RouteIsochroneOrigin {
     pub point: GeoPoint,
+    /// Seconds after the other origins' start that this one starts ("team 3
+    /// leaves in 10 minutes"): its time contours are that much shorter.
+    /// Needs `order: time`; finite and not negative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset_s: Option<f64>,
 }
 
 impl RouteIsochroneOrigin {
     pub fn new(point: GeoPoint) -> Self {
-        Self { point }
+        Self {
+            point,
+            start_offset_s: None,
+        }
     }
 }
 
@@ -194,6 +238,8 @@ impl RouteIsochroneRequest {
             overlays: Vec::new(),
             departure_at_ms: None,
             include_edge_ids: true,
+            order: RouteIsochroneOrder::Cost,
+            include_origins: false,
         }
     }
 }
@@ -205,6 +251,10 @@ pub struct RouteIsochroneBucket {
     pub contour: f64,
     pub metric: RouteIsochroneMetric,
     pub edge_ids: Vec<u64>,
+    /// With `includeOrigins`, the origin that reaches each of `edge_ids`
+    /// first on this bucket's metric, parallel to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_origins: Vec<u16>,
     #[serde(default)]
     pub boundary_fragments: Vec<RouteIsochroneBoundaryFragment>,
 }
@@ -220,6 +270,9 @@ pub struct RouteIsochroneBoundaryFragment {
     pub end_fraction: f64,
     pub start_metric: f64,
     pub end_metric: f64,
+    /// With `includeOrigins`, the origin whose path the fragment ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

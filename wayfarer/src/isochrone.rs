@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
@@ -6,8 +6,8 @@ use crate::limits::{MAX_ISOCHRONE_CONTOURS, MAX_ISOCHRONE_ORIGINS};
 use crate::package::destination::relax_split_costs;
 use crate::package::search::analysis::{
     AnalysisContour, AnalysisCounters, AnalysisPoint, AnalysisQuery, ContourMetric,
-    IsochroneOutcome, overlay_split_costs, request_cost_overrides, request_duration_overrides,
-    resolve_edge_id, resolve_location,
+    IsochroneOutcome, IsochroneSeeding, overlay_split_costs, request_cost_overrides,
+    request_duration_overrides, resolve_edge_id, resolve_location,
 };
 use crate::package::search::patch::{PatchCosts, PatchGraph, PatchQuery, analysis_overlay};
 use crate::search::RoutingEngine;
@@ -16,8 +16,8 @@ use crate::trip::{
 };
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, GeoPoint, RouteError, RouteIsochroneBoundaryFragment,
-    RouteIsochroneBucket, RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneRequest,
-    RouteIsochroneResult,
+    RouteIsochroneBucket, RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneOrder,
+    RouteIsochroneRequest, RouteIsochroneResult,
 };
 
 impl RoutingEngine {
@@ -48,9 +48,17 @@ impl RoutingEngine {
         )?;
         request.options.cancellation.check()?;
         let mut result = self.isochrone_from(&request)?;
-        if !request.include_edge_ids {
-            for bucket in &mut result.buckets {
+        for bucket in &mut result.buckets {
+            if !request.include_edge_ids {
                 bucket.edge_ids = Vec::new();
+            }
+            if !request.include_edge_ids || !request.include_origins {
+                bucket.edge_origins = Vec::new();
+            }
+            if !request.include_origins {
+                for fragment in &mut bucket.boundary_fragments {
+                    fragment.origin = None;
+                }
             }
         }
         Ok(result)
@@ -244,12 +252,7 @@ fn merge_outcomes(
         .collect::<rustc_hash::FxHashMap<_, _>>();
     for edge in other.reached {
         match slot.get(&edge.edge) {
-            Some(index) => {
-                let kept = &mut into.reached[*index];
-                kept.cost = kept.cost.min(edge.cost);
-                kept.duration_s = kept.duration_s.min(edge.duration_s);
-                kept.distance_m = kept.distance_m.min(edge.distance_m);
-            }
+            Some(index) => into.reached[*index].merge_edge(&edge),
             None => {
                 slot.insert(edge.edge, into.reached.len());
                 into.reached.push(edge);
@@ -304,8 +307,14 @@ pub(crate) struct OriginCandidates {
     pub(crate) snapped: Vec<CorrelatedLocation>,
 }
 
+/// How much farther than the nearest candidate a candidate may snap and
+/// still count as on the nearest road (see [`origin_candidates`]).
+const NEAREST_ROAD_TOLERANCE_M: f64 = 0.01;
+
 /// Snaps every origin of `request` with `search`. `NoCandidate` for the
-/// origin endpoint when any origin has no candidate.
+/// origin endpoint when any origin has no candidate. Ordered by time, only
+/// each origin's nearest candidates are kept: time starts on the nearest
+/// road, as an approach penalty is no travel time.
 pub(crate) fn origin_candidates(
     request: &RouteIsochroneRequest,
     mut search: impl FnMut(GeoPoint) -> Vec<CorrelatedLocation>,
@@ -317,11 +326,24 @@ pub(crate) fn origin_candidates(
     };
     let points = std::iter::once(request.origin).chain(request.origins.iter().map(|o| o.point));
     for (index, point) in points.enumerate() {
-        let candidates = search(point);
+        let mut candidates = search(point);
         let nearest = candidates
             .first()
             .cloned()
             .ok_or(RouteError::NoCandidate { endpoint: "origin" })?;
+        if request.order == RouteIsochroneOrder::Time {
+            let snap = |candidate: &CorrelatedLocation| {
+                if candidate.distance_m.is_finite() {
+                    candidate.distance_m.max(0.0)
+                } else {
+                    0.0
+                }
+            };
+            let least = candidates.iter().map(snap).fold(f64::INFINITY, f64::min);
+            // Both directions of the nearest road snap at the same distance,
+            // up to rounding.
+            candidates.retain(|candidate| snap(candidate) <= least + NEAREST_ROAD_TOLERANCE_M);
+        }
         origins.snapped.push(nearest);
         origins
             .targets
@@ -347,6 +369,50 @@ impl OriginCandidates {
             snapped: self.snapped.clone(),
         }
     }
+
+    /// Each origin's start offset in seconds, origin 0 first.
+    pub(crate) fn offsets_s(request: &RouteIsochroneRequest) -> Vec<f64> {
+        std::iter::once(0.0)
+            .chain(
+                request
+                    .origins
+                    .iter()
+                    .map(|origin| origin.start_offset_s.unwrap_or(0.0)),
+            )
+            .collect()
+    }
+}
+
+/// A bucket's edge ids, ascending, and the origin of each (the one with the
+/// least value on the bucket's metric; on a tie, the lowest), from reached
+/// edges as `(edge id, value, origin)`.
+pub(crate) fn bucket_edges(
+    reached: impl IntoIterator<Item = (u64, f64, u16)>,
+    contour: &RouteIsochroneContour,
+) -> (Vec<u64>, Vec<u16>) {
+    let mut edges = BTreeMap::<u64, (f64, u16)>::new();
+    for (edge_id, value, origin) in reached {
+        if value > contour.contour {
+            continue;
+        }
+        let entry = edges.entry(edge_id).or_insert((value, origin));
+        if (value, origin) < *entry {
+            *entry = (value, origin);
+        }
+    }
+    edges
+        .into_iter()
+        .map(|(edge_id, (_, origin))| (edge_id, origin))
+        .unzip()
+}
+
+/// The index of `metric` in `ReachedEdge::origins` (cost, time, distance).
+fn metric_index(metric: RouteIsochroneMetric) -> usize {
+    match metric {
+        RouteIsochroneMetric::Cost => 0,
+        RouteIsochroneMetric::TimeSeconds => 1,
+        RouteIsochroneMetric::DistanceM => 2,
+    }
 }
 
 /// The request against [`crate::limits`]: one to [`MAX_ISOCHRONE_ORIGINS`]
@@ -367,6 +433,25 @@ fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
     {
         return Err(RouteError::InvalidRequest {
             reason: "origin coordinates",
+        });
+    }
+    let offsets = request
+        .origins
+        .iter()
+        .filter_map(|origin| origin.start_offset_s);
+    if offsets
+        .clone()
+        .any(|offset| !offset.is_finite() || offset < 0.0)
+    {
+        return Err(RouteError::InvalidRequest {
+            reason: "isochrone start offsets",
+        });
+    }
+    // Under cost order, an offset in seconds would not decide which origin
+    // reaches an edge first.
+    if request.order != RouteIsochroneOrder::Time && offsets.clone().any(|offset| offset > 0.0) {
+        return Err(RouteError::InvalidRequest {
+            reason: "isochrone start offsets need order time",
         });
     }
     if request.contours.len() > MAX_ISOCHRONE_CONTOURS {
@@ -556,6 +641,12 @@ impl RoutingEngine {
             .as_ref()
             .map(|overlay| PatchGraph::new(view, overlay, &costs, &resolve_id))
             .filter(|patch| !patch.is_empty());
+        let offsets_s = OriginCandidates::offsets_s(request);
+        let seeding = IsochroneSeeding {
+            by_duration: request.order == RouteIsochroneOrder::Time,
+            origin_of: &origin_candidates.targets,
+            offsets_s: &offsets_s,
+        };
         let started = std::time::Instant::now();
         let mut state = graph.take_state();
         let outcome = match &patch {
@@ -589,10 +680,11 @@ impl RoutingEngine {
                     patch,
                     &patch_query,
                     &contours,
+                    seeding,
                 )
             }
             None => crate::package::search::analysis::isochrone(
-                view, &mut state, &query, &origins, &contours,
+                view, &mut state, &query, &origins, &contours, seeding,
             ),
         };
         graph.return_state(state);
@@ -641,6 +733,7 @@ impl RoutingEngine {
                     end_fraction: crossing.end_fraction.clamp(0.0, 1.0),
                     start_metric: crossing.start_metric,
                     end_metric: contour.contour,
+                    origin: Some(crossing.origin),
                 },
             });
         }
@@ -655,25 +748,25 @@ impl RoutingEngine {
         let buckets = request
             .contours
             .iter()
-            .map(|contour| RouteIsochroneBucket {
-                contour: contour.contour,
-                metric: contour.metric,
-                edge_ids: outcome
-                    .reached
-                    .iter()
-                    .filter(|edge| {
-                        let value = match contour.metric {
-                            RouteIsochroneMetric::Cost => edge.cost,
-                            RouteIsochroneMetric::TimeSeconds => edge.duration_s,
-                            RouteIsochroneMetric::DistanceM => edge.distance_m,
-                        };
-                        value <= contour.contour
-                    })
-                    .map(|edge| view.edge_id(edge.edge as usize))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                boundary_fragments: boundary_fragments_for_contour(&boundary_fragments, contour),
+            .map(|contour| {
+                let index = metric_index(contour.metric);
+                let (edge_ids, edge_origins) = bucket_edges(
+                    outcome.reached.iter().map(|edge| {
+                        let value = [edge.cost, edge.duration_s, edge.distance_m][index];
+                        (view.edge_id(edge.edge as usize), value, edge.origins[index])
+                    }),
+                    contour,
+                );
+                RouteIsochroneBucket {
+                    contour: contour.contour,
+                    metric: contour.metric,
+                    edge_ids,
+                    edge_origins,
+                    boundary_fragments: boundary_fragments_for_contour(
+                        &boundary_fragments,
+                        contour,
+                    ),
+                }
             })
             .collect();
         RouteIsochroneResult {
@@ -1043,5 +1136,109 @@ mod tests {
         let result = engine.isochrone(with_more).unwrap();
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["origins"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn start_offsets_need_time_order_and_a_finite_non_negative_value() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        let mut request = minutes(GeoPoint::new(52.0, 21.0056), 2.0);
+        let later = |offset: f64| crate::RouteIsochroneOrigin {
+            point: GeoPoint::new(51.993, 21.0024),
+            start_offset_s: Some(offset),
+        };
+        // A zero offset changes nothing, whatever the order.
+        request.origins = vec![later(0.0)];
+        engine.isochrone(request.clone()).unwrap();
+        request.origins = vec![later(30.0)];
+        assert_eq!(
+            engine.isochrone(request.clone()).unwrap_err(),
+            RouteError::InvalidRequest {
+                reason: "isochrone start offsets need order time"
+            }
+        );
+        request.order = crate::RouteIsochroneOrder::Time;
+        let result = engine.isochrone(request.clone()).unwrap();
+        assert!(!result.buckets[0].edge_ids.is_empty());
+        for offset in [-1.0, f64::NAN, f64::INFINITY] {
+            request.origins = vec![later(offset)];
+            assert_eq!(
+                engine.isochrone(request.clone()).unwrap_err(),
+                RouteError::InvalidRequest {
+                    reason: "isochrone start offsets"
+                },
+                "{offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_order_starts_on_the_nearest_road_only() {
+        // The two streets of the approach tests, 10 m and 40 m from the
+        // origin: by cost, the farther one is seeded too (at its approach
+        // cost); by time, only the nearer one, so the farther one is
+        // reached later, along the streets, or not at all.
+        let graph = graph(vec![
+            street(1, (51.99991, 21.0), (51.99991, 21.004), (1, 2)),
+            street(2, (52.00036, 21.0), (52.00036, 21.004), (3, 4)),
+        ]);
+        let engine = crate::test_support::engine(&graph);
+        let mut request = minutes(GeoPoint::new(52.0, 21.002), 1.0);
+        let by_cost = engine.isochrone(request.clone()).unwrap();
+        request.order = crate::RouteIsochroneOrder::Time;
+        let by_time = engine.isochrone(request).unwrap();
+        let edges = |result: &crate::RouteIsochroneResult| {
+            result.buckets[0]
+                .boundary_fragments
+                .iter()
+                .map(|fragment| fragment.edge_id)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            edges(&by_cost),
+            std::collections::BTreeSet::from([1, 2, 3, 4])
+        );
+        assert_eq!(edges(&by_time), std::collections::BTreeSet::from([1, 2]));
+        assert_eq!(by_cost.origin, by_time.origin);
+    }
+
+    #[test]
+    fn order_and_origin_attribution_are_optional_on_the_wire() {
+        let request = minutes(GeoPoint::new(52.0, 21.0056), 2.0);
+        let json = serde_json::to_value(&request).unwrap();
+        for key in ["order", "includeOrigins"] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+        let mut timed = request.clone();
+        timed.order = crate::RouteIsochroneOrder::Time;
+        timed.include_origins = true;
+        timed.origins = vec![crate::RouteIsochroneOrigin {
+            point: GeoPoint::new(51.993, 21.0024),
+            start_offset_s: Some(30.0),
+        }];
+        let json = serde_json::to_value(&timed).unwrap();
+        assert_eq!(json["order"], "time");
+        assert_eq!(json["includeOrigins"], true);
+        assert_eq!(json["origins"][0]["startOffsetS"], 30.0);
+        assert_eq!(
+            serde_json::from_value::<RouteIsochroneRequest>(json).unwrap(),
+            timed
+        );
+
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        let json = serde_json::to_value(engine.isochrone(request).unwrap()).unwrap();
+        for bucket in json["buckets"].as_array().unwrap() {
+            assert!(bucket.get("edgeOrigins").is_none());
+            for fragment in bucket["boundaryFragments"].as_array().unwrap() {
+                assert!(fragment.get("origin").is_none());
+            }
+        }
+        let json = serde_json::to_value(engine.isochrone(timed).unwrap()).unwrap();
+        let bucket = &json["buckets"][0];
+        assert_eq!(
+            bucket["edgeOrigins"].as_array().unwrap().len(),
+            bucket["edgeIds"].as_array().unwrap().len()
+        );
     }
 }

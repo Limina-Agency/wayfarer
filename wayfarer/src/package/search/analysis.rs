@@ -579,6 +579,81 @@ pub(crate) struct ReachedEdge {
     pub cost: f64,
     pub duration_s: f64,
     pub distance_m: f64,
+    /// The origin each of the least cost, duration and distance came from
+    /// (see [`IsochroneSeeding`]); on a tie, the lowest origin.
+    pub origins: [u16; 3],
+}
+
+impl ReachedEdge {
+    /// Keeps the least of each metric of `other` too, with its origin.
+    pub(crate) fn merge_edge(&mut self, other: &ReachedEdge) {
+        for (index, (kept, value)) in [
+            (&mut self.cost, other.cost),
+            (&mut self.duration_s, other.duration_s),
+            (&mut self.distance_m, other.distance_m),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let origin = other.origins[index];
+            if value < *kept || (value == *kept && origin < self.origins[index]) {
+                *kept = value;
+                self.origins[index] = origin;
+            }
+        }
+    }
+
+    /// Keeps the least of each metric and the origin it came from.
+    pub(crate) fn merge(&mut self, (cost, duration_s, distance_m): (f64, f64, f64), origin: u16) {
+        for (index, (kept, value)) in [
+            (&mut self.cost, cost),
+            (&mut self.duration_s, duration_s),
+            (&mut self.distance_m, distance_m),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if value < *kept || (value == *kept && origin < self.origins[index]) {
+                *kept = value;
+                self.origins[index] = origin;
+            }
+        }
+    }
+}
+
+/// How an isochrone orders its labels and where its origins start.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct IsochroneSeeding<'a> {
+    /// Order and dominate labels by duration (fastest-time contours)
+    /// instead of by cost; cost then rides along, as duration does by
+    /// default.
+    pub by_duration: bool,
+    /// The origin of each origin point (empty: every point is origin 0).
+    pub origin_of: &'a [usize],
+    /// Each origin's start offset in seconds, by origin (empty: none).
+    pub offsets_s: &'a [f64],
+}
+
+impl IsochroneSeeding<'_> {
+    /// The origin of origin point `point`.
+    pub(crate) fn origin(&self, point: usize) -> u16 {
+        self.origin_of.get(point).map_or(0, |origin| *origin as u16)
+    }
+
+    /// The start offset of origin point `point`, in seconds.
+    pub(crate) fn offset_s(&self, point: usize) -> f64 {
+        self.origin_of
+            .get(point)
+            .and_then(|origin| self.offsets_s.get(*origin))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// The queue priority (and dominance key) of a label.
+    #[inline]
+    pub(crate) fn key(&self, cost: f64, duration_s: f64) -> f64 {
+        if self.by_duration { duration_s } else { cost }
+    }
 }
 
 /// Where contour `contour` crosses a relaxed edge: the edge is reached from
@@ -590,6 +665,8 @@ pub(crate) struct BoundaryCrossing {
     pub start_fraction: f64,
     pub end_fraction: f64,
     pub start_metric: f64,
+    /// The origin of the label that crossed.
+    pub origin: u16,
 }
 
 #[derive(Debug, Default)]
@@ -670,9 +747,37 @@ impl Expansion<'_, '_> {
         priority: f64,
         state: u32,
     ) -> bool {
+        self.push_by(
+            edge, pred, cost, duration_s, distance_m, priority, state, false,
+        )
+    }
+
+    /// [`Self::push`], dominated by duration instead of cost when
+    /// `by_duration` (fastest-time isochrones).
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn push_by(
+        &mut self,
+        edge: u32,
+        pred: u32,
+        cost: f64,
+        duration_s: f64,
+        distance_m: f64,
+        priority: f64,
+        state: u32,
+        by_duration: bool,
+    ) -> bool {
         let slot = self.state.slot(edge, state);
-        if slot != NO_LABEL && self.state.analysis_labels[slot as usize].cost <= cost {
-            return false;
+        if slot != NO_LABEL {
+            let existing = &self.state.analysis_labels[slot as usize];
+            let dominated = if by_duration {
+                existing.duration_s <= duration_s
+            } else {
+                existing.cost <= cost
+            };
+            if dominated {
+                return false;
+            }
         }
         let label = self.state.analysis_labels.len() as u32;
         self.state.analysis_labels.push(AnalysisLabel {
@@ -1400,6 +1505,7 @@ fn reach(
     reached: &mut Vec<ReachedEdge>,
     edge: u32,
     (cost, duration_s, distance_m): (f64, f64, f64),
+    origin: u16,
 ) {
     let slot = state.edge_aux.get_mut(edge);
     if *slot == NO_LABEL {
@@ -1409,23 +1515,24 @@ fn reach(
             cost,
             duration_s,
             distance_m,
+            origins: [origin; 3],
         });
     } else {
-        let entry = &mut reached[*slot as usize];
-        entry.cost = entry.cost.min(cost);
-        entry.duration_s = entry.duration_s.min(duration_s);
-        entry.distance_m = entry.distance_m.min(distance_m);
+        reached[*slot as usize].merge((cost, duration_s, distance_m), origin);
     }
 }
 
 /// Every edge reachable from the origin candidates within the largest
 /// contour, plus the points where each contour crosses a relaxed edge.
+/// `seeding` orders labels by cost or duration and gives each origin point
+/// its origin and start offset.
 pub(crate) fn isochrone(
     graph: SearchGraph<'_>,
     state: &mut SearchState,
     query: &AnalysisQuery<'_>,
     origins: &[AnalysisPoint],
     contours: &[AnalysisContour],
+    seeding: IsochroneSeeding<'_>,
 ) -> IsochroneOutcome {
     let contour_reach = ContourReach::of(contours);
     let within = |cost: f64, duration_s: f64, distance_m: f64| {
@@ -1440,12 +1547,15 @@ pub(crate) fn isochrone(
         seq: 0,
     };
     let mut outcome = IsochroneOutcome::default();
+    // The origin of each label, by label index.
+    let mut label_origin = Vec::<u16>::new();
     let cross = |crossings: &mut Vec<BoundaryCrossing>,
                  edge: u32,
                  start_fraction: f64,
                  costs: (f64, f64),
                  durations: (f64, f64),
-                 distances: (f64, f64)| {
+                 distances: (f64, f64),
+                 origin: u16| {
         for (index, contour) in contours.iter().enumerate() {
             let (start, end) = contour.metric.of(costs, durations, distances);
             if !(start < contour.limit && contour.limit < end) || end - start <= f64::EPSILON {
@@ -1458,53 +1568,63 @@ pub(crate) fn isochrone(
                 start_fraction,
                 end_fraction: start_fraction + (1.0 - start_fraction) * ratio,
                 start_metric: start,
+                origin,
             });
         }
     };
 
-    for origin in origins {
+    for (point, origin) in origins.iter().enumerate() {
         let edge_cost = search.cost(origin.edge);
         if !edge_cost.is_finite() {
             continue;
         }
         // A farther candidate starts at its approach cost. The approach is a
-        // penalty, not travel, so time starts at zero (as in matrix rows).
+        // penalty, not travel, so time starts at zero (as in matrix rows),
+        // or at the origin's start offset.
+        let (origin_index, offset_s) = (seeding.origin(point), seeding.offset_s(point));
         let remaining = (1.0 - origin.fraction).clamp(0.0, 1.0);
         let cost = origin.approach + edge_cost * remaining;
-        let duration_s = search.duration(origin.edge) * remaining;
+        let duration_s = offset_s + search.duration(origin.edge) * remaining;
         let distance_m = f64::from(graph.edge_length[origin.edge as usize]) * remaining;
         cross(
             &mut outcome.crossings,
             origin.edge,
             origin.fraction,
             (origin.approach, cost),
-            (0.0, duration_s),
+            (offset_s, duration_s),
             (0.0, distance_m),
+            origin_index,
         );
         // A seed is labelled even beyond every contour (its successors are
         // then out of range too), but only reported when within one.
         let state = search.next_state(ROOT, origin.edge);
-        search.push(
+        if search.push_by(
             origin.edge,
             NO_LABEL,
             cost,
             duration_s,
             distance_m,
-            cost,
+            seeding.key(cost, duration_s),
             state,
-        );
+            seeding.by_duration,
+        ) {
+            label_origin.resize(search.state.analysis_labels.len(), 0);
+            *label_origin.last_mut().unwrap() = origin_index;
+        }
         if within(cost, duration_s, distance_m) {
             reach(
                 search.state,
                 &mut outcome.reached,
                 origin.edge,
                 (cost, duration_s, distance_m),
+                origin_index,
             );
         }
     }
 
     'search: while let Some((label_index, label, label_state, _)) = search.pop() {
         outcome.counters.settled_edge_count += 1;
+        let origin = label_origin[label_index as usize];
         let node = graph.edge_target[label.edge as usize];
         for next in search.out_edges(node) {
             outcome.counters.visited_edge_count += 1;
@@ -1561,17 +1681,31 @@ pub(crate) fn isochrone(
                 metrics.0,
                 metrics.1,
                 metrics.2,
+                origin,
             );
             if !within(cost, duration_s, distance_m) {
                 continue;
             }
             let state = search.next_state(label_state, next);
-            search.push(next, label_index, cost, duration_s, distance_m, cost, state);
+            if search.push_by(
+                next,
+                label_index,
+                cost,
+                duration_s,
+                distance_m,
+                seeding.key(cost, duration_s),
+                state,
+                seeding.by_duration,
+            ) {
+                label_origin.resize(search.state.analysis_labels.len(), 0);
+                *label_origin.last_mut().unwrap() = origin;
+            }
             reach(
                 search.state,
                 &mut outcome.reached,
                 next,
                 (cost, duration_s, distance_m),
+                origin,
             );
         }
     }

@@ -1846,14 +1846,29 @@ impl PatchRun<'_, '_, '_, '_, '_> {
     }
 
     fn push_label(&mut self, label: Label, priority: f64) {
-        let (arc, cost, state) = (label.arc, label.cost, label.state);
+        self.push_label_by(label, priority, false);
+    }
+
+    /// [`Self::push_label`], dominated by duration instead of cost when
+    /// `by_duration` (fastest-time isochrones).
+    #[inline]
+    fn push_label_by(&mut self, label: Label, priority: f64, by_duration: bool) {
+        let (arc, state) = (label.arc, label.state);
         // The lower bound proves the destination unreachable from here.
         if !priority.is_finite() {
             return;
         }
         let slot = self.slot(arc, state);
-        if slot != NO_LABEL && self.labels[slot as usize].cost <= cost {
-            return;
+        if slot != NO_LABEL {
+            let existing = &self.labels[slot as usize];
+            let dominated = if by_duration {
+                existing.duration_s <= label.duration_s
+            } else {
+                existing.cost <= label.cost
+            };
+            if dominated {
+                return;
+            }
         }
         let entry = label;
         let label = self.labels.len() as u32;
@@ -2925,8 +2940,18 @@ pub(crate) fn isochrone(
     patch: &PatchGraph<'_>,
     query: &PatchQuery<'_>,
     contours: &[super::analysis::AnalysisContour],
+    seeding: super::analysis::IsochroneSeeding<'_>,
 ) -> super::analysis::IsochroneOutcome {
     use super::analysis::{BoundaryCrossing, IsochroneOutcome, ReachedEdge};
+    // A label's origin (its seed's candidate's); the overlay's endpoint
+    // connectors belong to routes and seed none here.
+    let origin_of = |candidate: u32| {
+        if candidate == u32::MAX {
+            0
+        } else {
+            seeding.origin(candidate as usize)
+        }
+    };
     let mut arcs = RunArcs::new(patch);
     let (origin_approach, _) = query.approaches();
     let seeds = patch.seeds(
@@ -2951,7 +2976,8 @@ pub(crate) fn isochrone(
     let cross = |crossings: &mut Vec<BoundaryCrossing>,
                  edge: u32,
                  (start_fraction, end_fraction): (f64, f64),
-                 (costs, durations, distances): Spans| {
+                 (costs, durations, distances): Spans,
+                 origin: u16| {
         for (index, contour) in contours.iter().enumerate() {
             let (start, end) = contour.metric.of(costs, durations, distances);
             if !(start < contour.limit && contour.limit < end) || end - start <= f64::EPSILON {
@@ -2964,34 +2990,32 @@ pub(crate) fn isochrone(
                 start_fraction,
                 end_fraction: start_fraction + (end_fraction - start_fraction) * ratio,
                 start_metric: start,
+                origin,
             });
         }
     };
     let mut outcome = IsochroneOutcome::default();
     let mut reached_slot = FxHashMap::<u32, usize>::default();
-    let reach =
-        |reached: &mut Vec<ReachedEdge>,
-         reached_slot: &mut FxHashMap<u32, usize>,
-         edge: u32,
-         (cost, duration_s, distance_m): (f64, f64, f64)| match reached_slot.get(&edge) {
-            Some(slot) => {
-                let entry = &mut reached[*slot];
-                entry.cost = entry.cost.min(cost);
-                entry.duration_s = entry.duration_s.min(duration_s);
-                entry.distance_m = entry.distance_m.min(distance_m);
-            }
-            None => {
-                reached_slot.insert(edge, reached.len());
-                reached.push(ReachedEdge {
-                    edge,
-                    cost,
-                    duration_s,
-                    distance_m,
-                });
-            }
-        };
-    // The cheapest cost each edge was completed at in the root restriction
-    // state, for the dominance check where labels are settled.
+    let reach = |reached: &mut Vec<ReachedEdge>,
+                 reached_slot: &mut FxHashMap<u32, usize>,
+                 edge: u32,
+                 metrics: (f64, f64, f64),
+                 origin: u16| match reached_slot.get(&edge) {
+        Some(slot) => reached[*slot].merge(metrics, origin),
+        None => {
+            reached_slot.insert(edge, reached.len());
+            reached.push(ReachedEdge {
+                edge,
+                cost: metrics.0,
+                duration_s: metrics.1,
+                distance_m: metrics.2,
+                origins: [origin; 3],
+            });
+        }
+    };
+    // The least key (cost, or duration when ordered by it) each edge was
+    // completed at in the root restriction state, for the dominance check
+    // where labels are settled.
     let mut root_completed = FxHashMap::<u32, f64>::default();
     let complete_in_root = |completed: &mut FxHashMap<u32, f64>, edge: u32, cost: f64| {
         let entry = completed.entry(edge).or_insert(f64::INFINITY);
@@ -3028,12 +3052,18 @@ pub(crate) fn isochrone(
         }
         // A farther candidate starts at its approach cost (already in the
         // seed arc's cost). The approach is a penalty, not travel, so time
-        // starts at zero (as in matrix rows and `analysis::isochrone`).
+        // starts at zero (as in matrix rows and `analysis::isochrone`), or
+        // at the origin's start offset.
         let approach = origin_approach
             .get(*origin as usize)
             .copied()
             .unwrap_or(0.0);
-        let duration_s = info.duration_s;
+        let offset_s = if *origin == u32::MAX {
+            0.0
+        } else {
+            seeding.offset_s(*origin as usize)
+        };
+        let duration_s = offset_s + info.duration_s;
         let (start, end) = span(arcs.arc(*arc));
         cross(
             &mut outcome.crossings,
@@ -3041,27 +3071,34 @@ pub(crate) fn isochrone(
             (start, end),
             (
                 (approach, info.cost),
-                (0.0, duration_s),
+                (offset_s, duration_s),
                 (0.0, info.distance_m),
             ),
+            origin_of(*origin),
         );
         // A seed is labelled even beyond every contour (its successors are
         // then out of range too), and counts as traversing its edge.
         let seed_state = search.seed_state(&info, true);
+        let key = seeding.key(info.cost, duration_s);
         if seed_state == ROOT && patch.completes_range(info.edge, end) {
-            complete_in_root(&mut root_completed, info.edge, info.cost);
+            complete_in_root(&mut root_completed, info.edge, key);
         }
-        search.push(
-            id,
-            NO_LABEL,
-            info.cost,
-            duration_s,
-            info.distance_m,
-            info.edge,
-            true,
-            *origin,
-            seed_state,
-            info.cost,
+        search.push_label_by(
+            Label {
+                arc: id,
+                pred: NO_LABEL,
+                cost: info.cost,
+                duration_s,
+                distance_m: info.distance_m,
+                last_edge: info.edge,
+                traversed: true,
+                origin: *origin,
+                state: seed_state,
+                via: NO_LABEL,
+                back: false,
+            },
+            key,
+            seeding.by_duration,
         );
         if within(info.cost, duration_s, info.distance_m) && patch.completes_range(info.edge, end) {
             reach(
@@ -3069,6 +3106,7 @@ pub(crate) fn isochrone(
                 &mut reached_slot,
                 info.edge,
                 (info.cost, duration_s, info.distance_m),
+                origin_of(*origin),
             );
         }
     }
@@ -3089,9 +3127,10 @@ pub(crate) fn isochrone(
         // full long before.
         if label.state == ROOT
             && label.last_edge != NO_NODE
-            && root_completed
-                .get(&label.last_edge)
-                .is_some_and(|cost| *cost < label.cost - tie_window(label.cost))
+            && root_completed.get(&label.last_edge).is_some_and(|key| {
+                let own = seeding.key(label.cost, label.duration_s);
+                *key < own - tie_window(own)
+            })
         {
             continue;
         }
@@ -3162,7 +3201,14 @@ pub(crate) fn isochrone(
                 if crosses(metrics) && search.path_contains_edge(entry.label, info.edge) {
                     continue;
                 }
-                cross(&mut outcome.crossings, info.edge, (start, end), metrics);
+                let origin = origin_of(label.origin);
+                cross(
+                    &mut outcome.crossings,
+                    info.edge,
+                    (start, end),
+                    metrics,
+                    origin,
+                );
                 completes = next < base || patch.completes_range(info.edge, end);
                 if within(cost, duration_s, distance_m) && completes {
                     reach(
@@ -3170,6 +3216,7 @@ pub(crate) fn isochrone(
                         &mut reached_slot,
                         info.edge,
                         (cost, duration_s, distance_m),
+                        origin,
                     );
                 }
             }
@@ -3182,20 +3229,26 @@ pub(crate) fn isochrone(
                 info.edge
             };
             let state = search.forward_state(&label, &info);
+            let key = seeding.key(cost, duration_s);
             if completes && state == ROOT {
-                complete_in_root(&mut root_completed, info.edge, cost);
+                complete_in_root(&mut root_completed, info.edge, key);
             }
-            search.push(
-                next,
-                entry.label,
-                cost,
-                duration_s,
-                distance_m,
-                last_edge,
-                true,
-                label.origin,
-                state,
-                cost,
+            search.push_label_by(
+                Label {
+                    arc: next,
+                    pred: entry.label,
+                    cost,
+                    duration_s,
+                    distance_m,
+                    last_edge,
+                    traversed: true,
+                    origin: label.origin,
+                    state,
+                    via: NO_LABEL,
+                    back: false,
+                },
+                key,
+                seeding.by_duration,
             );
         }
     }

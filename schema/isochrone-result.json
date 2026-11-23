@@ -321,6 +321,16 @@
           "type": "number",
           "format": "double"
         },
+        "origin": {
+          "description": "With `includeOrigins`, the origin whose path the fragment ends.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
         "start": {
           "$ref": "#/$defs/GeoPoint"
         },
@@ -362,6 +372,16 @@
           "items": {
             "type": "integer",
             "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "edgeOrigins": {
+          "description": "With `includeOrigins`, the origin that reaches each of `edge_ids`\nfirst on this bucket's metric, parallel to it.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
             "minimum": 0
           }
         },
