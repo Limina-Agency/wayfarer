@@ -1378,6 +1378,15 @@
           "format": "uint",
           "minimum": 0
         },
+        "destinationExpandedCorrelationDistanceM": {
+          "description": "[`Self::origin_expanded_correlation_distance_m`] for the destination.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "destinationOnlyPenaltyCount": {
           "type": "integer",
           "format": "uint",
@@ -1471,6 +1480,15 @@
         "originCandidateCount": {
           "type": "integer",
           "format": "uint",
+          "minimum": 0
+        },
+        "originExpandedCorrelationDistanceM": {
+          "description": "The correlation distance the origin's snapping widened to (300 m,\n1 km, or a SAR request's `off_network` reach) because no candidate\nwithin `max_correlation_distance_m` was connected to the network;\nabsent when it did not widen.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
           "minimum": 0
         },
         "originRejectedCandidateCount": {

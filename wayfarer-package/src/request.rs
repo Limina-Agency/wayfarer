@@ -802,6 +802,13 @@ pub struct CorrelationEdge {
     pub geometry: Vec<GeoPoint>,
 }
 
+impl CorrelationEdge {
+    /// The candidate's compact edge.
+    pub fn edge(&self) -> u32 {
+        self.edge
+    }
+}
+
 /// Borrowed request sections.
 pub struct RequestView<'g> {
     graph: Sections<'g>,

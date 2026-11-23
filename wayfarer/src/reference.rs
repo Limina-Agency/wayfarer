@@ -430,37 +430,57 @@ impl<'a> ReferenceEngine<'a> {
         let source_count = request.sources.len();
         let target_count = request.targets.len();
         let mut cells = matrix_cell_grid(source_count, target_count);
-        let result = |cells, source_expansion_count| RouteMatrixResult {
-            source_count,
-            target_count,
-            cells,
-            source_expansion_count,
-            visited_edge_count: 0,
-            settled_node_count: 0,
+        let result = |cells, source_expansion_count, expanded: [Vec<Option<u32>>; 2]| {
+            let [sources, targets] = expanded;
+            RouteMatrixResult {
+                source_count,
+                target_count,
+                cells,
+                source_expansion_count,
+                visited_edge_count: 0,
+                settled_node_count: 0,
+                source_expanded_correlation_distances_m: sources,
+                target_expanded_correlation_distances_m: targets,
+            }
         };
         if let Err(error) = self.ready(request.profile) {
             for cell in &mut cells {
                 apply_matrix_error(cell, &error);
             }
-            return result(cells, 0);
+            return result(cells, 0, Default::default());
         }
         let policy = CorrelationPolicy::from(&request.options);
         let correlate = |point| {
-            Correlator::new(&self.view)
-                .search_expanding(point, request.profile, &policy, &Default::default())
-                .candidates
+            Correlator::new(&self.view).search_expanding(
+                point,
+                request.profile,
+                &policy,
+                &Default::default(),
+            )
         };
-        let sources = request
+        let source_searches = request
             .sources
             .iter()
             .copied()
             .map(correlate)
             .collect::<Vec<_>>();
-        let targets = request
+        let target_searches = request
             .targets
             .iter()
             .copied()
             .map(correlate)
+            .collect::<Vec<_>>();
+        let expanded = [
+            crate::matrix::expanded_correlation_distances(&source_searches),
+            crate::matrix::expanded_correlation_distances(&target_searches),
+        ];
+        let sources = source_searches
+            .into_iter()
+            .map(|search| search.candidates)
+            .collect::<Vec<_>>();
+        let targets = target_searches
+            .into_iter()
+            .map(|search| search.candidates)
             .collect::<Vec<_>>();
         for (source, candidates) in sources.iter().enumerate() {
             if candidates.is_empty() {
@@ -496,7 +516,7 @@ impl<'a> ReferenceEngine<'a> {
             expansions += self.matrix_pass(&request, &sources, &targets, &mut relaxed, true);
             take_relaxed_cells(&mut cells, relaxed);
         }
-        result(cells, expansions)
+        result(cells, expansions, expanded)
     }
 
     /// One pass over every row, strict or relaxed (see `records`); returns

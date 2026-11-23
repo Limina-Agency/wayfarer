@@ -20,6 +20,18 @@
       "format": "uint",
       "minimum": 0
     },
+    "sourceExpandedCorrelationDistancesM": {
+      "description": "Per source, the correlation distance its snapping widened to (300 m,\n1 km, or a SAR request's `off_network` reach) because no candidate\nwithin `max_correlation_distance_m` was connected to the network, or\nnone; empty (and absent from JSON) when no source widened.",
+      "type": "array",
+      "items": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0
+      }
+    },
     "sourceExpansionCount": {
       "description": "Source rows searched.",
       "type": "integer",
@@ -31,6 +43,18 @@
       "type": "integer",
       "format": "uint",
       "minimum": 0
+    },
+    "targetExpandedCorrelationDistancesM": {
+      "description": "[`Self::source_expanded_correlation_distances_m`] for the targets.",
+      "type": "array",
+      "items": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0
+      }
     },
     "visitedEdgeCount": {
       "description": "Out-edges examined, summed over every search of the request (see\n`RouteOptions::max_visited_edge_count` for what one search is).",

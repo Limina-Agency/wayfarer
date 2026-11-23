@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cancellation::RouteCancellation;
-use crate::correlator::Correlator;
+use crate::correlator::{CandidateSearch, Correlator};
 use crate::costing::CostingPolicy;
 use crate::graph_view::PackageGraphView;
 use crate::limits::MAX_MATRIX_CELLS;
@@ -80,6 +80,8 @@ impl RoutingEngine {
                 source_expansion_count: 0,
                 visited_edge_count: 0,
                 settled_node_count: 0,
+                source_expanded_correlation_distances_m: Vec::new(),
+                target_expanded_correlation_distances_m: Vec::new(),
             };
         }
         let mut cells = matrix_cell_grid(source_count, target_count);
@@ -119,6 +121,8 @@ impl RoutingEngine {
                 source_expansion_count: 0,
                 visited_edge_count: 0,
                 settled_node_count: 0,
+                source_expanded_correlation_distances_m: Vec::new(),
+                target_expanded_correlation_distances_m: Vec::new(),
             };
         }
 
@@ -143,6 +147,10 @@ impl RoutingEngine {
             };
             (correlate(&request.sources), correlate(&request.targets))
         });
+        let source_expanded_correlation_distances_m =
+            expanded_correlation_distances(&source_searches);
+        let target_expanded_correlation_distances_m =
+            expanded_correlation_distances(&target_searches);
 
         for (source_index, search) in source_searches.iter().enumerate() {
             if search.candidates.is_empty() {
@@ -263,6 +271,8 @@ impl RoutingEngine {
                     source_expansion_count,
                     visited_edge_count,
                     settled_node_count,
+                    source_expanded_correlation_distances_m,
+                    target_expanded_correlation_distances_m,
                 }
             }
             Err(error) => {
@@ -278,10 +288,27 @@ impl RoutingEngine {
                     source_expansion_count: 0,
                     visited_edge_count: 0,
                     settled_node_count: 0,
+                    source_expanded_correlation_distances_m,
+                    target_expanded_correlation_distances_m,
                 }
             }
         }
     }
+}
+
+/// Each point's widened correlation distance, or nothing when none widened
+/// (`RouteMatrixResult::source_expanded_correlation_distances_m`).
+pub(crate) fn expanded_correlation_distances(searches: &[CandidateSearch]) -> Vec<Option<u32>> {
+    if searches
+        .iter()
+        .all(|search| search.expanded_max_distance_m.is_none())
+    {
+        return Vec::new();
+    }
+    searches
+        .iter()
+        .map(|search| search.expanded_max_distance_m)
+        .collect()
 }
 
 impl RoutingEngine {
