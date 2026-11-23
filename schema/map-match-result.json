@@ -557,6 +557,7 @@
           "default": null
         },
         "costBreakdown": {
+          "description": "Left out of a service route's JSON when its `include` list does not\nname `costBreakdown`.",
           "$ref": "#/$defs/RouteCostBreakdown",
           "default": {
             "accessRestrictionPenalty": 1.0,
@@ -633,6 +634,16 @@
         },
         "hasWarningOverlay": {
           "type": "boolean"
+        },
+        "inclinePercent": {
+          "description": "The way's OSM `incline` in percent, positive uphill in the direction\nof travel; absent where the way has none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128
         },
         "inferredSpeedKph": {
           "type": [
@@ -930,8 +941,7 @@
         "distanceM",
         "durationS",
         "junctionDelayS",
-        "traversalDirection",
-        "costBreakdown"
+        "traversalDirection"
       ]
     },
     "RouteEdgeRange": {

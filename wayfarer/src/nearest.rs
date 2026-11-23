@@ -24,12 +24,13 @@
 //!
 //! With a dynamic overlay's split or virtual edges, or a visited-edge
 //! budget (which applies to whole rows), the matrix row is searched in full.
+//! Overlays are applied once, into the options of every search.
 
 use crate::correlator::Correlator;
 use crate::limits::MAX_NEAREST_TARGETS;
 use crate::matrix::{RowStop, matrix_cell_grid};
 use crate::search::RoutingEngine;
-use crate::trip::invalid_point;
+use crate::trip::{apply_query_overlays, invalid_point};
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, NearestDirection, NearestHit, NearestRequest,
     NearestResult, RouteError, RouteMatrixCell, RouteMatrixCellStatus, RouteMatrixRequest,
@@ -38,7 +39,7 @@ use crate::types::{
 impl NearestRequest {
     /// Checks the request against [`crate::limits`]: `k` between 1 and the
     /// target count, at most [`MAX_NEAREST_TARGETS`] targets, valid
-    /// coordinates, and the options a matrix accepts.
+    /// coordinates, and the overlays and options a matrix accepts.
     /// [`RoutingEngine::nearest`] runs it first.
     pub fn validate(&self) -> Result<(), RouteError> {
         if self.targets.len() > MAX_NEAREST_TARGETS {
@@ -69,6 +70,9 @@ impl NearestRequest {
             targets,
             profile: self.profile,
             options: self.options.clone(),
+            overlays: self.overlays.clone(),
+            departure_at_ms: self.departure_at_ms,
+            include_edge_ids: self.include_edge_ids,
         }
     }
 }
@@ -89,7 +93,7 @@ impl RoutingEngine {
     /// reason; so does one whose source has no road within reach
     /// (`no_candidate`) or that is cancelled. Unreachable targets are left
     /// out, so there may be fewer than `k` hits.
-    pub fn nearest(&self, request: NearestRequest) -> Result<NearestResult, RouteError> {
+    pub fn nearest(&self, mut request: NearestRequest) -> Result<NearestResult, RouteError> {
         request.validate()?;
         let access = self.route_graph_view();
         if !access.is_ready() {
@@ -101,6 +105,15 @@ impl RoutingEngine {
             });
         }
         self.validate_sar(&request.options, request.profile)?;
+        // Overlays are applied once, into the options every search shares.
+        apply_query_overlays(
+            self,
+            &request.overlays,
+            request.profile,
+            request.departure_at_ms,
+            &mut request.options,
+        )?;
+        request.overlays.clear();
         request.options.cancellation.check()?;
 
         let policy = CorrelationPolicy::from(&request.options);

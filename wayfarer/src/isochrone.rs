@@ -6,12 +6,14 @@ use crate::limits::MAX_ISOCHRONE_CONTOURS;
 use crate::package::destination::relax_split_costs;
 use crate::package::profile_bit;
 use crate::package::search::analysis::{
-    AnalysisContour, AnalysisPoint, AnalysisQuery, overlay_split_costs, request_cost_overrides,
-    request_duration_overrides, resolve_edge_id, resolve_location,
+    AnalysisContour, AnalysisPoint, AnalysisQuery, ContourMetric, overlay_split_costs,
+    request_cost_overrides, request_duration_overrides, resolve_edge_id, resolve_location,
 };
 use crate::package::search::patch::{PatchCosts, PatchGraph, PatchQuery, analysis_overlay};
 use crate::search::RoutingEngine;
-use crate::trip::{invalid_point, validate_query_options};
+use crate::trip::{
+    apply_query_overlays, invalid_point, validate_query_options, validate_query_overlays,
+};
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, RouteError, RouteIsochroneBoundaryFragment,
     RouteIsochroneBucket, RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneRequest,
@@ -21,7 +23,7 @@ use crate::types::{
 impl RoutingEngine {
     pub fn isochrone(
         &self,
-        request: RouteIsochroneRequest,
+        mut request: RouteIsochroneRequest,
     ) -> Result<RouteIsochroneResult, RouteError> {
         validate_request(&request)?;
         if !self.route_graph_view().is_ready() {
@@ -37,7 +39,28 @@ impl RoutingEngine {
         }
 
         self.validate_sar(&request.options, request.profile)?;
+        apply_query_overlays(
+            self,
+            &request.overlays,
+            request.profile,
+            request.departure_at_ms,
+            &mut request.options,
+        )?;
         request.options.cancellation.check()?;
+        let mut result = self.isochrone_from(&request)?;
+        if !request.include_edge_ids {
+            for bucket in &mut result.buckets {
+                bucket.edge_ids = Vec::new();
+            }
+        }
+        Ok(result)
+    }
+
+    /// The isochrone of a validated request with its overlays applied.
+    fn isochrone_from(
+        &self,
+        request: &RouteIsochroneRequest,
+    ) -> Result<RouteIsochroneResult, RouteError> {
         let policy = CorrelationPolicy::from(&request.options);
         let correlator = Correlator::new(self.route_graph_view());
         // An origin with no connected road within the radius widens the
@@ -60,22 +83,22 @@ impl RoutingEngine {
             .package()
             .confines_destination_only(&request.options, request.profile)
         {
-            return self.isochrone_search(&request, candidates, &origin, true);
+            return self.isochrone_search(request, candidates, &origin, true);
         }
-        let strict = self.isochrone_search(&request, candidates, &origin, false)?;
+        let strict = self.isochrone_search(request, candidates, &origin, false)?;
         if !trapped(&strict) {
             return Ok(strict);
         }
         // An origin that cannot leave without crossing a destination-only
         // road gets the relaxed search, as routes do.
-        let relaxed = self.isochrone_search(&request, candidates, &origin, true)?;
+        let relaxed = self.isochrone_search(request, candidates, &origin, true)?;
         Ok(pick_relaxed(strict, relaxed))
     }
 }
 
 /// The request against [`crate::limits`]: a valid origin, one to
 /// [`MAX_ISOCHRONE_CONTOURS`] contours, each positive, finite and not repeated
-/// on its metric, and the options a route accepts.
+/// on its metric, and the overlays and options a route accepts.
 fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
     if invalid_point(request.origin) {
         return Err(RouteError::InvalidRequest {
@@ -101,6 +124,7 @@ fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
             reason: "isochrone contours",
         });
     }
+    validate_query_overlays(&request.overlays)?;
     validate_query_options(&request.options)
 }
 
@@ -188,7 +212,11 @@ impl RoutingEngine {
             .iter()
             .map(|contour| AnalysisContour {
                 limit: contour.contour,
-                on_duration: contour.metric == RouteIsochroneMetric::TimeSeconds,
+                metric: match contour.metric {
+                    RouteIsochroneMetric::Cost => ContourMetric::Cost,
+                    RouteIsochroneMetric::TimeSeconds => ContourMetric::Duration,
+                    RouteIsochroneMetric::DistanceM => ContourMetric::Distance,
+                },
             })
             .collect::<Vec<_>>();
         let costing = CostingPolicy::with_destination_only_policy(
@@ -342,9 +370,13 @@ impl RoutingEngine {
                 edge_ids: outcome
                     .reached
                     .iter()
-                    .filter(|edge| match contour.metric {
-                        RouteIsochroneMetric::Cost => edge.cost <= contour.contour,
-                        RouteIsochroneMetric::TimeSeconds => edge.duration_s <= contour.contour,
+                    .filter(|edge| {
+                        let value = match contour.metric {
+                            RouteIsochroneMetric::Cost => edge.cost,
+                            RouteIsochroneMetric::TimeSeconds => edge.duration_s,
+                            RouteIsochroneMetric::DistanceM => edge.distance_m,
+                        };
+                        value <= contour.contour
                     })
                     .map(|edge| view.edge_id(edge.edge as usize))
                     .collect::<BTreeSet<_>>()

@@ -1772,6 +1772,62 @@ pub(crate) fn validate_query_options(options: &RouteOptions) -> Result<(), Route
     validate_options(options).map_err(|failure| failure.error)
 }
 
+/// The overlay checks a route runs ([`MAX_ROUTE_OVERLAYS`],
+/// [`MAX_ROUTE_OVERLAY_POINTS`], each overlay's geometry, policy values,
+/// window and source), for the matrix, isochrone and nearest entry points.
+pub(crate) fn validate_query_overlays(overlays: &[RouteOverlay]) -> Result<(), RouteError> {
+    if overlays.len() > MAX_ROUTE_OVERLAYS {
+        return Err(RouteError::RequestTooLarge { what: "overlays" });
+    }
+    if overlays
+        .iter()
+        .map(|overlay| overlay.points.len())
+        .sum::<usize>()
+        > MAX_ROUTE_OVERLAY_POINTS
+    {
+        return Err(RouteError::RequestTooLarge {
+            what: "overlay geometry",
+        });
+    }
+    for overlay in overlays {
+        validate_overlay(overlay).map_err(|failure| failure.error)?;
+    }
+    Ok(())
+}
+
+/// Folds a matrix, isochrone or nearest request's overlays into its
+/// options as a route does: windows evaluated at one time
+/// (`conditional_restriction_eval_at_ms`, else `departure_at_ms`, else
+/// now), overlays for other profiles left out. The options are checked
+/// again, since overlays add edge constraints.
+pub(crate) fn apply_query_overlays(
+    engine: &RoutingEngine,
+    overlays: &[RouteOverlay],
+    profile: MobilityProfile,
+    departure_at_ms: Option<i64>,
+    options: &mut RouteOptions,
+) -> Result<(), RouteError> {
+    if overlays.is_empty() {
+        return Ok(());
+    }
+    let evaluated_at_ms = overlays.iter().any(RouteOverlay::has_window).then(|| {
+        options
+            .costing
+            .conditional_restriction_eval_at_ms
+            .or(departure_at_ms)
+            .unwrap_or_else(now_ms)
+    });
+    apply_overlays(
+        engine,
+        overlays,
+        profile,
+        evaluated_at_ms,
+        options,
+        &mut RouteOverlayDiagnostics::default(),
+    );
+    validate_query_options(options)
+}
+
 fn validate_options(options: &RouteOptions) -> Result<(), RouteFailure> {
     if options.candidate_limit > crate::limits::MAX_REQUEST_CANDIDATES {
         return Err(too_large("candidate limit"));

@@ -177,8 +177,11 @@ int32_t wayfarer_route(const WayfarerPackage *package,
                                char **out_json);
 
 /* Answers a RouteMatrixRequest (unreachable cells are reported per cell). A
- * request of more than 250,000 cells, or with invalid coordinates or
- * options, fails with "request_too_large" or "invalid_request". */
+ * request of more than 250,000 cells, or with invalid coordinates,
+ * overlays or options, fails with "request_too_large" or
+ * "invalid_request". "overlays" (as a route's, windows evaluated at
+ * "departureAtMs") and "includeEdgeIds": false are optional, here and on
+ * isochrone requests. */
 int32_t wayfarer_matrix(const WayfarerPackage *package,
                                 const char *request_json,
                                 char **out_json);
@@ -232,7 +235,8 @@ int32_t wayfarer_map_match(const WayfarerPackage *package,
 
 /* The k targets cheapest to travel to from a source, cheapest first:
  * {"source", "targets", "k", "profile", "direction": "from_source" (default)
- * | "to_source", "options": RouteOptions (optional)} gives a NearestResult,
+ * | "to_source", "options": RouteOptions, "overlays", "departureAtMs",
+ * "includeEdgeIds" (all optional)} gives a NearestResult,
  * {"targetCount", "hits": [{"targetIndex", "cost", "distanceM",
  * "durationS", "edgeIds"}], "noCandidateTargetIndexes", ...}: the cheapest
  * reachable cells of the matrix between the source and every target. More

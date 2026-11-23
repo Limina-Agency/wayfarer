@@ -2902,41 +2902,23 @@ pub(crate) fn isochrone(
         &origin_approach,
         &mut arcs,
     );
-    let max_cost = contours
-        .iter()
-        .filter(|contour| !contour.on_duration)
-        .map(|contour| contour.limit)
-        .fold(0.0, f64::max);
-    let max_duration = contours
-        .iter()
-        .filter(|contour| contour.on_duration)
-        .map(|contour| contour.limit)
-        .fold(0.0, f64::max);
-    let within = |cost: f64, duration_s: f64| {
-        (max_cost > 0.0 && cost <= max_cost) || (max_duration > 0.0 && duration_s <= max_duration)
+    let contour_reach = super::analysis::ContourReach::of(contours);
+    let within = |cost: f64, duration_s: f64, distance_m: f64| {
+        contour_reach.within(cost, duration_s, distance_m)
     };
-    let crosses = |(start_cost, end_cost): (f64, f64),
-                   (start_duration, end_duration): (f64, f64)| {
+    type Spans = ((f64, f64), (f64, f64), (f64, f64));
+    let crosses = |(costs, durations, distances): Spans| {
         contours.iter().any(|contour| {
-            let (start, end) = if contour.on_duration {
-                (start_duration, end_duration)
-            } else {
-                (start_cost, end_cost)
-            };
+            let (start, end) = contour.metric.of(costs, durations, distances);
             start < contour.limit && contour.limit < end && end - start > f64::EPSILON
         })
     };
     let cross = |crossings: &mut Vec<BoundaryCrossing>,
                  edge: u32,
                  (start_fraction, end_fraction): (f64, f64),
-                 (start_cost, end_cost): (f64, f64),
-                 (start_duration, end_duration): (f64, f64)| {
+                 (costs, durations, distances): Spans| {
         for (index, contour) in contours.iter().enumerate() {
-            let (start, end) = if contour.on_duration {
-                (start_duration, end_duration)
-            } else {
-                (start_cost, end_cost)
-            };
+            let (start, end) = contour.metric.of(costs, durations, distances);
             if !(start < contour.limit && contour.limit < end) || end - start <= f64::EPSILON {
                 continue;
             }
@@ -2952,25 +2934,27 @@ pub(crate) fn isochrone(
     };
     let mut outcome = IsochroneOutcome::default();
     let mut reached_slot = FxHashMap::<u32, usize>::default();
-    let reach = |reached: &mut Vec<ReachedEdge>,
-                 reached_slot: &mut FxHashMap<u32, usize>,
-                 edge: u32,
-                 cost: f64,
-                 duration_s: f64| match reached_slot.get(&edge) {
-        Some(slot) => {
-            let entry = &mut reached[*slot];
-            entry.cost = entry.cost.min(cost);
-            entry.duration_s = entry.duration_s.min(duration_s);
-        }
-        None => {
-            reached_slot.insert(edge, reached.len());
-            reached.push(ReachedEdge {
-                edge,
-                cost,
-                duration_s,
-            });
-        }
-    };
+    let reach =
+        |reached: &mut Vec<ReachedEdge>,
+         reached_slot: &mut FxHashMap<u32, usize>,
+         edge: u32,
+         (cost, duration_s, distance_m): (f64, f64, f64)| match reached_slot.get(&edge) {
+            Some(slot) => {
+                let entry = &mut reached[*slot];
+                entry.cost = entry.cost.min(cost);
+                entry.duration_s = entry.duration_s.min(duration_s);
+                entry.distance_m = entry.distance_m.min(distance_m);
+            }
+            None => {
+                reached_slot.insert(edge, reached.len());
+                reached.push(ReachedEdge {
+                    edge,
+                    cost,
+                    duration_s,
+                    distance_m,
+                });
+            }
+        };
     // The cheapest cost each edge was completed at in the root restriction
     // state, for the dominance check where labels are settled.
     let mut root_completed = FxHashMap::<u32, f64>::default();
@@ -3019,8 +3003,11 @@ pub(crate) fn isochrone(
             &mut outcome.crossings,
             info.edge,
             (start, end),
-            (approach, info.cost),
-            (approach, duration_s),
+            (
+                (approach, info.cost),
+                (approach, duration_s),
+                (0.0, info.distance_m),
+            ),
         );
         // A seed is labelled even beyond every contour (its successors are
         // then out of range too), and counts as traversing its edge.
@@ -3029,16 +3016,23 @@ pub(crate) fn isochrone(
             complete_in_root(&mut root_completed, info.edge, info.cost);
         }
         search.push(
-            id, NO_LABEL, info.cost, duration_s, 0.0, info.edge, true, *origin, seed_state,
+            id,
+            NO_LABEL,
+            info.cost,
+            duration_s,
+            info.distance_m,
+            info.edge,
+            true,
+            *origin,
+            seed_state,
             info.cost,
         );
-        if within(info.cost, duration_s) && patch.completes_range(info.edge, end) {
+        if within(info.cost, duration_s, info.distance_m) && patch.completes_range(info.edge, end) {
             reach(
                 &mut outcome.reached,
                 &mut reached_slot,
                 info.edge,
-                info.cost,
-                duration_s,
+                (info.cost, duration_s, info.distance_m),
             );
         }
     }
@@ -3114,6 +3108,7 @@ pub(crate) fn isochrone(
             }
             let cost = label.cost + info.cost + turn;
             let duration_s = label.duration_s + delay + info.duration_s;
+            let distance_m = label.distance_m + info.distance_m;
             let mut completes = false;
             if info.edge != NO_NODE {
                 let (start, end) = if next < base {
@@ -3124,33 +3119,25 @@ pub(crate) fn isochrone(
                 let metrics = (
                     (label.cost + turn, cost),
                     (label.duration_s + delay, duration_s),
+                    (label.distance_m, distance_m),
                 );
                 // Re-entering an arc already on this path never improves it;
                 // it only matters where it would record a second crossing.
-                if crosses(metrics.0, metrics.1)
-                    && search.path_contains_edge(entry.label, info.edge)
-                {
+                if crosses(metrics) && search.path_contains_edge(entry.label, info.edge) {
                     continue;
                 }
-                cross(
-                    &mut outcome.crossings,
-                    info.edge,
-                    (start, end),
-                    metrics.0,
-                    metrics.1,
-                );
+                cross(&mut outcome.crossings, info.edge, (start, end), metrics);
                 completes = next < base || patch.completes_range(info.edge, end);
-                if within(cost, duration_s) && completes {
+                if within(cost, duration_s, distance_m) && completes {
                     reach(
                         &mut outcome.reached,
                         &mut reached_slot,
                         info.edge,
-                        cost,
-                        duration_s,
+                        (cost, duration_s, distance_m),
                     );
                 }
             }
-            if !within(cost, duration_s) {
+            if !within(cost, duration_s, distance_m) {
                 continue;
             }
             let last_edge = if info.edge == NO_NODE {
@@ -3167,7 +3154,7 @@ pub(crate) fn isochrone(
                 entry.label,
                 cost,
                 duration_s,
-                0.0,
+                distance_m,
                 last_edge,
                 true,
                 label.origin,

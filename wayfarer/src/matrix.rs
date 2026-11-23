@@ -21,7 +21,9 @@ use crate::package::search::patch::{
 };
 use crate::package::{SearchGraph, profile_bit};
 use crate::search::RoutingEngine;
-use crate::trip::{invalid_point, validate_query_options};
+use crate::trip::{
+    apply_query_overlays, invalid_point, validate_query_options, validate_query_overlays,
+};
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, MobilityProfile, RouteError, RouteMatrixCell,
     RouteMatrixCellStatus, RouteMatrixRequest, RouteMatrixResult,
@@ -29,9 +31,9 @@ use crate::types::{
 
 impl RouteMatrixRequest {
     /// Checks the request against [`crate::limits`]: at most
-    /// [`MAX_MATRIX_CELLS`] cells, valid coordinates, and the options a route
-    /// accepts (candidate limit, correlation distance, costing values, edge
-    /// constraints and dynamic overlay caps). [`RoutingEngine::matrix`] runs
+    /// [`MAX_MATRIX_CELLS`] cells, valid coordinates, the overlays and the
+    /// options a route accepts (candidate limit, correlation distance,
+    /// costing values, edge constraints and dynamic overlay caps). [`RoutingEngine::matrix`] runs
     /// it first; a host that wants a request-level error instead of failed
     /// cells calls it before.
     pub fn validate(&self) -> Result<(), RouteError> {
@@ -56,6 +58,7 @@ impl RouteMatrixRequest {
                 reason: "location coordinates",
             });
         }
+        validate_query_overlays(&self.overlays)?;
         validate_query_options(&self.options)
     }
 }
@@ -65,7 +68,7 @@ impl RoutingEngine {
     /// (source-major). A request that fails [`RouteMatrixRequest::validate`]
     /// fails every cell with the reason, except one with more than
     /// [`MAX_MATRIX_CELLS`] cells, which gets no cells at all.
-    pub fn matrix(&self, request: RouteMatrixRequest) -> RouteMatrixResult {
+    pub fn matrix(&self, mut request: RouteMatrixRequest) -> RouteMatrixResult {
         let source_count = request.sources.len();
         let target_count = request.targets.len();
         let request_error = request.validate().err();
@@ -93,6 +96,14 @@ impl RoutingEngine {
                 profile: request.profile,
             })
         } else if let Err(error) = self.validate_sar(&request.options, request.profile) {
+            Some(error)
+        } else if let Err(error) = apply_query_overlays(
+            self,
+            &request.overlays,
+            request.profile,
+            request.departure_at_ms,
+            &mut request.options,
+        ) {
             Some(error)
         } else {
             request.options.cancellation.check().err()
@@ -235,6 +246,11 @@ impl RoutingEngine {
             }
             outcome
         });
+        if !request.include_edge_ids {
+            for cell in &mut cells {
+                cell.edge_ids = Vec::new();
+            }
+        }
         match outcome {
             Ok((source_expansion_count, visited_edge_count, settled_node_count)) => {
                 RouteMatrixResult {

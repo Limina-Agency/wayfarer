@@ -11,6 +11,19 @@ pub struct RouteMatrixRequest {
     pub profile: MobilityProfile,
     #[serde(default)]
     pub options: RouteOptions,
+    /// Closures and other overlays, as geometry or package edges, applied as
+    /// a route applies them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<crate::RouteOverlay>,
+    /// The time overlay windows are evaluated at (UTC ms), unless the
+    /// costing options set `conditional_restriction_eval_at_ms`; absent
+    /// both, the time of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_at_ms: Option<i64>,
+    /// `false` leaves out the cells' `edge_ids` (the search is the same; the
+    /// output is smaller).
+    #[serde(default = "include_edge_ids", skip_serializing_if = "is_true")]
+    pub include_edge_ids: bool,
 }
 
 impl RouteMatrixRequest {
@@ -20,8 +33,19 @@ impl RouteMatrixRequest {
             targets,
             profile,
             options: RouteOptions::default(),
+            overlays: Vec::new(),
+            departure_at_ms: None,
+            include_edge_ids: true,
         }
     }
+}
+
+fn include_edge_ids() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +101,9 @@ pub struct RouteMatrixResult {
 pub enum RouteIsochroneMetric {
     Cost,
     TimeSeconds,
+    /// Metres along the cheapest path (as time is: labels are ordered by
+    /// cost whatever the metric).
+    DistanceM,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +130,19 @@ pub struct RouteIsochroneRequest {
     /// apply to isochrones.
     #[serde(default)]
     pub max_expansion_edge_count: Option<usize>,
+    /// Closures and other overlays, as geometry or package edges, applied as
+    /// a route applies them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<crate::RouteOverlay>,
+    /// The time overlay windows are evaluated at (UTC ms), unless the
+    /// costing options set `conditional_restriction_eval_at_ms`; absent
+    /// both, the time of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_at_ms: Option<i64>,
+    /// `false` leaves out the buckets' `edge_ids`; boundary fragments keep
+    /// theirs (the search is the same; the output is smaller).
+    #[serde(default = "include_edge_ids", skip_serializing_if = "is_true")]
+    pub include_edge_ids: bool,
 }
 
 impl RouteIsochroneRequest {
@@ -117,6 +157,9 @@ impl RouteIsochroneRequest {
             contours,
             options: RouteOptions::default(),
             max_expansion_edge_count: None,
+            overlays: Vec::new(),
+            departure_at_ms: None,
+            include_edge_ids: true,
         }
     }
 }
@@ -187,6 +230,19 @@ pub struct NearestRequest {
     pub direction: NearestDirection,
     #[serde(default)]
     pub options: RouteOptions,
+    /// Closures and other overlays, as geometry or package edges, applied as
+    /// a route applies them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<crate::RouteOverlay>,
+    /// The time overlay windows are evaluated at (UTC ms), unless the
+    /// costing options set `conditional_restriction_eval_at_ms`; absent
+    /// both, the time of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_at_ms: Option<i64>,
+    /// `false` leaves out the hits' `edge_ids` (the search is the same; the
+    /// output is smaller).
+    #[serde(default = "include_edge_ids", skip_serializing_if = "is_true")]
+    pub include_edge_ids: bool,
 }
 
 impl NearestRequest {
@@ -203,6 +259,9 @@ impl NearestRequest {
             profile,
             direction: NearestDirection::FromSource,
             options: RouteOptions::default(),
+            overlays: Vec::new(),
+            departure_at_ms: None,
+            include_edge_ids: true,
         }
     }
 }

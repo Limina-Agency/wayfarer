@@ -370,10 +370,19 @@
       ]
     },
     "RouteIsochroneMetric": {
-      "type": "string",
-      "enum": [
-        "cost",
-        "time_seconds"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "cost",
+            "time_seconds"
+          ]
+        },
+        {
+          "description": "Metres along the cheapest path (as time is: labels are ordered by\ncost whatever the metric).",
+          "type": "string",
+          "const": "distance_m"
+        }
       ]
     }
   }
