@@ -224,6 +224,7 @@ mod tests {
                     // No goal direction (no CCH order): searches flood the
                     // grid, so that a cancel lands mid-search.
                     cch_order: false,
+                    ..PackageBuildOptions::default()
                 };
                 let (package, _) = crate::test_support::package(&graph, &options).unwrap();
                 RoutingEngine::from_package(std::sync::Arc::new(package))

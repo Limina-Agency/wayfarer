@@ -1,7 +1,10 @@
 # Package format 3
 
-Status: design, nothing implemented. Written against `main` at `5cb573c`
-(format 2, tile-ready ids). Format 3 is the one package-format bump left
+Status: being built behind an off-by-default compiler switch (decision F1
+of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
+--package-format 3`, hidden). Done: step 1 of section 12 (the tagged table,
+both hashes, `PackageParams`, retired reserved sections, implied ids), draft
+revision 1. Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -240,7 +243,9 @@ never writes them by default.
   caches of results, and to tell two files apart.
 - **Identity hash** = blake3 over
   `"wayfarer.package.identity.3"` (a domain tag), then the header with the
-  table offset and the root checksum zeroed, then, for every entry flagged
+  table entry count, the table offset and the root checksum zeroed (the
+  entry count changes when a non-identity section is added), then, for
+  every entry flagged
   IDENTITY in table order, its `id, param, flags, elem, length, blake3`
   (56 bytes, no offset). Offsets are left out so that adding, removing or
   moving a non-identity section (an install step that appends stored
@@ -690,7 +695,11 @@ Małopolskie baselines are re-recorded once, in the release that ships the
 bump.
 
 **Building it on `main`.** Format 3 is several PRs, and packages written by
-`main` between them must not be mistaken for the final format. The first PR
+`main` between them must not be mistaken for the final format. Until
+`chore/format-3-release` the writer sits behind a compiler switch that is off
+by default, so default compiles stay format 2 and byte-identical; draft
+revision 1 keeps format 2's profile columns and heuristic costs at header
+offsets 96 and 104 (inside the zero area) until `ProfileSlots` replaces them. The first PR
 sets the version to 3 and writes `PackageParams` key 10 (draft revision);
 each later PR that changes bytes raises it, and an engine refuses any draft
 revision but its own; the last PR removes the key. Suggested order:

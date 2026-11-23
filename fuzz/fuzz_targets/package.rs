@@ -14,9 +14,7 @@ use wayfarer::{
     GeoPoint, MobilityProfile, RouteIsochroneRequest, RouteMatrixRequest, RouteRequest,
     RoutingEngine, RoutingPackage, SnapRequest,
 };
-use wayfarer_package::format::{
-    HEADER_FIXED_BYTES, HEADER_ROOT_CHECKSUM, SECTION_COUNT, TABLE_ENTRY_BYTES,
-};
+use wayfarer_package::raw::resign;
 
 /// Queries near the seed packages' roads: `fixtures/routing/short_road.mrt`
 /// (52.0, 21.0..21.002) and Monaco.
@@ -27,17 +25,10 @@ const POINTS: [(f64, f64); 4] = [
     (43.7290, 7.4160),
 ];
 
+/// The input with a root checksum that matches its header and table, in
+/// either format.
 fn with_root_checksum(mut bytes: Vec<u8>) -> Vec<u8> {
-    let table_end = HEADER_FIXED_BYTES + SECTION_COUNT * TABLE_ENTRY_BYTES;
-    if bytes.len() >= table_end {
-        let mut header = bytes[..HEADER_FIXED_BYTES].to_vec();
-        header[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32].fill(0);
-        let mut root = blake3::Hasher::new();
-        root.update(&header);
-        root.update(&bytes[HEADER_FIXED_BYTES..table_end]);
-        bytes[HEADER_ROOT_CHECKSUM..HEADER_ROOT_CHECKSUM + 32]
-            .copy_from_slice(root.finalize().as_bytes());
-    }
+    resign(&mut bytes);
     bytes
 }
 

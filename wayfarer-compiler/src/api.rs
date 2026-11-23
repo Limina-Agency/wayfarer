@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use osm_pbf_ingest::IngestBuildProfile;
 use serde::{Deserialize, Serialize};
-use wayfarer_package::format::profile_slot;
+use wayfarer_package::format::{PackageFormat, profile_slot};
 use wayfarer_package::{CancelToken, MobilityProfile};
 use wayfarer_road_graph::RoadGraphPackageManifest;
 
@@ -82,6 +82,12 @@ pub struct CompileRequest {
     /// bytes. Default: `["wheeled", "on_foot"]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiles: Option<Vec<MobilityProfile>>,
+    /// The package format: format 2 unless set. Format 3 is a draft that
+    /// only a build of the same draft revision opens; it is not part of the
+    /// JSON request until it is released.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub package_format: PackageFormat,
 }
 
 impl CompileRequest {
@@ -96,6 +102,7 @@ impl CompileRequest {
             memory: MemoryProfile::default(),
             threads: None,
             profiles: None,
+            package_format: PackageFormat::V2,
         }
     }
 
@@ -145,6 +152,7 @@ impl CompileRequest {
             profiles.dedup();
             options.profiles = profiles;
         }
+        options.package_format = self.package_format;
         options
     }
 

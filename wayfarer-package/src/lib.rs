@@ -52,8 +52,15 @@
 //! release, an older format is reported as `Outdated` and a newer
 //! format as `TooNew`. A package also records the costing model its stored
 //! costs were baked with, which the engine must match. The format is
-//! little-endian only, and the [`request`] and [`codec`] modules are
+//! little-endian only, and the [`request`], [`codec`] and [`raw`] modules are
 //! doc-hidden and not part of the supported API.
+//!
+//! Format 3 (`docs/design/format-3.md`: a tagged section table, an identity
+//! hash apart from the content hash, implied ids, `PackageParams`) is being
+//! built. A compile writes it only when asked
+//! ([`format::PackageFormat::V3`]); such packages carry a draft revision
+//! ([`format::FORMAT_3_DRAFT_REVISION`]) and open only in a build of the same
+//! revision ([`format::MAX_READ_FORMAT_VERSION`] is 3).
 
 pub mod barrier;
 mod cancel;
@@ -62,6 +69,8 @@ pub mod cch_order;
 pub mod codec;
 pub mod format;
 pub mod math;
+#[doc(hidden)]
+pub mod raw;
 #[doc(hidden)]
 pub mod request;
 pub mod sar;

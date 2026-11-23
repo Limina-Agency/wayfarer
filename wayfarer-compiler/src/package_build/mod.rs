@@ -54,11 +54,11 @@ use wayfarer_package::MobilityProfile;
 use wayfarer_package::format::{
     EDGE_FLAG_BARRIER_AT_TARGET, EDGE_FLAG_COMPLEX_RESTRICTION_FIRST,
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
-    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, MAX_COST_TUPLES, NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN,
-    PROFILE_SLOTS, PackageCounts, PackageFile, PackageLayout, PackageWriter, RoutingPackageError,
-    RoutingPackageMetadata, SHAPE_START_STRIDE, Section, WAY_ID_WIDE, e7_from_fixed_xyz,
-    edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7, profile_slot, reverse_heading, to_e7,
-    unit_xyz, xyz_from_fixed,
+    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES, NO_COLUMN,
+    NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts, PackageFile, PackageFormat,
+    PackageLayout, PackageParams, PackageWriter, RoutingPackageError, RoutingPackageMetadata,
+    SHAPE_START_STRIDE, Section, WAY_ID_WIDE, e7_from_fixed_xyz, edge_id_span_limit, encode_shape,
+    fixed_xyz, is_exact_e7, profile_slot, reverse_heading, to_e7, unit_xyz, xyz_from_fixed,
 };
 use wayfarer_package::format::{junction, road_type_rank};
 use wayfarer_package::request::derived_opposing;
@@ -82,6 +82,11 @@ pub struct PackageBuildOptions {
     /// engine builds its potentials (the default). Without it searches
     /// bound with the straight line alone (tests and benchmarks).
     pub cch_order: bool,
+    /// The package format to write: format 2 (the default), or format 3's
+    /// current draft, which only a build of the same draft revision opens
+    /// (`docs/design/format-3.md`). Format 3 stays behind this switch until
+    /// its release.
+    pub package_format: PackageFormat,
 }
 
 impl Default for PackageBuildOptions {
@@ -89,6 +94,7 @@ impl Default for PackageBuildOptions {
         Self {
             profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
             cch_order: true,
+            package_format: PackageFormat::V2,
         }
     }
 }
@@ -379,7 +385,9 @@ fn build_package_from(
     let mut writer = match spill {
         Some(file) => PackageWriter::spilling(file),
         None => PackageWriter::in_memory(),
-    };
+    }
+    .with_format(options.package_format);
+    let implied_ids = options.package_format == PackageFormat::V3;
     writer.put_metadata(metadata);
     let started = Instant::now();
     job.report(
@@ -1297,6 +1305,7 @@ fn build_package_from(
         edge_flags: &edge_flags,
         edge_profile_access: &edge_profile_access,
         shared_raw: &shared_raw,
+        implied_ids,
     })?;
     report.request_byte_len = request_sections.byte_len();
     report.request_opposing_exception_count = request_sections.opposing_exception_count();
@@ -1312,12 +1321,24 @@ fn build_package_from(
     drop(edge_source);
     writer.put(Section::EdgeProfileAccess, edge_profile_access);
     writer.put(Section::EdgeFlags, edge_flags);
-    writer.put(
-        Section::EdgeId,
-        (0..edge_count)
-            .map(|edge| (network.edge_id(edge) - edge_id_base) as u32)
-            .collect::<Vec<_>>(),
-    );
+    if implied_ids {
+        // Format 3 stores no edge ids: edge `i` has id `edge_id_base + i`.
+        if (0..edge_count)
+            .into_par_iter()
+            .any(|edge| network.edge_id(edge) - edge_id_base != edge as u64)
+        {
+            return Err(RoutingPackageError::Unsupported(
+                "format 3 needs edge ids in package order (edge i has id base + i); renumber the graph first (`renumber_in_package_order`), as a compile does".into(),
+            ));
+        }
+    } else {
+        writer.put(
+            Section::EdgeId,
+            (0..edge_count)
+                .map(|edge| (network.edge_id(edge) - edge_id_base) as u32)
+                .collect::<Vec<_>>(),
+        );
+    }
     drop(network);
     // Name and ref tokens per attribute class: the class key holds the name
     // and ref, so every shared info of a class has the same tokens.
@@ -1336,6 +1357,18 @@ fn build_package_from(
     writer.put(Section::SharedInfoRouteRefStart, si_route_ref_start);
     writer.put(Section::SharedInfoRouteRefPool, si_route_ref_pool);
     writer.put(Section::EdgeSharedInfo, edge_shared_info);
+    writer.put(
+        Section::PackageParams,
+        PackageParams {
+            costing_model_version: metadata.costing_model_version,
+            sar: metadata.sar,
+            mode_mask_union: metadata.mode_mask_union,
+            default_component: request_sections.default_component(),
+            reach_cap: wayfarer_package::request::SATURATION_CAP as u64,
+            draft_revision: Some(FORMAT_3_DRAFT_REVISION),
+        }
+        .to_section(),
+    );
     request_sections.put(&mut writer);
     clock.lap("request sections")?;
 

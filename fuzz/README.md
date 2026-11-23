@@ -9,6 +9,7 @@ toolchain; this crate is its own workspace and is never published.
 | Target | Input | What runs on it |
 |---|---|---|
 | `package` | A routing package's bytes | `RoutingPackage::from_bytes`, then routes, snaps, a matrix and an isochrone on whatever opens, and routes again after `prepare_potentials`. The root checksum is recomputed after each mutation, as an attacker would, so inputs reach the header, section-table and section checks behind it. |
+| `package_table` | 8-byte edits of a small format-3 package: entries swapped, repeated, dropped or retagged (id, param, flags, element size), sections resized, unknown sections added, the table before or after the sections, header bytes and raw bytes changed | `PackageFile::from_bytes` on the re-laid-out, re-signed package (QA-5). What opens must reopen with the same hashes, keep its identity hash without its unknown optional sections and with its table moved, and route. |
 | `request` | One byte choosing the call, then request JSON | `wayfarer_route`, `_matrix`, `_isochrone`, `_map_match`, `_snap` or `_project` on a Monaco package compiled once per run. Any text a call returns must be JSON. |
 | `overlay_set` | Overlay set JSON | `RouteOverlaySet::from_json`; an accepted set must round-trip through `to_json_with_hash`; then `merge`, `workflow_overlays` (bound and unbound) and a route with the overlays on Monaco. |
 | `route_parity` | Bytes choosing a profile, two Monaco points, costing options, alternatives and per-edge options on the plain route | The same route on the Monaco package (format 2) bounded by its CCH potentials and by the straight line alone (`internals::set_potentials`). Status, cost and edge path must agree (both are exact); the potentials' via alternatives must be distinct and within the sharing limit. |
@@ -22,6 +23,8 @@ cargo +nightly fuzz run request fuzz/corpus/request fuzz/seeds/request -- -dict=
 cargo +nightly fuzz run overlay_set fuzz/corpus/overlay_set fuzz/seeds/overlay_set -- -dict=fuzz/overlay_set.dict
 mkdir -p fuzz/corpus/route_parity
 cargo +nightly fuzz run route_parity fuzz/corpus/route_parity
+mkdir -p fuzz/corpus/package_table
+cargo +nightly fuzz run package_table fuzz/corpus/package_table
 ```
 
 Pass `--debug-assertions` (`-a`) to `fuzz run` as well: it turns on

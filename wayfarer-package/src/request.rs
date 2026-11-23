@@ -808,6 +808,8 @@ pub struct RequestView<'g> {
     grid: Grid,
     node_base: i64,
     shared_base: u64,
+    /// Node `i` has id `i` (format 3): no node id sections.
+    node_ids_implied: bool,
     default_component: u32,
     component_sizes: &'g [u32],
     cell_start: &'g [u32],
@@ -850,18 +852,30 @@ impl PackageFile {
         bytes.len()
     }
 
-    /// The request sections.
-    pub fn request_view(&self) -> Option<RequestView<'_>> {
+    /// The node and shared-info id bases: format 2's `RequestMeta`, or
+    /// format 3's implied ids (node `i` has id `i`, shared info `i` id `i +
+    /// 1`). `None` for a format-2 package without request metadata.
+    fn id_bases(&self) -> Option<(i64, u64)> {
+        if self.format_version >= 3 {
+            return Some((0, 1));
+        }
         let meta = self.slice::<u64>(Section::RequestMeta);
         if meta.first() != Some(&REQUEST_LAYOUT) || meta.len() < META_LEN {
             return None;
         }
+        Some((meta[1] as i64, meta[2]))
+    }
+
+    /// The request sections.
+    pub fn request_view(&self) -> Option<RequestView<'_>> {
+        let (node_base, shared_base) = self.id_bases()?;
         Some(RequestView {
             graph: self.view(),
             grid: Grid::from_section(self.slice::<f64>(Section::RequestGrid))?,
-            node_base: meta[1] as i64,
-            shared_base: meta[2],
-            default_component: u32::try_from(meta[3]).ok()?,
+            node_base,
+            shared_base,
+            node_ids_implied: self.format_version >= 3,
+            default_component: self.params.default_component,
             component_sizes: self.slice(Section::ComponentSizes),
             cell_start: self.slice(Section::GridCellStart),
             entries: self.slice(Section::GridEntries),
@@ -885,8 +899,7 @@ impl PackageFile {
     /// Validates the request sections against the header counts.
     pub fn validate_request_sections(&self) -> Result<(), RoutingPackageError> {
         let invalid = |message: &str| Err(RoutingPackageError::Invalid(message.to_string()));
-        let meta = self.slice::<u64>(Section::RequestMeta);
-        if meta.len() != META_LEN || meta[0] != REQUEST_LAYOUT {
+        if self.id_bases().is_none() {
             return invalid("request metadata is missing or of another layout");
         }
         let c = self.counts;
@@ -920,9 +933,15 @@ impl PackageFile {
                 .iter()
                 .zip(gaps.as_chunks::<2>().0.iter().skip(1))
                 .all(|(left, right)| left[0] < right[0] && left[1] < right[1]);
+        // Format 3 implies the node ids.
+        let stored_node_ids = if self.format_version >= 3 {
+            0
+        } else {
+            c.node_count
+        };
         let node_ids_ok = self.slice::<u32>(Section::NodeIdDelta).len()
             + self.slice::<i64>(Section::NodeIdWide).len()
-            == c.node_count;
+            == stored_node_ids;
         if !shared_ids_ok
             || !node_ids_ok
             || grid
@@ -969,7 +988,6 @@ impl PackageFile {
             || !sorted_pairs_ok(self.slice(Section::ComponentSizes), usize::MAX)
             || !sorted_pairs_ok(self.slice(Section::ModeMaskExceptions), c.edge_count)
             || !sorted_pairs_ok(self.slice(Section::TierExceptions), c.edge_count)
-            || u32::try_from(meta[3]).is_err()
             || self.slice::<u8>(Section::NodeReachSaturated).len() != c.node_count
         {
             return invalid("request sections are inconsistent");
@@ -1080,6 +1098,9 @@ impl RequestView<'_> {
     }
 
     pub fn node_id(&self, node: u32) -> i64 {
+        if self.node_ids_implied {
+            return self.node_base + i64::from(node);
+        }
         match self.node_id_delta.get(node as usize) {
             Some(delta) => self.node_base + i64::from(*delta),
             None => self.node_id_wide[node as usize],
@@ -1576,12 +1597,7 @@ pub struct ReachCounter<'g> {
 
 impl<'g> ReachCounter<'g> {
     pub fn new(graph: &'g PackageFile, profile: MobilityProfile, cap: usize) -> Self {
-        let meta = graph.slice::<u64>(Section::RequestMeta);
-        let saturated = if meta.first() == Some(&REQUEST_LAYOUT)
-            && meta
-                .get(5)
-                .is_some_and(|saturation_cap| *saturation_cap == cap as u64)
-        {
+        let saturated = if graph.params().reach_cap == cap as u64 {
             graph.slice::<u8>(Section::NodeReachSaturated)
         } else {
             &[]
