@@ -124,22 +124,25 @@ impl RoutingEngine {
 
         let policy = CorrelationPolicy::from(&request.options);
         let correlator = Correlator::new(self.route_graph_view());
-        let source_searches = request
-            .sources
-            .iter()
-            .copied()
-            .map(|source| {
-                correlator.search_expanding(source, request.profile, &policy, &Default::default())
-            })
-            .collect::<Vec<_>>();
-        let target_searches = request
-            .targets
-            .iter()
-            .copied()
-            .map(|target| {
-                correlator.search_expanding(target, request.profile, &policy, &Default::default())
-            })
-            .collect::<Vec<_>>();
+        // Endpoints correlate in parallel, on the matrix pool: 1,500 Krakow
+        // points take about 0.28 s on one thread, as long as their 1x1,500
+        // matrix's cells.
+        let (source_searches, target_searches) = self.package().in_matrix_pool(|| {
+            let correlate = |points: &[crate::types::GeoPoint]| {
+                points
+                    .par_iter()
+                    .map(|point| {
+                        correlator.search_expanding(
+                            *point,
+                            request.profile,
+                            &policy,
+                            &Default::default(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            (correlate(&request.sources), correlate(&request.targets))
+        });
 
         for (source_index, search) in source_searches.iter().enumerate() {
             if search.candidates.is_empty() {
@@ -684,15 +687,25 @@ impl RoutingEngine {
                 && patch.is_none()
                 && request.options.max_visited_edge_count.is_none()
             {
+                // A pass limited to retried targets needs their sets only.
+                let wanted = |target: usize| {
+                    !retried_targets_only
+                        || (0..sources.len()).any(|source| retries(source, target))
+                };
                 target_edges
                     .par_iter()
-                    .map(|edges| {
-                        reaching_edges(
-                            view,
-                            edges,
-                            |edge| query.edge_cost(view, edge).is_finite(),
-                            &request.options.cancellation,
-                        )
+                    .enumerate()
+                    .map(|(target, edges)| {
+                        wanted(target)
+                            .then(|| {
+                                reaching_edges(
+                                    view,
+                                    edges,
+                                    |edge| query.edge_cost(view, edge).is_finite(),
+                                    &request.options.cancellation,
+                                )
+                            })
+                            .flatten()
                     })
                     .collect::<Vec<_>>()
             } else {
@@ -817,7 +830,11 @@ impl RoutingEngine {
             }
             for (target_index, path) in row.paths.into_iter().enumerate() {
                 let budget_exceeded = row.budget_exceeded[target_index];
-                if target_candidates[target_index].is_empty() || left_open[target_index] {
+                // Cells a pass does not retry keep what `cells` held.
+                if target_candidates[target_index].is_empty()
+                    || left_open[target_index]
+                    || !retries(source_index, target_index)
+                {
                     continue;
                 }
                 let cell = cell_mut(cells, target_count, source_index, target_index);
@@ -991,14 +1008,27 @@ const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT: usize = 12;
 const MATRIX_PAIRWISE_MAX_TARGETS_ON_FOOT_POTENTIALS: usize = 64;
 const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE: usize = 50;
 /// The vehicle cut-off when CCH potentials bound the cells
-/// (`RoutingPackage::prepare_potentials`): a cell then searches a corridor,
-/// while a row still floods towards its farthest target. Measured
-/// 2026-11-18 on Malopolskie (16 threads, potentials prepared): pairwise
-/// against rows 0.66 s and 30 s at 50x50, 2.2 s and
-/// 16 s at 100x100, 15.6 s and about 90 s at 250x250, and with Krakow points
-/// 0.53 s and 4.1 s at 100x100. On the small Krakow centre package rows stay
-/// a little cheaper (0.17 s and 0.22 s at 100, 1.1 s and 1.4 s at 250).
-const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE_POTENTIALS: usize = 400;
+/// (`RoutingPackage::prepare_potentials`): none. A cell then searches a
+/// corridor, while a row floods towards its farthest target, and with
+/// hundreds of targets one of them is far (or ringed by destination-only
+/// roads), so a row settles most of the region whatever its targets. Rows
+/// also pay per target: the reaching sets that prune unreachable targets,
+/// and a pocket pass (`confine_to_own_pockets`) for each group of cells
+/// whose path crossed another point's destination-only pocket, which redoes
+/// the setup for the whole matrix.
+///
+/// Measured 2026-11-18 on Malopolskie (16 threads, potentials prepared):
+/// pairwise against rows 0.66 s and 30 s at 50x50, 2.2 s and 16 s at
+/// 100x100, 15.6 s and about 90 s at 250x250, and with Krakow points 0.53 s
+/// and 4.1 s at 100x100. Measured 2026-11-23 on Malopolskie (4 threads,
+/// potentials prepared, `examples/analysis_parity.rs`, wall and process
+/// CPU): Krakow 1x1,500 1.0 s (1.9 s CPU) pairwise against 14.5 s (42.7 s)
+/// in rows, region 8x1,000 3.4 s (12.1 s) against 6.8 s (21.9 s), region
+/// 2x4,000 3.7 s (12.9 s) against 16.0 s (40.8 s). On the small Krakow
+/// centre package rows were a little cheaper at 100 and 250 targets (0.17 s
+/// and 0.22 s at 100, 1.1 s and 1.4 s at 250), a fraction of a second either
+/// way.
+const MATRIX_PAIRWISE_MAX_TARGETS_VEHICLE_POTENTIALS: usize = usize::MAX;
 
 /// The pairwise cut-off for `profile` (`potentials`: CCH potentials bound
 /// the cells); [`crate::debug::matrix_pairwise_max_targets`] overrides it
@@ -1316,5 +1346,34 @@ fn route_error_code(error: &RouteError) -> String {
         RouteError::InvalidRequest { reason } => format!("invalid_request:{reason}"),
         RouteError::RequestTooLarge { what } => format!("request_too_large:{what}"),
         RouteError::NoMatch => "no_match".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vehicle_matrices_with_potentials_stay_pairwise() {
+        test_mode::set(None);
+        for profile in [
+            MobilityProfile::Default,
+            MobilityProfile::Wheeled,
+            MobilityProfile::Tracked,
+            MobilityProfile::Emergency,
+        ] {
+            // However many targets: rows lost even at 4,000 (region).
+            assert_eq!(
+                matrix_mode(profile, MAX_MATRIX_CELLS, true),
+                MatrixMode::Pairwise
+            );
+            assert_eq!(matrix_mode(profile, 50, false), MatrixMode::Pairwise);
+            assert_eq!(matrix_mode(profile, 51, false), MatrixMode::Rows);
+        }
+        for profile in [MobilityProfile::OnFoot, MobilityProfile::Legged] {
+            assert_eq!(matrix_mode(profile, 64, true), MatrixMode::Pairwise);
+            assert_eq!(matrix_mode(profile, 65, true), MatrixMode::Rows);
+            assert_eq!(matrix_mode(profile, 13, false), MatrixMode::Rows);
+        }
     }
 }

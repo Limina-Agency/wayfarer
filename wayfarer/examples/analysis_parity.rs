@@ -247,6 +247,40 @@ fn cases(engine: &RoutingEngine) -> Vec<Case> {
             profile,
         });
     }
+    // Large matrices, run only when named by `ANALYSIS_ONLY` (time a few rows
+    // with `ANALYSIS_SOURCES`): beyond the old 400-target vehicle cut-off.
+    for (label, seeds, area, count, profile) in [
+        (
+            "matrix_krakow_1500x1500_drive",
+            &krakow,
+            KRAKOW_BOX,
+            1500,
+            MobilityProfile::Wheeled,
+        ),
+        (
+            "matrix_region_1000x1000_drive",
+            &regional,
+            REGION_BOX,
+            1000,
+            MobilityProfile::Wheeled,
+        ),
+    ] {
+        if only.as_deref() != Some(label) {
+            continue;
+        }
+        // `ANALYSIS_POINTS=<n>` samples n points instead.
+        let count = std::env::var("ANALYSIS_POINTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(count);
+        let points = sampled_points(engine, seeds.clone(), area, count, profile);
+        cases.push(Case::Matrix {
+            label,
+            sources: points.clone(),
+            targets: points,
+            profile,
+        });
+    }
     cases.extend([
         Case::Matrix {
             label: "matrix_krakow_8x8_drive",

@@ -70,10 +70,11 @@ pub struct RouteOptions {
     /// Budget for one search: the most out-edges it may examine before it
     /// stops with `SearchBudgetExceeded`. A route is one search. A matrix
     /// applies it to each search separately, never to the request as a
-    /// whole: to each cell when cells are searched pairwise (up to 12
-    /// searchable targets on foot, and otherwise 400 on a package with CCH
-    /// potentials and 50 without), and to each source row's shared expansion
-    /// above that cut-off. Cells a stopped search had not reached fail with
+    /// whole: to each cell when cells are searched pairwise (on a package
+    /// with CCH potentials, up to 64 searchable targets on foot and any
+    /// number with a vehicle; without them, up to 12 on foot and 50 with a
+    /// vehicle), and to each source row's shared expansion above that
+    /// cut-off. Cells a stopped search had not reached fail with
     /// `search_budget_exceeded`; targets a stopped row had already reached
     /// keep their best path so far. Isochrones ignore it and use
     /// `RouteIsochroneRequest::max_expansion_edge_count`.
