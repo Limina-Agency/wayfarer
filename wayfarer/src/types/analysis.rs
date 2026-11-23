@@ -118,7 +118,16 @@ pub struct RouteIsochroneContour {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RouteIsochroneRequest {
+    /// The first origin. With `origins`, it is origin 0 of several.
     pub origin: GeoPoint,
+    /// More origins after `origin`, at most 64 in all
+    /// (`limits::MAX_ISOCHRONE_ORIGINS`): the isochrone is everywhere
+    /// reachable from any of them, each edge at its least value from any
+    /// origin. Each origin snaps as `origin` does, and a farther candidate's
+    /// approach cost is relative to its own origin's nearest one. Every
+    /// origin must snap, or the request fails with `no_candidate`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<RouteIsochroneOrigin>,
     pub profile: MobilityProfile,
     pub contours: Vec<RouteIsochroneContour>,
     #[serde(default)]
@@ -145,6 +154,21 @@ pub struct RouteIsochroneRequest {
     pub include_edge_ids: bool,
 }
 
+/// One more origin of a multi-origin isochrone (see
+/// `RouteIsochroneRequest::origins`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RouteIsochroneOrigin {
+    pub point: GeoPoint,
+}
+
+impl RouteIsochroneOrigin {
+    pub fn new(point: GeoPoint) -> Self {
+        Self { point }
+    }
+}
+
 impl RouteIsochroneRequest {
     pub fn new(
         origin: GeoPoint,
@@ -153,6 +177,7 @@ impl RouteIsochroneRequest {
     ) -> Self {
         Self {
             origin,
+            origins: Vec::new(),
             profile,
             contours,
             options: RouteOptions::default(),
@@ -193,6 +218,10 @@ pub struct RouteIsochroneBoundaryFragment {
 #[serde(rename_all = "camelCase")]
 pub struct RouteIsochroneResult {
     pub origin: CorrelatedLocation,
+    /// Where each of the request's `origins` snapped, in order (origin 0 is
+    /// `origin`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<CorrelatedLocation>,
     pub buckets: Vec<RouteIsochroneBucket>,
     pub visited_edge_count: usize,
     pub settled_node_count: usize,

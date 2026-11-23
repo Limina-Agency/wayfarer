@@ -72,7 +72,15 @@
       }
     },
     "origin": {
+      "description": "The first origin. With `origins`, it is origin 0 of several.",
       "$ref": "#/$defs/GeoPoint"
+    },
+    "origins": {
+      "description": "More origins after `origin`, at most 64 in all\n(`limits::MAX_ISOCHRONE_ORIGINS`): the isochrone is everywhere\nreachable from any of them, each edge at its least value from any\norigin. Each origin snaps as `origin` does, and a farther candidate's\napproach cost is relative to its own origin's nearest one. Every\norigin must snap, or the request fails with `no_candidate`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteIsochroneOrigin"
+      }
     },
     "overlays": {
       "description": "Closures and other overlays, as geometry or package edges, applied as\na route applies them.",
@@ -643,6 +651,18 @@
           "type": "string",
           "const": "distance_m"
         }
+      ]
+    },
+    "RouteIsochroneOrigin": {
+      "description": "One more origin of a multi-origin isochrone (see\n`RouteIsochroneRequest::origins`).",
+      "type": "object",
+      "properties": {
+        "point": {
+          "$ref": "#/$defs/GeoPoint"
+        }
+      },
+      "required": [
+        "point"
       ]
     },
     "RouteOptions": {

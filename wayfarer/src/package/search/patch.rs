@@ -1153,6 +1153,10 @@ pub(crate) struct PatchQuery<'q> {
     pub destinations: &'q [CorrelatedLocation],
     pub origin_edges: &'q [u32],
     pub destination_edges: &'q [u32],
+    /// The origin each origin candidate belongs to (a multi-origin
+    /// isochrone's), or empty for one endpoint's candidates: approach costs
+    /// are per origin.
+    pub origin_targets: &'q [usize],
     /// The target of each destination (a matrix row's), or empty for one
     /// endpoint's candidates: approach costs are per target.
     pub destination_targets: &'q [usize],
@@ -1176,15 +1180,20 @@ pub(crate) struct PatchQuery<'q> {
 
 impl<'q> PatchQuery<'q> {
     /// The approach costs of the origin and destination candidates (see
-    /// `search::approach_costs`), destinations relative to the nearest
-    /// candidate of their own target.
+    /// `search::approach_costs`), each relative to the nearest candidate of
+    /// its own origin or target.
     fn approaches(&self) -> (Vec<f64>, Vec<f64>) {
-        let destinations = if self.destination_targets.is_empty() {
-            super::approach_costs(self.destinations)
-        } else {
-            super::approach_costs_by_target(self.destinations, self.destination_targets)
+        let by_target = |candidates, targets: &[usize]| {
+            if targets.is_empty() {
+                super::approach_costs(candidates)
+            } else {
+                super::approach_costs_by_target(candidates, targets)
+            }
         };
-        (super::approach_costs(self.origins), destinations)
+        (
+            by_target(self.origins, self.origin_targets),
+            by_target(self.destinations, self.destination_targets),
+        )
     }
 
     /// The same query between other origins and destinations.
@@ -1211,6 +1220,7 @@ impl<'q> PatchQuery<'q> {
             destinations,
             origin_edges,
             destination_edges,
+            origin_targets: &[],
             destination_targets: &[],
             max_visited_edge_count: self.max_visited_edge_count,
             cancellation: self.cancellation,

@@ -494,6 +494,7 @@ impl RoutingEngine {
             destinations: &[],
             origin_edges: &[],
             destination_edges: &[],
+            origin_targets: &[],
             destination_targets: &[],
             max_visited_edge_count: request.options.max_visited_edge_count,
             cancellation: &request.options.cancellation,

@@ -3289,6 +3289,142 @@ fn package_overlay_isochrones_follow_splits_and_connectors() {
     }
 }
 
+/// An isochrone from several origins reaches, within a cost contour, exactly
+/// the edges any one of them reaches alone (each origin's approach costs are
+/// its own), on the package, the patch and the reference alike.
+#[test]
+fn multi_origin_isochrones_reach_what_any_origin_reaches() {
+    let dir = tempdir().unwrap();
+    let graph = grid_graph();
+    let reader = persist(&graph, &dir.path().join("grid.mrt"));
+    let (oracle, compact) = engines(&reader);
+    // About 33 m inside the grid's bottom and top rows, far from the first
+    // origin (which lies on a street): their nearest candidates cost no
+    // approach only when approaches are per origin.
+    let more = [GeoPoint::new(0.0003, 0.0008), GeoPoint::new(0.0041, 0.0046)];
+    let overlay = unused_connector_overlay(&graph);
+    for (profile, limits) in [
+        (MobilityProfile::Wheeled, [20.0, 45.0, 90.0]),
+        (MobilityProfile::OnFoot, [60.0, 150.0, 300.0]),
+    ] {
+        let single = |origin: GeoPoint| {
+            let mut request = grid_isochrone_request(profile, limits);
+            request.origin = origin;
+            compact.isochrone(request).unwrap()
+        };
+        let mut request = grid_isochrone_request(profile, limits);
+        let singles = std::iter::once(request.origin)
+            .chain(more)
+            .map(single)
+            .collect::<Vec<_>>();
+        request.origins = more.map(crate::RouteIsochroneOrigin::new).to_vec();
+        let multi = compact.isochrone(request.clone()).unwrap();
+        assert_eq!(multi.origin, singles[0].origin, "{profile:?}");
+        assert_eq!(
+            multi.origins,
+            [singles[1].origin.clone(), singles[2].origin.clone()],
+            "{profile:?}"
+        );
+        for (index, bucket) in multi.buckets.iter().enumerate() {
+            let alone = singles
+                .iter()
+                .flat_map(|single| single.buckets[index].edge_ids.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>();
+            if bucket.metric == crate::RouteIsochroneMetric::Cost {
+                assert_eq!(
+                    bucket.edge_ids,
+                    alone.into_iter().collect::<Vec<_>>(),
+                    "{profile:?}: cost {}",
+                    bucket.contour
+                );
+            }
+            // More origins reach at least as far as the first alone, and
+            // farther within the smallest contour.
+            let first = singles[0].buckets[index].edge_ids.len();
+            assert!(
+                bucket.edge_ids.len() >= first && (index > 0 || bucket.edge_ids.len() > first),
+                "{profile:?} {:?} {}",
+                bucket.metric,
+                bucket.contour
+            );
+        }
+        let expected = oracle.isochrone(request.clone()).unwrap();
+        assert_eq!(expected.origins, multi.origins);
+        assert_isochrone_parity(&expected, &multi, &format!("{profile:?}"));
+        request.options.dynamic_overlay = Some(overlay.clone());
+        let patched = compact.isochrone(request).unwrap();
+        assert_eq!(patched.origins, multi.origins);
+        assert_isochrone_parity(&multi, &patched, &format!("{profile:?} patch"));
+    }
+}
+
+/// An origin trapped inside a destination-only ring contributes its relaxed
+/// isochrone, as it would alone, while an origin outside keeps the strict
+/// one: the isochrone of both reaches within a cost contour exactly what
+/// either reaches alone, on the package, the patch and the reference.
+#[test]
+fn a_trapped_origin_of_several_leaves_its_ring_as_it_would_alone() {
+    let dir = tempdir().unwrap();
+    let graph = grid_with_private_ring();
+    let reader = persist(&graph, &dir.path().join("grid.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let overlay = unused_connector_overlay(&graph);
+    // On the corner's top edge, inside the ring, and on the far side.
+    let (inside, outside) = (grid_points()[0], GeoPoint::new(0.0041, 0.0046));
+    let profile = MobilityProfile::Wheeled;
+    let limits = [20.0, 45.0, 90.0];
+    let single = |origin: GeoPoint| {
+        let mut request = grid_isochrone_request(profile, limits);
+        request.origin = origin;
+        compact.isochrone(request).unwrap()
+    };
+    let (alone_inside, alone_outside) = (single(inside), single(outside));
+    let mut request = grid_isochrone_request(profile, limits);
+    request.origin = inside;
+    request.origins = vec![crate::RouteIsochroneOrigin::new(outside)];
+    let both = compact.isochrone(request.clone()).unwrap();
+    for (index, bucket) in both.buckets.iter().enumerate() {
+        let context = format!("{:?} {}", bucket.metric, bucket.contour);
+        let alone = alone_inside.buckets[index]
+            .edge_ids
+            .iter()
+            .chain(&alone_outside.buckets[index].edge_ids)
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if bucket.metric == crate::RouteIsochroneMetric::Cost {
+            assert_eq!(
+                bucket.edge_ids,
+                alone.into_iter().collect::<Vec<_>>(),
+                "{context}"
+            );
+        }
+        // The inside origin leaves its ring.
+        for edge in &alone_inside.buckets[index].edge_ids {
+            assert!(bucket.edge_ids.contains(edge), "{context}: lost {edge}");
+        }
+    }
+    let expected = oracle.isochrone(request.clone()).unwrap();
+    assert_isochrone_parity(&expected, &both, "both");
+    request.options.dynamic_overlay = Some(overlay);
+    let patched = compact.isochrone(request).unwrap();
+    assert_isochrone_parity(&both, &patched, "both patch");
+}
+
+/// A connector far costlier than any grid contour: it sends an isochrone
+/// through the patch without changing what it reaches.
+fn unused_connector_overlay(graph: &RoadGraph) -> crate::RouteDynamicOverlay {
+    let mut overlay = crate::RouteDynamicOverlay::default();
+    overlay.virtual_edges.push(edge_connector(
+        0,
+        crate::RouteDynamicVirtualEdgeKind::CrossCountry,
+        (grid_edge(graph, (1, 1), (1, 2)), 0.5),
+        (grid_edge(graph, (3, 3), (3, 4)), 0.5),
+        1e7,
+    ));
+    overlay.refresh_diagnostics();
+    overlay
+}
+
 /// Streets around the corner of four detail tiles (lat 0, lng 0): curved
 /// two-way and one-way ways, a closed loop, a long diagonal crossing tile
 /// boundaries, a footway, a named primary with a ref, and a bridge on layer 1.

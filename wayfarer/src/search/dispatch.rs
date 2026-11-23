@@ -387,6 +387,7 @@ impl Search<'_> {
             destinations: destination_candidates,
             origin_edges,
             destination_edges,
+            origin_targets: &[],
             destination_targets: &[],
             max_visited_edge_count: self.request.options.max_visited_edge_count,
             cancellation: &self.request.options.cancellation,
