@@ -656,7 +656,7 @@ impl SearchState {
 
 pub(crate) struct SearchQuery<'q> {
     pub column: CostColumn<'q>,
-    pub profile_bit: u8,
+    pub profile_bit: u16,
     pub heuristic_cost_per_m: f64,
     pub origins: &'q [CorrelatedLocation],
     pub destinations: &'q [CorrelatedLocation],
@@ -2382,7 +2382,7 @@ impl<'q> Run<'_, '_, 'q> {
             (start..g.complex_to.len())
                 .take_while(|row| g.complex_to[*row] == *edge)
                 .any(|row| {
-                    g.complex_mask[row] & self.q.profile_bit != 0 && {
+                    g.complex_mask.get(row) & self.q.profile_bit != 0 && {
                         let prefix = &g.complex_prefix_pool[g.complex_prefix_start[row] as usize
                             ..g.complex_prefix_start[row + 1] as usize];
                         edges[..index].ends_with(prefix)
@@ -2583,7 +2583,7 @@ impl SearchGraph<'_> {
     pub(crate) fn restriction_violations(
         &self,
         edges: &[u32],
-        profile_bit: u8,
+        profile_bit: u16,
     ) -> Vec<RestrictionViolation> {
         let mut violations = Vec::new();
         for index in 1..edges.len() {
@@ -2612,17 +2612,19 @@ impl SearchGraph<'_> {
 
     /// Whether a simple (from, to) restriction applies to this profile.
     #[inline]
-    pub(crate) fn simple_restricted(&self, from_edge: u32, to_edge: u32, profile_bit: u8) -> bool {
+    pub(crate) fn simple_restricted(&self, from_edge: u32, to_edge: u32, profile_bit: u16) -> bool {
         self.edge_flags[from_edge as usize] & EDGE_FLAG_SIMPLE_RESTRICTION_FROM != 0
             && self.simple_restricted_rows(from_edge, to_edge, profile_bit)
     }
 
-    fn simple_restricted_rows(&self, from_edge: u32, to_edge: u32, profile_bit: u8) -> bool {
+    fn simple_restricted_rows(&self, from_edge: u32, to_edge: u32, profile_bit: u16) -> bool {
         let from = self.simple_from;
         let start = from.partition_point(|edge| *edge < from_edge);
         (start..from.len())
             .take_while(|row| from[*row] == from_edge)
-            .any(|row| self.simple_to[row] == to_edge && self.simple_mask[row] & profile_bit != 0)
+            .any(|row| {
+                self.simple_to[row] == to_edge && self.simple_mask.get(row) & profile_bit != 0
+            })
     }
 
     /// Required traversed prefixes of the complex restrictions that forbid
@@ -2630,7 +2632,7 @@ impl SearchGraph<'_> {
     pub(crate) fn complex_prefixes_to(
         &self,
         to_edge: u32,
-        profile_bit: u8,
+        profile_bit: u16,
     ) -> impl Iterator<Item = &[u32]> + '_ {
         let rows = if self.edge_flags[to_edge as usize] & EDGE_FLAG_COMPLEX_RESTRICTION_TO != 0 {
             let start = self.complex_to.partition_point(|edge| *edge < to_edge);
@@ -2639,7 +2641,7 @@ impl SearchGraph<'_> {
             0..0
         };
         rows.take_while(move |row| self.complex_to[*row] == to_edge)
-            .filter(move |row| self.complex_mask[*row] & profile_bit != 0)
+            .filter(move |row| self.complex_mask.get(*row) & profile_bit != 0)
             .map(move |row| {
                 &self.complex_prefix_pool[self.complex_prefix_start[row] as usize
                     ..self.complex_prefix_start[row + 1] as usize]

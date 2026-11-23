@@ -1148,7 +1148,7 @@ pub(crate) struct PatchQuery<'q> {
     /// Edges and split edges the request makes cheaper than the column:
     /// gates of the potentials (see `gates`).
     pub gates: &'q [DiscountGate],
-    pub profile_bit: u8,
+    pub profile_bit: u16,
     pub origins: &'q [CorrelatedLocation],
     pub destinations: &'q [CorrelatedLocation],
     pub origin_edges: &'q [u32],

@@ -143,9 +143,9 @@ pub(crate) struct ComplexAutomata {
 }
 
 impl ComplexAutomata {
-    pub(crate) fn new(graph: &SearchGraph<'_>, profile_bit: u8) -> Self {
+    pub(crate) fn new(graph: &SearchGraph<'_>, profile_bit: u16) -> Self {
         let restrictions = (0..graph.complex_to.len())
-            .filter(|row| graph.complex_mask[*row] & profile_bit != 0)
+            .filter(|row| graph.complex_mask.get(*row) & profile_bit != 0)
             .map(|row| {
                 (
                     &graph.complex_prefix_pool[graph.complex_prefix_start[row] as usize

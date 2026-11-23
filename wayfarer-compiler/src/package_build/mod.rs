@@ -561,7 +561,7 @@ fn build_package_from(
     network.release_node_columns(&[NodeColumn::Barrier]);
     report.barrier_node_count = barrier_node.len();
     writer.put(Section::BarrierClass, barrier_class);
-    writer.put(Section::BarrierAccess, barrier_access);
+    writer.put_barrier_access(barrier_access);
     clock.lap("nodes")?;
 
     // Edge ids: a dense lookup from (id - base) to the compact edge.
@@ -1027,8 +1027,9 @@ fn build_package_from(
         Section::SimpleVia,
         simple_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
     );
-    writer.put(
+    writer.put_profile_masks(
         Section::SimpleMask,
+        Section::SimpleMask16,
         simple_rows.iter().map(|row| row.3).collect::<Vec<_>>(),
     );
     drop(simple_rows);
@@ -1036,8 +1037,9 @@ fn build_package_from(
         Section::ComplexTo,
         complex_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
     );
-    writer.put(
+    writer.put_profile_masks(
         Section::ComplexMask,
+        Section::ComplexMask16,
         complex_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
     );
     drop(complex_rows);
@@ -1319,7 +1321,7 @@ fn build_package_from(
     drop(edge_id_lookup);
     // Derived from the twins and the out-adjacency.
     drop(edge_source);
-    writer.put(Section::EdgeProfileAccess, edge_profile_access);
+    writer.put_edge_access(edge_profile_access);
     writer.put(Section::EdgeFlags, edge_flags);
     if implied_ids {
         // Format 3 stores no edge ids: edge `i` has id `edge_id_base + i`.

@@ -36,6 +36,7 @@ use rustc_hash::FxHashMap;
 pub use bounds::OverlayStats;
 pub use seam::SeamSummary;
 
+use crate::package::SearchGraph;
 use crate::package::cch::{PotentialScratch, PotentialStats};
 use crate::package::columns::{ColumnHandle, PotentialBase};
 use crate::package::search::analysis::{override_bounds, resolve_location};
@@ -43,7 +44,6 @@ use crate::package::search::{
     SearchCounters, SearchOutcome, SearchPath, SearchQuery, approach_costs, potential_plan,
     run as run_package,
 };
-use crate::package::{SearchGraph, profile_bit};
 use crate::types::{CorrelatedLocation, MobilityProfile, RouteCostingOptions, RouteOptions};
 use crate::{RouteCancellation, RoutingPackage};
 
@@ -307,7 +307,11 @@ impl SeamRouter {
         let handle = graph.request_column_sar(profile, &RouteCostingOptions::default(), true, None);
         let view = graph
             .view()
-            .with_transitions(crate::transitions::Transitions::of(&options, profile));
+            .with_transitions(crate::transitions::Transitions::of(
+                &options,
+                profile,
+                graph.profile_bit(profile),
+            ));
         let topology = &view.cch.ok_or(SeamError::NoPotentials)?.topology;
         let column = handle.column(&view);
         let stored = match (&handle, column.potential) {
@@ -352,7 +356,7 @@ impl SeamRouter {
         let cancellation = RouteCancellation::default();
         let query = SearchQuery {
             column,
-            profile_bit: profile_bit(profile),
+            profile_bit: view.profile_bit(profile),
             heuristic_cost_per_m: limits.heuristic_cost_per_m,
             origins,
             destinations,

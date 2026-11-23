@@ -570,7 +570,7 @@ impl RoadGraphBuilder {
                     None => self.report.barrier_unknown_value_count += 1,
                     Some(barrier) if barrier.has_effect() => {
                         let access = barrier.profile_access();
-                        barrier_access = access.0;
+                        barrier_access = access.to_format_2();
                         self.report.barrier_constraints_applied += 1;
                         self.report.barrier_hard_block_count += usize::from(access.closed() != 0);
                         self.report.barrier_conditional_count += usize::from(access.gate() != 0);

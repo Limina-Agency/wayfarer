@@ -879,7 +879,11 @@ impl<'a> Records<'a> {
             ),
             unblocked: None,
             restriction_penalty: crate::sar::restriction_penalty(options),
-            transitions: crate::transitions::Transitions::of(options, profile),
+            transitions: crate::transitions::Transitions::of(
+                options,
+                profile,
+                u16::from(wayfarer_package::format::format_2_profile_bit(profile)),
+            ),
             edges: RefCell::default(),
             prefix_starts: std::cell::OnceCell::new(),
         }
@@ -975,7 +979,7 @@ impl<'a> Records<'a> {
         let barrier = &next.record.source;
         let barrier_cost = self.transitions.barrier_cost_of(
             SarBarrierClass::from_code(barrier.barrier_class),
-            BarrierAccess(barrier.barrier_access),
+            BarrierAccess::from_format_2(barrier.barrier_access),
         );
         // A U-turn on one segment does not pass the barrier.
         if barrier_cost == 0.0

@@ -18,7 +18,6 @@
 
 use super::*;
 use crate::package::destination::relax_split_costs;
-use crate::package::profile_bit;
 use crate::package::search::analysis::{
     OverrideBounds, overlay_split_costs, override_bounds, request_cost_overrides,
     request_duration_overrides, resolve_edge_id, resolve_location,
@@ -57,7 +56,11 @@ impl Search<'_> {
         );
         let view = graph
             .view()
-            .with_transitions(crate::transitions::Transitions::of(options, profile));
+            .with_transitions(crate::transitions::Transitions::of(
+                options,
+                profile,
+                graph.profile_bit(profile),
+            ));
         let column = handle.column(&view);
         let resolve = |location: &CorrelatedLocation| {
             resolve_location(view, location).ok_or(RouteError::MissingEdgeMetadata {
@@ -214,7 +217,7 @@ impl Search<'_> {
         });
         let query = SearchQuery {
             column,
-            profile_bit: profile_bit(profile),
+            profile_bit: view.profile_bit(profile),
             heuristic_cost_per_m: bounds.heuristic_cost_per_m,
             origins: origin_candidates,
             destinations: destination_candidates,
@@ -374,6 +377,7 @@ impl Search<'_> {
             .with_transitions(crate::transitions::Transitions::of(
                 &self.request.options,
                 self.request.profile,
+                graph.profile_bit(self.request.profile),
             ));
         let query = PatchQuery {
             heuristic_cost_per_m: bounds.heuristic_cost_per_m,
@@ -382,7 +386,7 @@ impl Search<'_> {
             potentials: !bounds.fell_back(),
             gates: &bounds.gates,
             costs,
-            profile_bit: profile_bit(self.request.profile),
+            profile_bit: view.profile_bit(self.request.profile),
             origins: origin_candidates,
             destinations: destination_candidates,
             origin_edges,
@@ -600,7 +604,7 @@ impl Search<'_> {
                 .ok_or("route edge not in the package")?;
             restriction_cost = penalty
                 * graph
-                    .restriction_violations(&edges, profile_bit(profile))
+                    .restriction_violations(&edges, graph.profile_bit(profile))
                     .len() as f64;
         }
         for index in (1..records.len()).filter(|_| penalty.is_none()) {
@@ -632,8 +636,12 @@ impl Search<'_> {
         // Transition costs (barriers, SAR R2 entry), from the package's
         // sections, where turn costs are paid. Package records carry their
         // compact edge in `raw_edge_index`.
-        let transitions = crate::transitions::Transitions::of(&self.request.options, profile);
         let package_view = self.access.routing_package().view();
+        let transitions = crate::transitions::Transitions::of(
+            &self.request.options,
+            profile,
+            package_view.profile_bit(profile),
+        );
         let edge_of = |record: &GraphViewEdge| -> Result<u32, String> {
             let edge = u32::try_from(record.raw_edge_index)
                 .ok()

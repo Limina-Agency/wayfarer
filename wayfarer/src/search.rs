@@ -797,7 +797,7 @@ impl RoutingEngine {
             if compact.is_none_or(|edges| {
                 !plan
                     .graph
-                    .restriction_violations(&edges, crate::package::profile_bit(request.profile))
+                    .restriction_violations(&edges, plan.graph.profile_bit(request.profile))
                     .is_empty()
             }) {
                 primary.diagnostics.rejected_alternative_search_failed_count += 1;

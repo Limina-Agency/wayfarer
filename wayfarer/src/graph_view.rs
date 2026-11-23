@@ -69,8 +69,8 @@ impl PackageGraphView {
         )
     }
 
-    fn profile_mask_applies(mask: u8, profile: MobilityProfile) -> bool {
-        mask & crate::package::profile_bit(profile) != 0
+    fn profile_mask_applies(&self, mask: u16, profile: MobilityProfile) -> bool {
+        mask & self.graph.profile_bit(profile) != 0
     }
 }
 
@@ -283,13 +283,13 @@ impl PackageGraphView {
         if node + 1 >= view.first_out.len() || node >= view.node_count {
             return (Vec::new(), Vec::new());
         }
-        let bit = crate::package::profile_bit(profile);
+        let bit = view.profile_bit(profile);
         let shared_of = |raw: usize| view.edge_shared_info[raw];
         let (previous_shared, edge_shared) = (
             shared_of(previous.raw_edge_index),
             shared_of(edge.raw_edge_index),
         );
-        let usable = |raw: usize| view.edge_profile_access[raw] & bit != 0;
+        let usable = |raw: usize| view.edge_access.profiles(raw) & bit != 0;
         let branches = (view.first_out[node]..view.first_out[node + 1])
             .map(|raw| raw as usize)
             .filter(|raw| *raw != edge.raw_edge_index && shared_of(*raw) != previous_shared)
@@ -418,7 +418,8 @@ impl PackageGraphView {
         let start = view.simple_from.partition_point(|edge| *edge < from);
         let end = view.simple_from.partition_point(|edge| *edge <= from);
         (start..end).any(|row| {
-            view.simple_to[row] == to && Self::profile_mask_applies(view.simple_mask[row], profile)
+            view.simple_to[row] == to
+                && self.profile_mask_applies(view.simple_mask.get(row), profile)
         })
     }
 
@@ -433,7 +434,7 @@ impl PackageGraphView {
         };
         let start = view.complex_to.partition_point(|edge| *edge < to);
         let end = view.complex_to.partition_point(|edge| *edge <= to);
-        (start..end).any(|row| Self::profile_mask_applies(view.complex_mask[row], profile))
+        (start..end).any(|row| self.profile_mask_applies(view.complex_mask.get(row), profile))
     }
 
     pub fn complex_transition_restricted_for_path(
@@ -449,7 +450,7 @@ impl PackageGraphView {
         let start = view.complex_to.partition_point(|edge| *edge < to);
         let end = view.complex_to.partition_point(|edge| *edge <= to);
         (start..end).any(|row| {
-            if !Self::profile_mask_applies(view.complex_mask[row], profile) {
+            if !self.profile_mask_applies(view.complex_mask.get(row), profile) {
                 return false;
             }
             let prefix = &view.complex_prefix_pool[view.complex_prefix_start[row] as usize
