@@ -181,6 +181,45 @@ impl Packed {
         }
     }
 
+    /// Appends `values` as [`Self::push`] of each in turn would, with the
+    /// layout widened at most once.
+    pub(crate) fn extend<T: Copy + Into<u64>>(&mut self, values: &[T]) {
+        let mut rest = values;
+        if let Self::Iota { base, len } = self {
+            let mut taken = 0;
+            if *len == 0
+                && let Some(first) = rest.first()
+            {
+                *base = (*first).into();
+                *len = 1;
+                taken = 1;
+            }
+            while taken < rest.len() && base.wrapping_add(*len as u64) == rest[taken].into() {
+                *len += 1;
+                taken += 1;
+            }
+            rest = &rest[taken..];
+            if rest.is_empty() {
+                return;
+            }
+        }
+        let width = rest
+            .iter()
+            .map(|value| width_of((*value).into()))
+            .max()
+            .unwrap_or(0);
+        if width > self.width() || matches!(self, Self::Iota { .. }) {
+            self.materialize(width, rest.len());
+        }
+        match self {
+            Self::Iota { .. } => unreachable!("materialized above"),
+            Self::U8(out) => out.extend(rest.iter().map(|value| (*value).into() as u8)),
+            Self::U16(out) => out.extend(rest.iter().map(|value| (*value).into() as u16)),
+            Self::U32(out) => out.extend(rest.iter().map(|value| (*value).into() as u32)),
+            Self::U64(out) => out.extend(rest.iter().map(|value| (*value).into())),
+        }
+    }
+
     pub(crate) fn set(&mut self, index: usize, value: u64) {
         if self.get(index) == value {
             return;
@@ -297,6 +336,21 @@ impl OptionPacked {
         self.values.push(value.unwrap_or(0));
         if value.is_none() {
             self.mark_none(index, true);
+        }
+    }
+
+    /// Appends `values` as [`Self::push`] of each in turn would.
+    pub(crate) fn extend(&mut self, values: &[Option<u64>]) {
+        let start = self.values.len();
+        let packed = values
+            .iter()
+            .map(|value| value.unwrap_or(0))
+            .collect::<Vec<_>>();
+        self.values.extend(&packed);
+        for (offset, value) in values.iter().enumerate() {
+            if value.is_none() {
+                self.mark_none(start + offset, true);
+            }
         }
     }
 
@@ -509,6 +563,53 @@ struct EdgeColumns {
     end_heading: Packed,
     inferred_speed: Packed,
     opposing_edge_id: OptionPacked,
+}
+
+/// Directed edges to append to a [`RoadNetwork`] at once
+/// ([`RoadNetwork::append_edges`]): built apart from the graph (across a
+/// thread pool, a batch each), then appended in order, a column at a time.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EdgeBatch {
+    source: Vec<u32>,
+    target: Vec<u32>,
+    edge_id: Vec<u64>,
+    shared_edge_info_id: Vec<u64>,
+    distance_m: Vec<f32>,
+    base_cost: Vec<f32>,
+    mobility_mode_mask: Vec<ModeMask>,
+    osm_forward_mode_mask: Vec<ModeMask>,
+    osm_reverse_mode_mask: Vec<ModeMask>,
+    flags: Vec<u8>,
+    segment_index: Vec<u32>,
+    start_heading: Vec<u64>,
+    end_heading: Vec<u64>,
+    inferred_speed: Vec<u64>,
+    opposing_edge_id: Vec<Option<u64>>,
+}
+
+impl EdgeBatch {
+    pub(crate) fn len(&self) -> usize {
+        self.source.len()
+    }
+
+    /// Adds an edge, as [`RoadNetwork::add_edge`] would add it.
+    pub(crate) fn push(&mut self, source: NodeIndex, target: NodeIndex, edge: RoadEdge) {
+        self.source.push(source.index() as u32);
+        self.target.push(target.index() as u32);
+        self.edge_id.push(edge.edge_id);
+        self.shared_edge_info_id.push(edge.shared_edge_info_id);
+        self.distance_m.push(edge.distance_m);
+        self.base_cost.push(edge.base_cost);
+        self.mobility_mode_mask.push(edge.mobility_mode_mask);
+        self.osm_forward_mode_mask.push(edge.osm_forward_mode_mask);
+        self.osm_reverse_mode_mask.push(edge.osm_reverse_mode_mask);
+        self.flags.push(edge_flags_byte(&edge));
+        self.segment_index.push(edge.segment_index);
+        self.start_heading.push(some_code(edge.start_heading_deg));
+        self.end_heading.push(some_code(edge.end_heading_deg));
+        self.inferred_speed.push(some_code(edge.inferred_speed_kph));
+        self.opposing_edge_id.push(edge.opposing_edge_id);
+    }
 }
 
 /// A node column a caller may release ([`RoadNetwork::release_node_columns`]).
@@ -947,6 +1048,46 @@ impl RoadNetwork {
             .push(some_code(edge.inferred_speed_kph));
         edges.opposing_edge_id.push(edge.opposing_edge_id);
         EdgeIndex::new(index)
+    }
+
+    /// Appends a batch's edges in its order, as [`Self::add_edge`] of each
+    /// would.
+    pub(crate) fn append_edges(&mut self, batch: &EdgeBatch) {
+        let count = batch.len();
+        assert!(
+            self.edge_count() + count < u32::MAX as usize,
+            "the graph exceeds u32 indexing"
+        );
+        let node_count = self.node_count();
+        assert!(
+            batch
+                .source
+                .iter()
+                .chain(&batch.target)
+                .all(|node| (*node as usize) < node_count),
+            "an edge's endpoint is not a node of the graph"
+        );
+        let edges = &mut self.edges;
+        edges.count += count;
+        edges.source.extend_from_slice(&batch.source);
+        edges.target.extend_from_slice(&batch.target);
+        edges.edge_id.extend(&batch.edge_id);
+        edges.shared_edge_info_id.extend(&batch.shared_edge_info_id);
+        edges.distance_m.extend_from_slice(&batch.distance_m);
+        edges.base_cost.extend_from_slice(&batch.base_cost);
+        edges.mobility_mode_mask.extend(&batch.mobility_mode_mask);
+        edges
+            .osm_forward_mode_mask
+            .extend(&batch.osm_forward_mode_mask);
+        edges
+            .osm_reverse_mode_mask
+            .extend(&batch.osm_reverse_mode_mask);
+        edges.flags.extend_from_slice(&batch.flags);
+        edges.segment_index.extend(&batch.segment_index);
+        edges.start_heading.extend(&batch.start_heading);
+        edges.end_heading.extend(&batch.end_heading);
+        edges.inferred_speed.extend(&batch.inferred_speed);
+        edges.opposing_edge_id.extend(&batch.opposing_edge_id);
     }
 
     /// The node at `index`; panics past the end, as petgraph's indexing did.
@@ -1434,6 +1575,58 @@ mod tests {
         wrapping.push(u64::MAX);
         wrapping.push(0);
         assert_eq!((wrapping.get(0), wrapping.get(1)), (u64::MAX, 0));
+    }
+
+    /// The layout and values pushing each value in turn leaves.
+    fn pushed(values: &[u64], start: &Packed) -> Packed {
+        let mut column = start.clone();
+        for value in values {
+            column.push(*value);
+        }
+        column
+    }
+
+    fn layout(column: &Packed) -> (u8, bool, Vec<u64>) {
+        (
+            column.width(),
+            matches!(column, Packed::Iota { .. }),
+            column.iter().collect(),
+        )
+    }
+
+    #[test]
+    fn packed_extend_is_pushing_each_value() {
+        let runs: [&[u64]; 7] = [
+            &[],
+            &[4, 5, 6],
+            &[7, 8, 300, 9],
+            &[1, 1, 1],
+            &[u64::MAX, 0, 1],
+            &[70_000, 2],
+            &[10, 11, 12, 13],
+        ];
+        for first in runs {
+            for second in runs {
+                let mut start = Packed::default();
+                start.extend(first);
+                assert_eq!(layout(&start), layout(&pushed(first, &Packed::default())));
+                let mut column = start.clone();
+                column.extend(second);
+                assert_eq!(layout(&column), layout(&pushed(second, &start)));
+            }
+        }
+        let mut options = OptionPacked::default();
+        let mut expected = OptionPacked::default();
+        let values = [None, Some(0), Some(300), None, None, Some(u64::MAX)];
+        options.extend(&values[..2]);
+        options.extend(&values[2..]);
+        for value in values {
+            expected.push(value);
+        }
+        assert_eq!(options.none, expected.none);
+        for (index, value) in values.iter().enumerate() {
+            assert_eq!(options.get(index), *value);
+        }
     }
 
     #[test]
