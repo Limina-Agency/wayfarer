@@ -2531,19 +2531,16 @@ impl PatchRun<'_, '_, '_, '_, '_> {
                 backward,
                 cost,
             } => {
-                let (f, b) = (
-                    self.labels[forward as usize],
-                    self.b_labels[backward as usize],
-                );
                 let first = self.labels[self.first_label(forward) as usize].origin;
-                let delay = self.transition_delay(f.last_edge, f.traversed, &self.info(b.arc));
-                (
-                    self.meeting_arcs(forward, backward),
-                    first,
-                    cost,
-                    f.distance_m + b.distance_m,
-                    f.duration_s + delay + b.duration_s,
-                )
+                let arcs = self.meeting_arcs(forward, backward);
+                // Summed in path order, not as the two halves' labels lie, so
+                // the bits do not depend on where they met.
+                let (path_cost, distance_m, duration_s) = self.path_sums(&arcs);
+                debug_assert!(
+                    (path_cost - cost).abs() <= 1e-9 * cost.abs().max(1.0),
+                    "path-order cost {path_cost} of a joined patch path, searched {cost}"
+                );
+                (arcs, first, path_cost, distance_m, duration_s)
             }
         };
         let mut steps = Vec::with_capacity(arcs.len());
@@ -2564,6 +2561,34 @@ impl PatchRun<'_, '_, '_, '_, '_> {
             distance_m,
             duration_s,
         }
+    }
+
+    /// The cost (approach costs included), distance and duration of the
+    /// path `arcs` (a seed first, a finish or end last), summed from the
+    /// origin in the forward search's order: each arc's turn cost before its
+    /// own cost, each junction delay before its duration. The bidirectional
+    /// patch search charges no restriction penalties (they make it run
+    /// forward only).
+    fn path_sums(&self, arcs: &[u32]) -> (f64, f64, f64) {
+        let seed = self.info(arcs[0]);
+        let (mut cost, mut distance_m, mut duration_s) =
+            (seed.cost, seed.distance_m, seed.duration_s);
+        let (mut last_edge, mut traversed) = (seed.edge, seed.traversed);
+        for arc in &arcs[1..] {
+            let info = self.info(*arc);
+            let (turn, delay) = self
+                .transition(last_edge, traversed, &info)
+                .unwrap_or((0.0, 0.0));
+            cost = cost + turn + info.cost;
+            duration_s = duration_s + delay + info.duration_s;
+            distance_m += info.distance_m;
+            (last_edge, traversed) = if info.edge == NO_NODE {
+                (NO_NODE, false)
+            } else {
+                (info.edge, true)
+            };
+        }
+        (cost, distance_m, duration_s)
     }
 
     fn first_label(&self, label: u32) -> u32 {

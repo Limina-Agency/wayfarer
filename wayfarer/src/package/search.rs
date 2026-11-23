@@ -1308,49 +1308,104 @@ impl<'q> Run<'_, '_, 'q> {
     }
 
     fn reconstruct(&self, finish: &Finish, destinations: &[Destination]) -> SearchPath {
-        let g = &self.g;
-        let column = self.q.column;
-        let mut distance_m = 0.0;
-        let mut duration_s = 0.0;
-        let mut seed = finish.label;
-        let mut current = finish.label;
-        while current != NO_LABEL {
-            let entry = self.state.labels[current as usize];
-            if entry.pred == NO_LABEL {
-                seed = current;
-            } else {
-                distance_m += f64::from(g.edge_length[entry.edge as usize]);
-                duration_s += f64::from(column.duration(entry.edge));
-                // Where the search added a turn cost.
-                let pred = self.state.labels[entry.pred as usize].edge;
-                duration_s += g.junction_delay(&column, pred, entry.edge);
-            }
-            current = entry.pred;
-        }
-        let seed_label = self.state.labels[seed as usize];
-        let origin_index = usize::from(seed_label.origin);
-        let remaining = (1.0 - self.q.origins[origin_index].fraction_along_edge).clamp(0.0, 1.0);
-        distance_m += f64::from(g.edge_length[seed_label.edge as usize]) * remaining;
-        duration_s += f64::from(column.duration(seed_label.edge)) * remaining;
-
-        let destination = &destinations[finish.destination];
-        distance_m += f64::from(g.edge_length[destination.edge as usize]) * destination.fraction;
-        duration_s += f64::from(column.duration(destination.edge)) * destination.fraction;
-        let last = self.state.labels[finish.label as usize];
-        if last.traversed {
-            duration_s += g.junction_delay(&column, last.edge, destination.edge);
-        }
+        let label = self.state.labels[finish.label as usize];
+        let seed = self.state.labels[self.seed_label(finish.label) as usize];
+        let mut all = self.forward_edges(finish.label);
+        all.push(destinations[finish.destination].edge);
+        let sums = self.path_sums(&all, seed, &label, finish.destination, destinations);
+        // The finish is summed the same way.
+        debug_assert_eq!(
+            sums.cost.to_bits(),
+            (finish.cost
+                - self.origin_approach[usize::from(seed.origin)]
+                - self.destination_approach[finish.destination])
+                .to_bits(),
+            "path-order cost of a forward path"
+        );
         let mut edges = self.traversed_edges(finish.label);
-        edges.push(destination.edge);
+        edges.push(destinations[finish.destination].edge);
         SearchPath {
             edges,
-            origin_index,
+            origin_index: usize::from(seed.origin),
             destination_index: finish.destination,
-            cost: finish.cost
+            cost: sums.cost,
+            distance_m: sums.distance_m,
+            duration_s: sums.duration_s,
+        }
+    }
+
+    /// The cost, duration and distance of a found path, from its every edge
+    /// (`all`: origin `seed`'s edge first, traversed or not, destination
+    /// `destination`'s edge last), summed from the origin in the forward
+    /// search's order: approach costs in its seed and finish and then taken
+    /// off, each edge's cost before its turn cost and its restriction
+    /// penalty, each junction delay before its edge's duration. The bits
+    /// therefore depend only on the path, never on how the search found it:
+    /// where the two halves of a bidirectional search met, or in which mode a
+    /// matrix ran (the matrix rows sum their labels the same way).
+    ///
+    /// `known` is the forward label of the path's first edges (the seed's
+    /// label at least), already summed that way: the costs continue from it.
+    fn path_sums(
+        &self,
+        all: &[u32],
+        seed: Label,
+        known: &Label,
+        destination: usize,
+        destinations: &[Destination],
+    ) -> PathSums {
+        let g = &self.g;
+        let column = self.q.column;
+        let origin_index = usize::from(seed.origin);
+        let (first, last) = (all[0], all[all.len() - 1]);
+        let remaining = (1.0 - self.q.origins[origin_index].fraction_along_edge).clamp(0.0, 1.0);
+        let fraction = destinations[destination].fraction;
+
+        let mut duration_s = f64::from(column.duration(first)) * remaining;
+        let mut distance_m = f64::from(g.edge_length[first as usize]) * remaining;
+        for index in 1..all.len() - 1 {
+            let (previous, edge) = (all[index - 1], all[index]);
+            duration_s = duration_s
+                + g.junction_delay(&column, previous, edge)
+                + f64::from(column.duration(edge));
+            distance_m += f64::from(g.edge_length[edge as usize]);
+        }
+        // Costs from the end of `known`, with restriction penalties as the
+        // forward search charges them, its restriction state carried on
+        // along the path. A found path breaks no ban.
+        let known_len = (known.path_len + u32::from(!seed.traversed)) as usize;
+        debug_assert_eq!(all[known_len - 1], known.edge);
+        let mut cost = known.cost;
+        let mut state = known.state;
+        let mut last_traversed = known.traversed.then_some(known.edge);
+        for index in known_len..all.len() {
+            let (previous, edge) = (all[index - 1], all[index]);
+            let penalty = self
+                .transition_penalty(state, last_traversed, edge)
+                .unwrap_or(0.0);
+            cost = if index + 1 < all.len() {
+                cost + f64::from(self.edge_cost(edge)) + self.turn_cost(previous, edge) + penalty
+            } else {
+                // Finishing straight from an untraversed seed costs no turn.
+                let turn = last_traversed.map_or(0.0, |last| self.turn_cost(last, edge));
+                cost + turn
+                    + f64::from(self.edge_cost(edge)) * fraction
+                    + self.destination_approach[destination]
+                    + penalty
+            };
+            state = self.automata.forward_next(g, state, edge);
+            last_traversed = Some(edge);
+        }
+        let junction_s = match all.len() {
+            2 if !seed.traversed => 0.0,
+            len => g.junction_delay(&column, all[len - 2], last),
+        };
+        PathSums {
+            cost: cost
                 - self.origin_approach[origin_index]
-                - self.destination_approach[finish.destination],
-            distance_m,
-            duration_s,
+                - self.destination_approach[destination],
+            duration_s: duration_s + junction_s + f64::from(column.duration(last)) * fraction,
+            distance_m: distance_m + f64::from(g.edge_length[last as usize]) * fraction,
         }
     }
 
@@ -2392,33 +2447,7 @@ impl<'q> Run<'_, '_, 'q> {
     }
 
     fn reconstruct_meeting(&self, meeting: &Meeting, destinations: &[Destination]) -> SearchPath {
-        let g = &self.g;
-        let column = self.q.column;
-        let mut distance_m = 0.0;
-        let mut duration_s = 0.0;
-        // Summed from the meeting back to the seed, as the labels lie.
-        let forward = self.forward_edges(meeting.forward);
-        for index in (1..forward.len()).rev() {
-            let edge = forward[index];
-            distance_m += f64::from(g.edge_length[edge as usize]);
-            duration_s += f64::from(column.duration(edge));
-            duration_s += g.junction_delay(&column, forward[index - 1], edge);
-        }
-        // The join, as `try_meet` costs it.
-        let (f, b) = (
-            self.state.labels[meeting.forward as usize],
-            self.state.b_labels[meeting.backward as usize],
-        );
-        if f.traversed || b.next != NO_LABEL {
-            duration_s += g.junction_delay(&column, f.edge, b.edge);
-        }
-        let seed_label = self.state.labels[self.seed_label(meeting.forward) as usize];
-        let origin_index = usize::from(seed_label.origin);
-        let remaining = (1.0 - self.q.origins[origin_index].fraction_along_edge).clamp(0.0, 1.0);
-        distance_m += f64::from(g.edge_length[seed_label.edge as usize]) * remaining;
-        duration_s += f64::from(column.duration(seed_label.edge)) * remaining;
-
-        let backward = self.backward_edges(meeting.backward);
+        let seed = self.state.labels[self.seed_label(meeting.forward) as usize];
         let mut destination_index = 0;
         let mut chain = meeting.backward;
         while chain != NO_LABEL {
@@ -2428,30 +2457,39 @@ impl<'q> Run<'_, '_, 'q> {
             }
             chain = label.next;
         }
-        for (index, edge) in backward.iter().enumerate() {
-            let last = index + 1 == backward.len();
-            let fraction = if last {
-                destinations[destination_index].fraction
-            } else {
-                1.0
-            };
-            distance_m += f64::from(g.edge_length[*edge as usize]) * fraction;
-            duration_s += f64::from(column.duration(*edge)) * fraction;
-            if !last {
-                duration_s += g.junction_delay(&column, *edge, backward[index + 1]);
-            }
-        }
+        let mut all = self.forward_edges(meeting.forward);
+        all.extend(self.backward_edges(meeting.backward));
+        // Summed in path order, not as the two halves' labels lie, so the
+        // bits do not depend on where they met.
+        let f = self.state.labels[meeting.forward as usize];
+        let sums = self.path_sums(&all, seed, &f, destination_index, destinations);
+        debug_assert!(
+            {
+                let searched = meeting.cost
+                    - self.origin_approach[usize::from(seed.origin)]
+                    - self.destination_approach[destination_index];
+                (sums.cost - searched).abs() <= 1e-9 * searched.abs().max(1.0)
+            },
+            "path-order cost {} of a joined path, searched {}",
+            sums.cost,
+            meeting.cost
+        );
         SearchPath {
             edges: self.meeting_edges(meeting.forward, meeting.backward),
-            origin_index,
+            origin_index: usize::from(seed.origin),
             destination_index,
-            cost: meeting.cost
-                - self.origin_approach[origin_index]
-                - self.destination_approach[destination_index],
-            distance_m,
-            duration_s,
+            cost: sums.cost,
+            distance_m: sums.distance_m,
+            duration_s: sums.duration_s,
         }
     }
+}
+
+/// A found path's sums (see [`Run::path_sums`]).
+struct PathSums {
+    cost: f64,
+    duration_s: f64,
+    distance_m: f64,
 }
 
 struct Meeting {
