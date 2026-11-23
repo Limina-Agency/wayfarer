@@ -2,9 +2,10 @@
 
 Status: being built behind an off-by-default compiler switch (decision F1
 of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: steps 1 and 2 of section 12 (the tagged
+--package-format 3`, hidden). Done: steps 1 to 3 of section 12 (the tagged
 table, both hashes, `PackageParams`, retired reserved sections, implied ids;
-`ProfileSlots` and the u16 masks), draft revision 2. Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
+`ProfileSlots` and the u16 masks; versioned attribute-class records), draft
+revision 3. Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -335,6 +336,97 @@ With this, `maxlength`, `hazmat`, cycleway infrastructure, `dismount`
 (FEAT-P1, P2) and anything else per attribute class land in 1.x without a
 bump, and don't have to be ready for the format-3 release.
 
+As built (draft revision 3, `LEG_ATTRS_REVISION` = 1):
+
+- The `AttrClassBytes` entry's `param` is the revision; 0 is invalid in
+  format 3, and the section appears once whatever its revision. A newer
+  revision than the reader's is not `TooNew`: it is read as above. A
+  format-2 package has no `param` and holds exactly revision 1's fields, and
+  its records must still end after them.
+- The leg part is encoded as `crate::codec` (bincode 1's varint format)
+  writes a struct: the fields in index order, with no framing. An enum is its
+  variant index as a varint, `Option` a byte 0 or 1 then the value, a `Vec` a
+  varint count then the elements. String fields hold an id in the request
+  string table. `request::decode_leg_attrs` reads any revision, and
+  `request::LEG_ATTRS_FIELDS` counts each revision's fields; a test fails
+  when a field is added without a new revision.
+- Fallbacks for unknown enum codes: `road_type` reads `other`,
+  `directional_access` reads `both`, and `hierarchy_tier` reads no tier.
+- Revision 1's leg fields:
+
+| Index | Field | Type |
+|---|---|---|
+| 0 | `road_type` | `RoadType` |
+| 1 | `directional_access` | `DirectionalAccess` |
+| 2 | `highway` | `Option<u32>` |
+| 3 | `name` | `Option<u32>` |
+| 4 | `ref_name` | `Option<u32>` |
+| 5 | `route_refs` | `Vec<u32>` |
+| 6 | `access` | `Option<u32>` |
+| 7 | `service` | `Option<u32>` |
+| 8 | `surface` | `Option<u32>` |
+| 9 | `tracktype` | `Option<u32>` |
+| 10 | `smoothness` | `Option<u32>` |
+| 11 | `maxspeed_kph` | `Option<f32>` |
+| 12 | `maxspeed_forward_kph` | `Option<f32>` |
+| 13 | `maxspeed_backward_kph` | `Option<f32>` |
+| 14 | `hgv_maxspeed_kph` | `Option<f32>` |
+| 15 | `max_height_cm` | `Option<u16>` |
+| 16 | `max_width_cm` | `Option<u16>` |
+| 17 | `physical_width_cm` | `Option<u16>` |
+| 18 | `max_weight_kg` | `Option<u32>` |
+| 19 | `max_axle_load_kg` | `Option<u32>` |
+| 20 | `incline_percent` | `Option<i8>` |
+| 21 | `is_4wd_only` | `bool` |
+| 22 | `is_motorroad` | `bool` |
+| 23 | `is_lit` | `bool` |
+| 24 | `sac_scale` | `Option<u32>` |
+| 25 | `mtb_scale` | `Option<u32>` |
+| 26 | `trail_visibility` | `Option<u32>` |
+| 27 | `sidewalk` | `Option<u32>` |
+| 28 | `crossing` | `Option<u32>` |
+| 29 | `lane_count` | `Option<u8>` |
+| 30 | `lanes` | `Option<u32>` |
+| 31 | `turn_lanes` | `Option<u32>` |
+| 32 | `turn_lanes_forward` | `Option<u32>` |
+| 33 | `turn_lanes_backward` | `Option<u32>` |
+| 34 | `lane_connectivity_available` | `bool` |
+| 35 | `speed_source` | `Option<u32>` |
+| 36 | `free_flow_speed_kph` | `Option<f32>` |
+| 37 | `constrained_speed_kph` | `Option<f32>` |
+| 38 | `admin_country_id` | `Option<u32>` |
+| 39 | `admin_region_id` | `Option<u32>` |
+| 40 | `timezone_id` | `Option<u32>` |
+| 41 | `conditional_restrictions` | `Vec<u32>` |
+| 42 | `is_link` | `bool` |
+| 43 | `is_roundabout` | `bool` |
+| 44 | `is_bridge` | `bool` |
+| 45 | `is_tunnel` | `bool` |
+| 46 | `has_ford` | `bool` |
+| 47 | `is_service_like` | `bool` |
+| 48 | `is_destination_only` | `bool` |
+| 49 | `osm_forward_mode_mask` | `u32` |
+| 50 | `osm_reverse_mode_mask` | `u32` |
+| 51 | `hierarchy_tier` | `Option<RoadHierarchyTier>` |
+| 52 | `layer` | `Option<i16>` |
+| 53 | `level` | `Option<u32>` |
+| 54 | `destination` | `Option<u32>` |
+| 55 | `destination_ref` | `Option<u32>` |
+| 56 | `destination_street` | `Option<u32>` |
+| 57 | `junction_ref` | `Option<u32>` |
+| 58 | `is_toll` | `bool` |
+| 59 | `is_ferry` | `bool` |
+| 60 | `has_gate` | `bool` |
+| 61 | `is_access_restricted` | `bool` |
+
+- Revision 1's correlation part: `road_type` (u8 code; unknown reads
+  `other`), flags (u8: service-like, destination-only, gate, access
+  restricted, ferry; unknown bits ignored), `layer` (varint, 0 for none,
+  else the zigzagged value plus 1), `level`, `name` and `ref_name` (varint
+  string id plus 1, 0 for none), and `route_refs` (varint count, then varint
+  string ids). Readers already ignore bytes after these fields.
+
+
 ### 5.4 `PackageParams` (id 129, mandatory, REQUIRED, IDENTITY)
 
 Scalars a query depends on, as sorted 16-byte entries `key u32, flags u32
@@ -416,7 +508,8 @@ by any 1.x engine.
 `ShapeStart` (34), `AttrClassStart` (56) and `StringStart` (58) become u64
 (new ids 135, 136, 137): +0.6 MB on Małopolskie. The dense request grid
 (`RequestGrid` 48, `GridCellStart` 49) is replaced by a sparse grid on the
-global lattice (ids 138 and 139, section 9.3); `GridEntries` (50) keeps its layout.
+global lattice (ids 138 and 139, section 9.3); `GridEntries` (50) keeps its layout. `SharedInfoCostTuple` becomes u32 under a new id (+2.6 MB on
+Małopolskie; section 13).
 
 ### 5.9 Net size
 
@@ -446,7 +539,7 @@ road-covered land, so it changes little there; it matters for continents).
 | 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridCellStart` (block-relative u32), 140/141 `NodeSourceId` | mandatory |
 | 256–319 | Regions: 256 `RegionInfo` (mandatory); reserved: 257 `RegionNeighbours`, 258 `NodeOwner`, 259 `PortalEdge`, 260 `PortalRef`, 261 `PortalClique` (param = column), 262 `PortalBound` (param = column), 263 `ComponentPortal` | optional |
 | 320–383 | Cells and stored potentials: 320 `CchCellTree` (written from format 3 on); reserved: 321 `CellDirectory`, 322 `CchFirstUp`, 323 `CchUpHead`, 324 `CchMetric` (param = column), 325 `InEdgeIndex` (SC-4) | optional |
-| 512–639 | Feature content: reserved 512 `SegmentElevation` (T1), 513 `ElevationProfile` (T1), 514 `DemGrid` (T4), 515 `BarrierLines` (X2), 516 `LandCover` (X3a), 517 `DirectionalDestinations` (G4b), 518 `ConditionalTurnRestrictions` (W4), 519 `SharedInfoLimits` (P2) | optional |
+| 512–639 | Feature content: reserved 512 `SegmentElevation` (T1), 513 `ElevationProfile` (T1), 514 `DemGrid` (T4), 515 `BarrierLines` (X2, linear features, section 6.1), 516 `LandCover` (X3a), 517 `DirectionalDestinations` (G4b), 518 `ConditionalTurnRestrictions` (W4), 519 `SharedInfoLimits` (P2), 520 `SteepnessMax` (T4, section 6.1) | optional |
 | `0x8000_0000`+ | Experimental | never REQUIRED |
 
 Reserved layouts, so that the format-3 spec fixes their shape before anyone
@@ -469,6 +562,82 @@ in the release that first writes it):
 
 `CchFirstUp` is u64 because arc counts reach 2^31 between Europe and the
 planet (section 10); the engine's in-memory `UP_BIT` packing is its own business.
+
+### 6.1 Terrain and linear features (512–639)
+
+The off-road plan (`off-road-sar/PLAN.md`, sections 6 to 9) stores terrain
+on the global lattice (section 9) and hasn't decided where: in the routing
+package, or in a separate terrain file built from DEM and land-cover sources
+and reused across OSM refreshes. The ids and layouts below are the same in
+both, so the choice changes no id:
+
+- A terrain file, if chosen, is a format-3 container: the same header,
+  section table, flags and hashes, holding `Metadata`, `PackageParams` and
+  only sections from this range. Its identity hash covers its own sections
+  (the source tile hashes and spacing are in its `PackageParams`), and a
+  package that is used with it keeps its own identity. How a container says
+  which kind it is (a `PackageParams` key) is settled with that decision.
+- In either container these sections are IDENTITY, since they change
+  answers, and not REQUIRED: an engine that doesn't know them routes on the
+  road graph only, and a request that needs them fails as unsupported.
+- Nothing in a terrain section refers to profile slot bits, which only a
+  routing package has. Rules are keyed by profile code (section 5.1), and a
+  reader maps codes to its own profiles.
+- Grids (`DemGrid` 514, `LandCover` 516, `SteepnessMax` 520) share one
+  layout. Element size 1, `param` = `s_lat << 16 | s_lon` in arc-seconds,
+  so one container can hold the same kind of grid at two spacings. The
+  section holds a block count `n` (u64), `n` sorted block keys (u64:
+  `(i_block + 2^31) << 32 | (j_block + 2^31)`, so the order of the keys is
+  the order of the signed block indexes), `n + 1` u64 byte offsets into the
+  payload, and the payload. Each block's payload is a tag byte and the
+  block's data. Tag 0: the data uncompressed, posts row by row (`i`, then
+  `j`). Tag 1: one value for the whole block. Other tags are kind-specific
+  (`DemGrid`'s zig-zag delta varints). `GridBlocks` (138) uses the same key.
+
+`SteepnessMax` (520, T4) is 4 bits per post, at the spacing and on the blocks
+of the `DemGrid` it accompanies. Each value is the steepest slope in the full
+resolution source within the post's cell, the `s_lat × s_lon` square centred
+on the post. Codes 0 to 14 are 5° bands (code `c` covers `5c` up to `5c + 5`
+degrees, and 14 covers 70° and steeper). 15 means no data. An uncompressed
+block is 2,048 bytes, two posts per byte with the lower `j` in the low
+nibble. It lets exit legality and the incident surface catch embankments
+and cliffs that a 3″ DEM averages away (plan section 8). It costs about
+1 MB raw on Małopolskie at 3″, *estimated* from the `DemGrid` cell count.
+
+`BarrierLines` (515, X2) holds linear features of any kind: streams, rivers
+and shorelines, ridges, cliffs and embankments, power lines and cutlines,
+fences, walls, hedges, guard rails, railways and fenced roads, and
+optionally building outlines. Element size 1, `param` 0. The section holds:
+
+- A 64-byte header: class rule count u32, line count u32, index spacing
+  u32 (arc-seconds, 12 as the request grid), index block count u32, then
+  zero.
+- Class rules, 8 bytes each, sorted by (class, profile code): class u8,
+  zero u8, profile code u16 (0 = any profile not listed), crossing u8
+  (0 free, 1 at a cost, 2 not crossable, 3 only from the left of the
+  line's direction, for cliffs and drops), along u8 (0 no effect, 1 a
+  corridor that is faster to follow), cost u16 (seconds to cross when
+  crossing is 1, or the corridor's speed factor in 1/256 when along is 1).
+  The rules come with the data, so a class this build doesn't know still
+  has rules. A class with no rule for a profile, and none for code 0, is
+  crossed freely.
+- Line starts: `line count + 1` u64 byte offsets into the line bytes.
+- Line bytes, per line: class u8 and flags u8 (bit 0: a closed ring), the
+  source OSM way id as a varint (0 for a derived line, such as a ridge from
+  the DEM), a point count of at least 2 (varint), then the first point's
+  E7 latitude and longitude as zig-zag varints and each next point as
+  zig-zag varint deltas.
+- A lattice cell index, the request grid's shape (section 9.3): block keys
+  and bases (16 bytes each), 4,096 + 1 block-relative u32 starts per block,
+  then u32 line indexes, sorted, for every line that touches the cell.
+
+The class codes are: 1 stream, 2 river or canal, 3 shoreline (lake or
+coast), 4 ridge, 5 cliff, 6 embankment or cutting, 7 power line, 8 cutline
+or firebreak, 9 fence, 10 wall, 11 hedge, 12 guard rail, 13 railway, 14
+fenced road (motorway or motorroad), 15 building outline, and 16 pipeline
+above ground. 0 is invalid, 17 to 127 are for later versions, and 128 and
+up are private. Like the grids, each of these sections gets its full spec
+in the release that first writes it, and this shape is fixed at the freeze.
 
 ## 7. Profile slots and masks: what the engine changes
 
@@ -619,6 +788,7 @@ its members; the 1.0 compiler uses `s_lon = s_lat` everywhere.
 | Grid | Spacing | Values |
 |---|---|---|
 | DEM (`DemGrid`, T4) | 3″ default, 1″ or 6″ | i16 metres, `i16::MIN` none; zig-zag delta varint per block (the terrain analysis) |
+| Steepness (`SteepnessMax`, T4) | the DEM's | 4-bit 5° bands of the steepest full-resolution slope (section 6.1) |
 | Land cover (`LandCover`, X3a) | 1″ or 2″ (25–50 m) | 4-bit classes |
 | X4 friction raster | built per request at 1″ | not stored |
 | Request grid (section 9.3) | 12″ | edge lists |
@@ -654,7 +824,7 @@ Europe at 330–400 M edges and the planet at 1.0–1.15 G (*estimated* there):
 | `AttrClassStart`, `StringStart` u32 byte offsets | `format.rs` | byte pools past 4 GiB (planet, *estimated*) | u64 (ids 136, 137) |
 | Dense request grid, u32 cell index | `package_build/request.rs` | Europe ~1–2 GB of starts; planet overflows | sparse lattice grid (section 9.3) |
 | CCH arc ids, 31 bits (`UP_BIT`) | `package/cch.rs` (engine; it builds no potentials past it) | ~2.1 G arcs: Europe close, planet over | engine change, not format; stored `CchFirstUp` is u64 (section 6) |
-| Cost tuple index u16 (`MAX_COST_TUPLES`) | `SharedInfoCostTuple` | 65,536 distinct tuples; Małopolskie has 3,927 (*measured*) | keep u16 if Poland and Germany stay far below (REL 1's runs print `costTupleCount`); otherwise u32 (+2.6 MB on Małopolskie). Decide with those numbers (section 13) |
+| Cost tuple index u16 (`MAX_COST_TUPLES`) | `SharedInfoCostTuple` | 65,536 distinct tuples; Małopolskie has 3,927 (*measured*) | u32 (+2.6 MB on Małopolskie), decided 2026-11-23: Poland has 11,028 and Germany 35,993 (55 % of u16), so a Europe build would likely overflow u16 (section 13) |
 | Node and edge counts, u32 | everywhere | ~4.29 G (the planet is ~1.1 G edges) | none; the compiler refuses past it with a typed error |
 | `GridEntries` count u32 | request grid | 0.69 entries per edge on Małopolskie (*measured*), ~0.8 G on the planet | none |
 
@@ -708,7 +878,8 @@ bump.
 by default, so default compiles stay format 2 and byte-identical. Draft
 revision 1 kept format 2's profile columns and heuristic costs at header
 offsets 96 and 104; draft revision 2 moves them to `ProfileSlots`, and the
-header is zero from 88 to the checksum. The first PR
+header is zero from 88 to the checksum. Draft revision 3 writes the
+attribute-class record revision in `AttrClassBytes`' `param`. The first PR
 sets the version to 3 and writes `PackageParams` key 10 (draft revision);
 each later PR that changes bytes raises it, and an engine refuses any draft
 revision but its own; the last PR removes the key. Suggested order:
@@ -726,7 +897,8 @@ revision but its own; the last PR removes the key. Suggested order:
    `contentHash`.
 5. `feat/cell-major-numbering` (G5): chains per cell, rank numbering,
    `CchCellTree`, repeated on Poland.
-6. `feat/format-3-widths`: u64 offsets, the lattice request grid.
+6. `feat/format-3-widths`: u64 offsets, the lattice request grid, the u32
+   cost tuple index.
 7. `chore/format-3-release`: remove the draft key, re-record baselines,
    release notes.
 
@@ -758,9 +930,10 @@ Anton confirmed every recommendation below on 2026-11-22.
 - **OM-10 deltas.** 16-bit edge-target and twin deltas go into the bump only
   if a prototype on the rank numbering shows no slowdown on the gate;
   otherwise they wait for a format 4. The duration speed index stays out.
-- **Cost tuple index.** Stays u16 if Poland's and Germany's
-  `costTupleCount` are far below 65,536; otherwise u32. Decided once those
-  counts are in.
+- **Cost tuple index.** u32 (Anton, 2026-11-23). `costTupleCount` is
+  11,028 for Poland and 35,993 for Germany (2026-11-23 extracts), and
+  Germany's is 55 % of u16's 65,536, too close for a format that must carry
+  every 1.x package. It lands with the other widths (`feat/format-3-widths`).
 
 ## Appendix: how the numbers were taken
 

@@ -23,8 +23,8 @@ use crate::{RoadEdge, RoadHierarchyTier, RoadNode, RoadType, SharedEdgeInfo, Tra
 use rustc_hash::FxHashMap;
 
 use crate::format::{
-    EDGE_FLAG_SHAPE_REVERSED, NO_HEADING, PackageFile, ProfileMasks, RoutingPackageError, Section,
-    Sections, get_varint, put_varint, unzigzag, zigzag,
+    EDGE_FLAG_SHAPE_REVERSED, LEG_ATTRS_REVISION, NO_HEADING, PackageFile, ProfileMasks,
+    RoutingPackageError, Section, Sections, get_varint, put_varint, unzigzag, zigzag,
 };
 use crate::{GeoPoint, GraphViewEdge, MobilityProfile, lat_lng_envelope_for_radius};
 
@@ -350,10 +350,18 @@ pub struct ClassKey {
 /// request string table. Both conversions destructure and rebuild every field
 /// by name, so a field added to `SharedEdgeInfo` fails to compile here
 /// instead of being dropped.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// The fields are a versioned record (format-3 design section 5.3): revision
+/// 1 is the field list below, and a revision only appends fields, each with
+/// a default. [`LEG_ATTRS_FIELDS`] counts each revision's fields, and
+/// [`decode_leg_attrs`] reads any revision.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default)]
 pub struct LegAttrs {
+    #[serde(deserialize_with = "road_type_or_other")]
     pub road_type: RoadType,
+    #[serde(deserialize_with = "directional_access_or_both")]
     pub directional_access: crate::DirectionalAccess,
     pub highway: Option<u32>,
     pub name: Option<u32>,
@@ -404,6 +412,7 @@ pub struct LegAttrs {
     pub is_destination_only: bool,
     pub osm_forward_mode_mask: u32,
     pub osm_reverse_mode_mask: u32,
+    #[serde(deserialize_with = "tier_or_none")]
     pub hierarchy_tier: Option<crate::RoadHierarchyTier>,
     pub layer: Option<i16>,
     pub level: Option<u32>,
@@ -415,6 +424,72 @@ pub struct LegAttrs {
     pub is_ferry: bool,
     pub has_gate: bool,
     pub is_access_restricted: bool,
+}
+
+/// How many fields each [`LegAttrs`] revision has, indexed by revision
+/// (revision 0 doesn't exist). The last entry is [`LEG_ATTRS_REVISION`]'s.
+pub const LEG_ATTRS_FIELDS: [usize; LEG_ATTRS_REVISION as usize + 1] = [0, 62];
+
+/// Decodes an attribute class's leg part written at `revision`
+/// ([`crate::format::Section::AttrClassBytes`]'s table `param`; 0 for a
+/// format-2 package, whose records are exactly revision 1).
+///
+/// A record of this build's revision or older must end after its own
+/// fields, and an older one's missing fields take their defaults. A newer
+/// record is read up to this revision's fields and the bytes after them are
+/// skipped. A record shorter than its revision's fields is invalid.
+pub fn decode_leg_attrs(bytes: &[u8], revision: u32) -> Option<LegAttrs> {
+    let fields = match revision {
+        0 => LEG_ATTRS_FIELDS[1],
+        revision => *LEG_ATTRS_FIELDS
+            .get(revision as usize)
+            .unwrap_or(&LEG_ATTRS_FIELDS[LEG_ATTRS_REVISION as usize]),
+    };
+    let (attrs, rest) = crate::codec::take_struct_prefix::<LegAttrs>(bytes, fields).ok()?;
+    (rest.is_empty() || revision > LEG_ATTRS_REVISION).then_some(attrs)
+}
+
+/// The enum fields of [`LegAttrs`] read an unknown code (a variant a newer
+/// compiler added) as a fallback instead of failing; the codes are the
+/// variants' declaration order, as serde writes them.
+fn road_type_or_other<'de, D: serde::Deserializer<'de>>(d: D) -> Result<RoadType, D::Error> {
+    use serde::Deserialize;
+    Ok(match u32::deserialize(d)? {
+        0 => RoadType::Motorway,
+        1 => RoadType::Primary,
+        2 => RoadType::Secondary,
+        3 => RoadType::Tertiary,
+        4 => RoadType::Residential,
+        5 => RoadType::Track,
+        6 => RoadType::Path,
+        _ => RoadType::Other,
+    })
+}
+
+fn directional_access_or_both<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<crate::DirectionalAccess, D::Error> {
+    use crate::DirectionalAccess;
+    use serde::Deserialize;
+    Ok(match u32::deserialize(d)? {
+        1 => DirectionalAccess::Forward,
+        2 => DirectionalAccess::Backward,
+        3 => DirectionalAccess::Closed,
+        _ => DirectionalAccess::Both,
+    })
+}
+
+fn tier_or_none<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<RoadHierarchyTier>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<u32>::deserialize(d)?.and_then(|code| match code {
+        0 => Some(RoadHierarchyTier::Local),
+        1 => Some(RoadHierarchyTier::Collector),
+        2 => Some(RoadHierarchyTier::Arterial),
+        3 => Some(RoadHierarchyTier::Highway),
+        _ => None,
+    }))
 }
 
 impl LegAttrs {
@@ -842,6 +917,8 @@ pub struct RequestView<'g> {
     roundabout_exits: &'g [u32],
     mode_mask_exceptions: &'g [u32],
     tier_exceptions: &'g [u32],
+    /// [`LEG_ATTRS_REVISION`] of the package's class records; 0 for format 2.
+    leg_attrs_revision: u32,
 }
 
 impl PackageFile {
@@ -907,6 +984,7 @@ impl PackageFile {
             roundabout_exits: self.slice(Section::NodeRoundaboutExits),
             mode_mask_exceptions: self.slice(Section::ModeMaskExceptions),
             tier_exceptions: self.slice(Section::TierExceptions),
+            leg_attrs_revision: self.leg_attrs_revision,
         })
     }
 
@@ -1080,12 +1158,16 @@ impl RequestView<'_> {
     /// The full shared info legs report (without id, way id and geometry).
     pub fn leg_shared_info(&self, shared: usize) -> Option<SharedEdgeInfo> {
         let (_, leg) = self.class_parts(shared)?;
-        crate::codec::from_slice::<LegAttrs>(leg)
-            .ok()?
+        decode_leg_attrs(leg, self.leg_attrs_revision)?
             .into_info(&|id| self.string(u64::from(id) + 1))
     }
 
     /// Fills `info` with shared info `shared`'s correlation attributes.
+    ///
+    /// The correlation part is append-only like the leg part (design section
+    /// 5.3): its fields are read in order and any bytes after them, which a
+    /// newer revision appends, are ignored. An unknown road type code reads
+    /// as [`RoadType::Other`] and unknown flag bits are ignored.
     pub fn fill_attributes(&self, shared: usize, info: &mut SharedEdgeInfo) -> Option<()> {
         let (bytes, _) = self.class_parts(shared)?;
         let (&road_type, &flags) = (bytes.first()?, bytes.get(1)?);
@@ -1756,5 +1838,159 @@ mod tests {
         assert!(!sorted_pairs_ok(&[4, 0, 1, 0], 5));
         assert!(!sorted_pairs_ok(&[1, 0, 1, 0], 5));
         assert!(!sorted_pairs_ok(&[1, 0, 2], 5));
+    }
+
+    mod leg_attrs {
+        use super::super::{LEG_ATTRS_FIELDS, LEG_ATTRS_REVISION, LegAttrs, decode_leg_attrs};
+        use crate::{DirectionalAccess, RoadHierarchyTier, RoadType, SharedEdgeInfo};
+
+        fn sample() -> LegAttrs {
+            let info = SharedEdgeInfo {
+                road_type: RoadType::Secondary,
+                directional_access: DirectionalAccess::Forward,
+                name: Some("Boulevard".into()),
+                maxspeed_kph: Some(50.0),
+                hierarchy_tier: Some(RoadHierarchyTier::Arterial),
+                is_toll: true,
+                is_access_restricted: true,
+                ..SharedEdgeInfo::default()
+            };
+            LegAttrs::from_info(info, &mut |_| 7)
+        }
+
+        fn encode(attrs: &LegAttrs) -> Vec<u8> {
+            crate::codec::to_vec(attrs).unwrap()
+        }
+
+        #[test]
+        fn the_field_table_counts_every_field() {
+            let fields = serde_json::to_value(LegAttrs::default()).unwrap();
+            assert_eq!(
+                fields.as_object().unwrap().len(),
+                LEG_ATTRS_FIELDS[LEG_ATTRS_REVISION as usize],
+                "a field was added to LegAttrs: append it, raise LEG_ATTRS_REVISION and \
+                 add the revision's field count (and the design's field table)"
+            );
+            assert!(LEG_ATTRS_FIELDS.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+
+        #[test]
+        fn every_revision_reads_its_own_records_and_a_format_2_record() {
+            let bytes = encode(&sample());
+            for revision in [0, 1] {
+                let back = decode_leg_attrs(&bytes, revision).unwrap();
+                assert_eq!(encode(&back), bytes);
+            }
+        }
+
+        /// Every variant of the enum fields reads back as itself: the
+        /// fallback decoders number them as serde does.
+        #[test]
+        fn enum_fields_read_back_every_variant() {
+            let roads = [
+                RoadType::Motorway,
+                RoadType::Primary,
+                RoadType::Secondary,
+                RoadType::Tertiary,
+                RoadType::Residential,
+                RoadType::Track,
+                RoadType::Path,
+                RoadType::Other,
+            ];
+            let access = [
+                DirectionalAccess::Both,
+                DirectionalAccess::Forward,
+                DirectionalAccess::Backward,
+                DirectionalAccess::Closed,
+            ];
+            let tiers = [
+                None,
+                Some(RoadHierarchyTier::Local),
+                Some(RoadHierarchyTier::Collector),
+                Some(RoadHierarchyTier::Arterial),
+                Some(RoadHierarchyTier::Highway),
+            ];
+            for road_type in roads {
+                let attrs = LegAttrs {
+                    road_type,
+                    ..sample()
+                };
+                let back = decode_leg_attrs(&encode(&attrs), 1).unwrap();
+                assert_eq!(back.road_type, road_type);
+            }
+            for directional_access in access {
+                let attrs = LegAttrs {
+                    directional_access,
+                    ..sample()
+                };
+                let back = decode_leg_attrs(&encode(&attrs), 1).unwrap();
+                assert_eq!(back.directional_access, directional_access);
+            }
+            for hierarchy_tier in tiers {
+                let attrs = LegAttrs {
+                    hierarchy_tier,
+                    ..sample()
+                };
+                let back = decode_leg_attrs(&encode(&attrs), 1).unwrap();
+                assert_eq!(back.hierarchy_tier, hierarchy_tier);
+            }
+        }
+
+        /// A code a newer compiler added reads as the fallback: `Other`, `Both`
+        /// and no tier.
+        #[test]
+        fn unknown_enum_codes_read_as_their_fallback() {
+            let mut bytes = encode(&sample());
+            // road_type and directional_access are the first two fields, one
+            // byte each.
+            bytes[0] = 200;
+            bytes[1] = 9;
+            // The tier is where Arterial and Highway differ.
+            let highway = encode(&LegAttrs {
+                hierarchy_tier: Some(RoadHierarchyTier::Highway),
+                ..sample()
+            });
+            let tier_at = (0..bytes.len())
+                .find(|at| bytes[*at] != highway[*at] && *at > 1)
+                .unwrap();
+            bytes[tier_at] = 77;
+            let back = decode_leg_attrs(&bytes, 1).unwrap();
+            assert_eq!(back.road_type, RoadType::Other);
+            assert_eq!(back.directional_access, DirectionalAccess::Both);
+            assert_eq!(back.hierarchy_tier, None);
+            assert_eq!(back.name, sample().name);
+            assert!(back.is_access_restricted);
+        }
+
+        /// A newer revision's record has fields after ours: this build reads
+        /// its own and skips the rest. Its own revision (and format 2) must
+        /// end after the last field.
+        #[test]
+        fn a_newer_record_is_read_up_to_this_revision() {
+            let bytes = encode(&sample());
+            let mut newer = bytes.clone();
+            newer.extend_from_slice(&[1, 42, 0, 3, b'a', b'b', b'c']);
+            let back = decode_leg_attrs(&newer, LEG_ATTRS_REVISION + 1).unwrap();
+            assert_eq!(encode(&back), bytes);
+            let back = decode_leg_attrs(&newer, u32::MAX).unwrap();
+            assert_eq!(encode(&back), bytes);
+            assert!(decode_leg_attrs(&newer, LEG_ATTRS_REVISION).is_none());
+            assert!(decode_leg_attrs(&newer, 0).is_none());
+        }
+
+        /// A record shorter than its revision's fields is corrupt, whatever
+        /// the revision.
+        #[test]
+        fn a_short_record_is_invalid() {
+            let bytes = encode(&sample());
+            for cut in [1, 2, bytes.len() / 2, bytes.len() - 1] {
+                for revision in [0, 1, 2] {
+                    assert!(
+                        decode_leg_attrs(&bytes[..cut], revision).is_none(),
+                        "cut {cut} revision {revision}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! Format 3's section table and profile slots (`docs/design/format-3.md`,
 //! sections 2 to 5 and 7): a format-3 compile routes as format 2 does, the
-//! identity and content hashes, the slot table and u16 masks, and the checks
-//! against hostile packages.
+//! identity and content hashes, the slot table and u16 masks, versioned
+//! attribute-class records, and the checks against hostile packages.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -11,9 +11,10 @@ use wayfarer::{
 };
 use wayfarer_compiler::{CancelToken, CompileRequest, compile};
 use wayfarer_package::format::{
-    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, NO_SLOT_COLUMN, PARAM_MUST_UNDERSTAND,
-    PROFILE_SLOT_BYTES, PackageFile, PackageFormat, PackageParams, ProfileSlot,
-    RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED, Section, param_key, profile_code,
+    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, LEG_ATTRS_REVISION, NO_SLOT_COLUMN,
+    PARAM_MUST_UNDERSTAND, PROFILE_SLOT_BYTES, PackageFile, PackageFormat, PackageParams,
+    ProfileSlot, RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED, Section, param_key,
+    profile_code,
 };
 use wayfarer_package::raw::{RawPackage, RawSection, resign};
 
@@ -764,4 +765,70 @@ fn barrier_access_is_checked_against_the_slot_count() {
     // A gate for a sixth slot.
     raw.sections[at].bytes[2] |= 1 << 5;
     assert!(open_error(&raw).contains("barrier"));
+}
+
+/// Every shared info's leg attributes, as legs report them.
+fn leg_infos(bytes: &[u8]) -> Vec<wayfarer_package::SharedEdgeInfo> {
+    let file = open(bytes).unwrap();
+    let view = file.request_view().unwrap();
+    let infos: Vec<_> = (0..)
+        .map_while(|shared| view.class_parts(shared).map(|_| shared))
+        .map(|shared| view.leg_shared_info(shared).unwrap())
+        .collect();
+    assert!(!infos.is_empty());
+    infos
+}
+
+/// The attribute-class records carry their revision in the table entry's
+/// `param` (design section 5.3), and a newer revision's records, with
+/// fields this build doesn't know appended, still read.
+#[test]
+fn attribute_class_records_carry_their_revision() {
+    let raw = format_3();
+    let at = raw.position(Section::AttrClassBytes.id()).unwrap();
+    assert_eq!(raw.sections[at].param, LEG_ATTRS_REVISION);
+    let mut bad = raw.clone();
+    bad.sections[at].param = 0;
+    assert!(
+        open_error(&bad).contains("parameter"),
+        "{}",
+        open_error(&bad)
+    );
+    // Two revisions of the records sort apart but are still one section.
+    let mut twice = raw.clone();
+    let mut copy = twice.sections[at].clone();
+    copy.param = LEG_ATTRS_REVISION + 1;
+    twice.sections.insert(at + 1, copy);
+    assert!(
+        open_error(&twice).contains("more than once"),
+        "{}",
+        open_error(&twice)
+    );
+
+    // A newer revision: three more bytes after each record's leg part.
+    let before = leg_infos(&monaco().1);
+    let starts_at = raw.position(Section::AttrClassStart.id()).unwrap();
+    let starts: Vec<u32> = raw.sections[starts_at]
+        .bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
+        .collect();
+    let old_bytes = &raw.sections[at].bytes;
+    let (mut new_starts, mut new_bytes) = (vec![0u32], Vec::new());
+    for pair in starts.windows(2) {
+        new_bytes.extend_from_slice(&old_bytes[pair[0] as usize..pair[1] as usize]);
+        new_bytes.extend_from_slice(&[1, 9, 0]);
+        new_starts.push(new_bytes.len() as u32);
+    }
+    let mut newer = raw.clone();
+    newer.sections[starts_at].bytes = new_starts.iter().flat_map(|s| s.to_le_bytes()).collect();
+    newer.sections[at].bytes = new_bytes;
+    newer.sections[at].param = LEG_ATTRS_REVISION + 1;
+    assert_eq!(leg_infos(&newer.encode()), before);
+    // The same bytes claiming this revision have bytes after their fields.
+    newer.sections[at].param = LEG_ATTRS_REVISION;
+    let file = open(&newer.encode()).unwrap();
+    assert!(file.request_view().unwrap().leg_shared_info(0).is_none());
 }

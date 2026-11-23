@@ -44,6 +44,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "leg_attrs"
+path = "fuzz_targets/leg_attrs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "request"
 path = "fuzz_targets/request.rs"
 test = false

@@ -40,7 +40,13 @@ pub const MAX_READ_FORMAT_VERSION: u32 = 3;
 /// The draft revision of format 3 this build writes and reads
 /// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
 /// its release raises it; the release removes the key.
-pub const FORMAT_3_DRAFT_REVISION: u64 = 2;
+pub const FORMAT_3_DRAFT_REVISION: u64 = 3;
+/// The revision of the attribute-class records ([`Section::AttrClassBytes`])
+/// this build writes, as that section's table `param` in format 3. Each
+/// revision only appends fields to the one before (design section 5.3), so a
+/// reader decodes the fields of its own revision from a newer record and
+/// fills those an older record lacks with their defaults.
+pub const LEG_ATTRS_REVISION: u32 = 1;
 pub const HEADER_FIXED_BYTES: usize = 256;
 /// A format-2 section table entry: offset u64, length u64, blake3.
 pub const TABLE_ENTRY_BYTES: usize = 48;
@@ -524,6 +530,15 @@ impl Section {
             | Self::NodeReachSaturated => Presence::Retired,
             Self::NodeLatE7 | Self::NodeLngE7 => Presence::Conditional,
             _ => Presence::Mandatory,
+        }
+    }
+
+    /// The `param` a format-3 table entry of the section carries: the
+    /// record revision for [`Section::AttrClassBytes`], 0 for the others.
+    pub fn format_3_param(self) -> u32 {
+        match self {
+            Section::AttrClassBytes => LEG_ATTRS_REVISION,
+            _ => 0,
         }
     }
 
@@ -1155,6 +1170,10 @@ pub struct PackageFile {
     /// The root checksum.
     pub(crate) content_hash: String,
     pub(crate) unknown_sections: Vec<UnknownSection>,
+    /// The attribute-class record revision ([`LEG_ATTRS_REVISION`]) the
+    /// package was written with; 0 for format 2, whose records hold exactly
+    /// revision 1's fields.
+    pub(crate) leg_attrs_revision: u32,
     /// In format 3 the costing model, SAR factors and mode mask union come
     /// from [`Section::PackageParams`] (see [`Self::params`]), not the JSON.
     pub(crate) metadata: RoutingPackageMetadata,
@@ -1857,6 +1876,7 @@ impl PackageFile {
             dataset_hash: header.identity_hash_hex,
             content_hash: header.root_checksum_hex,
             unknown_sections: header.unknown_sections,
+            leg_attrs_revision: header.leg_attrs_revision,
             metadata,
             params,
             profiles,
@@ -2604,6 +2624,9 @@ pub struct ParsedHeader {
     /// The section table's (offset, length).
     table: (usize, usize),
     unknown_sections: Vec<UnknownSection>,
+    /// The [`Section::AttrClassBytes`] entry's `param` (format 3), or 0
+    /// (format 2, whose records hold exactly revision 1's fields).
+    leg_attrs_revision: u32,
     root_checksum_hex: String,
     identity_hash_hex: String,
 }
@@ -2780,6 +2803,7 @@ fn parse_header_v2(
         entries,
         table: (HEADER_FIXED_BYTES, table_len),
         unknown_sections: Vec::new(),
+        leg_attrs_revision: 0,
         identity_hash_hex: root_checksum_hex.clone(),
         root_checksum_hex,
     })
@@ -2838,6 +2862,7 @@ fn parse_header_v3(
     let mut present = [false; SECTION_COUNT];
     let mut entries = Vec::with_capacity(entry_count);
     let mut unknown_sections = Vec::new();
+    let mut leg_attrs_revision = 0;
     let mut identity = blake3::Hasher::new();
     identity.update(IDENTITY_HASH_TAG);
     let mut identity_header = header[..HEADER_FIXED_BYTES].to_vec();
@@ -2888,16 +2913,28 @@ fn parse_header_v3(
                         known.name()
                     )));
                 }
+                let param_ok = match known {
+                    Section::AttrClassBytes => param >= 1,
+                    _ => param == 0,
+                };
                 if elem as usize != known.element_bytes()
                     || flags != known.format_3_flags()
-                    || param != 0
+                    || !param_ok
                 {
                     return Err(invalid(format!(
                         "section {id} ({}) has the wrong element size, flags or parameter",
                         known.name()
                     )));
                 }
-                // (id, param) are distinct and param is 0: one entry per id.
+                if present[known as usize] {
+                    return Err(invalid(format!(
+                        "section {id} ({}) appears more than once",
+                        known.name()
+                    )));
+                }
+                if known == Section::AttrClassBytes {
+                    leg_attrs_revision = param;
+                }
                 sections[known as usize] = (offset, len);
                 present[known as usize] = true;
             }
@@ -2982,6 +3019,7 @@ fn parse_header_v3(
         entries,
         table: (table_offset, table_len),
         unknown_sections,
+        leg_attrs_revision,
         root_checksum_hex: root.to_hex().to_string(),
         identity_hash_hex: identity.finalize().to_hex().to_string(),
     })
@@ -4393,7 +4431,7 @@ impl PackageWriter {
                 PackageFormat::V3 => {
                     for ((section, offset), hash) in order.iter().zip(&hashes) {
                         table.extend_from_slice(&section.id().to_le_bytes());
-                        table.extend_from_slice(&0u32.to_le_bytes());
+                        table.extend_from_slice(&section.format_3_param().to_le_bytes());
                         table.extend_from_slice(&section.format_3_flags().to_le_bytes());
                         table.extend_from_slice(&(section.element_bytes() as u32).to_le_bytes());
                         table.extend_from_slice(&(*offset as u64).to_le_bytes());
