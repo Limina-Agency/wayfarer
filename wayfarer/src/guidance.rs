@@ -1376,6 +1376,7 @@ mod tests {
             opposing_edge_id: None,
             layer: None,
             level: None,
+            incline_percent: None,
             destination: None,
             destination_ref: None,
             destination_street: None,
@@ -1427,6 +1428,8 @@ mod tests {
                 GeoPoint::new(50.0, 20.001),
                 GeoPoint::new(50.001, 20.001),
             ],
+            polyline6: None,
+            geojson: None,
             edges: vec![approach_edge, signed_edge],
             shape_segments: vec![
                 RouteShapeSegment {
@@ -1755,6 +1758,8 @@ mod tests {
                 GeoPoint::new(50.0, 20.001),
                 GeoPoint::new(50.001, 20.001),
             ],
+            polyline6: None,
+            geojson: None,
             edges: vec![edge(1, "Opolska"), ramp_edge],
             shape_segments: vec![
                 RouteShapeSegment {
@@ -1829,6 +1834,8 @@ mod tests {
                 GeoPoint::new(50.0002, 20.0002),
                 GeoPoint::new(50.0008, 20.0008),
             ],
+            polyline6: None,
+            geojson: None,
             edges: vec![edge(10, "Opolska")],
             shape_segments: vec![
                 RouteShapeSegment {
@@ -1921,6 +1928,8 @@ mod tests {
                 GeoPoint::new(50.0002, 20.0002),
                 GeoPoint::new(50.0004, 20.0004),
             ],
+            polyline6: None,
+            geojson: None,
             edges: vec![edge(20, "Road before"), edge(21, "Road after")],
             shape_segments: vec![RouteShapeSegment {
                 edge_id: u64::MAX - 2,

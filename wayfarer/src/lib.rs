@@ -61,6 +61,7 @@ mod correlator;
 mod costing;
 mod debug;
 mod direct_leg;
+pub mod geometry;
 #[cfg(feature = "reference")]
 mod graph_access;
 mod graph_view;
@@ -126,6 +127,9 @@ pub use package::{
 
 pub use cancellation::{CancelToken, RouteCancellation};
 pub use direct_leg::DirectRouteLeg;
+pub use geometry::{
+    GeoJsonLineString, GeometryFormat, PolylineError, decode_polyline6, encode_polyline6,
+};
 pub use map_matching::{
     MapMatchAlternative, MapMatchOptions, MapMatchResult, MapMatchSubPath, MatchedTraceSample,
     RejectedTraceSample,

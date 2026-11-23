@@ -17,6 +17,7 @@ use wayfarer::{
 };
 
 use crate::RoutingSourceId;
+use crate::include::{RouteResultPart, RouteSegmentSummary};
 use crate::overlay_set::{RouteOverlaySet, RouteOverlaySetBinding};
 
 /// The most mobility adjustments (edge ids, ranges, connectors) one request
@@ -122,6 +123,10 @@ pub struct RouteWorkflowRequest {
     /// first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlay_sets: Vec<RouteOverlaySet>,
+    /// The optional parts of the result to keep ([`RouteResultPart`]);
+    /// absent, all of them. `[]` keeps the core alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<BTreeSet<RouteResultPart>>,
 }
 
 impl From<RouteRequest> for RouteWorkflowRequest {
@@ -131,6 +136,7 @@ impl From<RouteRequest> for RouteWorkflowRequest {
             overlay_provenance: RouteWorkflowOverlayProvenance::default(),
             mobility: None,
             overlay_sets: Vec::new(),
+            include: None,
         }
     }
 }
@@ -147,19 +153,74 @@ pub struct RouteWorkflowOverlayProvenance {
 
 /// The engine's route (its fields at the top level of the JSON) with the
 /// source it ran on and what the service added to the request.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// With an `include` list, the parts it leaves out are empty, and its JSON
+/// has no `costBreakdown` in edge attributions unless the list names it
+/// (the Rust result keeps them).
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schema", schemars(rename_all = "camelCase"))]
 pub struct RouteWorkflowResult {
     pub source_id: RoutingSourceId,
     pub revision: String,
     pub cache_hit: bool,
-    #[serde(flatten)]
+    #[cfg_attr(feature = "schema", schemars(flatten))]
     pub route: RouteResult,
     pub overlay_provenance: RouteWorkflowOverlayProvenance,
     pub mobility_provenance: Option<RouteWorkflowMobilityProvenance>,
     /// How each overlay set reached the request.
     pub overlay_sets: Vec<RouteOverlaySetBinding>,
+    /// Each leg in brief, when `include` leaves out `segments`.
+    #[cfg_attr(feature = "schema", schemars(skip_serializing_if = "Option::is_none"))]
+    pub segment_summaries: Option<Vec<RouteSegmentSummary>>,
+    /// The request's `include` list, when it has one.
+    #[cfg_attr(feature = "schema", schemars(skip_serializing_if = "Option::is_none"))]
+    pub include: Option<BTreeSet<RouteResultPart>>,
+}
+
+impl Serialize for RouteWorkflowResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Json<'a, R: Serialize> {
+            source_id: &'a RoutingSourceId,
+            revision: &'a str,
+            cache_hit: bool,
+            #[serde(flatten)]
+            route: R,
+            overlay_provenance: &'a RouteWorkflowOverlayProvenance,
+            mobility_provenance: &'a Option<RouteWorkflowMobilityProvenance>,
+            overlay_sets: &'a [RouteOverlaySetBinding],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            segment_summaries: Option<&'a [RouteSegmentSummary]>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            include: Option<&'a BTreeSet<RouteResultPart>>,
+        }
+        fn json<R: Serialize>(this: &RouteWorkflowResult, route: R) -> Json<'_, R> {
+            Json {
+                source_id: &this.source_id,
+                revision: &this.revision,
+                cache_hit: this.cache_hit,
+                route,
+                overlay_provenance: &this.overlay_provenance,
+                mobility_provenance: &this.mobility_provenance,
+                overlay_sets: &this.overlay_sets,
+                segment_summaries: this.segment_summaries.as_deref(),
+                include: this.include.as_ref(),
+            }
+        }
+        let omits_cost_breakdowns = self
+            .include
+            .as_ref()
+            .is_some_and(|include| !include.contains(&RouteResultPart::CostBreakdown));
+        if omits_cost_breakdowns {
+            let mut route = serde_json::to_value(&self.route).map_err(serde::ser::Error::custom)?;
+            crate::include::strip_cost_breakdowns(&mut route);
+            json(self, route).serialize(serializer)
+        } else {
+            json(self, &self.route).serialize(serializer)
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -201,6 +262,7 @@ pub fn compile_route_workflow(
         overlay_provenance,
         mobility,
         overlay_sets,
+        include,
     } = request;
     // Overlay sets join the request's overlays, merged per set id.
     let dataset_hash = engine.package().dataset_hash().to_string();
@@ -264,6 +326,11 @@ pub fn compile_route_workflow(
         );
         route.explanations.truncate(6);
     }
+    // Last: `RouteNavigationInput::from_route` and the explanations above
+    // read the full route.
+    let segment_summaries = include
+        .as_ref()
+        .and_then(|include| crate::include::strip(&mut route, include));
     Ok(RouteWorkflowResult {
         source_id: source.source_id,
         revision: source.revision,
@@ -272,6 +339,8 @@ pub fn compile_route_workflow(
         overlay_provenance,
         mobility_provenance,
         overlay_sets: set_bindings,
+        segment_summaries,
+        include,
     })
 }
 

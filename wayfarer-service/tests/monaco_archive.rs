@@ -64,10 +64,12 @@ fn compiled_monaco_routes_and_reopens() {
                         overlays: vec![],
                         departure_at_ms: None,
                         leg_dynamic_overlays: Default::default(),
+                        geometry_format: Default::default(),
                     },
                     overlay_provenance: Default::default(),
                     mobility: None,
                     overlay_sets: Vec::new(),
+                    include: None,
                 },
             )
             .expect("Monaco waypoint workflow");

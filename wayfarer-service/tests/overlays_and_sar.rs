@@ -98,6 +98,7 @@ fn request(from: GeoPoint, to: GeoPoint, overlays: Vec<RouteOverlay>) -> RouteWo
         overlay_provenance: RouteWorkflowOverlayProvenance::default(),
         mobility: None,
         overlay_sets: Vec::new(),
+        include: None,
     }
 }
 

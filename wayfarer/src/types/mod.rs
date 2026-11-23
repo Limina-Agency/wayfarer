@@ -12,6 +12,7 @@ pub use wayfarer_package::{GeoPoint, MobilityProfile};
 use wayfarer_package::{RoadType, TraversalDirection};
 
 use crate::cancellation::RouteCancellation;
+use crate::geometry::GeoJsonLineString;
 
 mod analysis;
 mod correlation;
