@@ -140,7 +140,7 @@ pub(crate) fn potential_plan<'g>(
                 .get(column * g.edge_count..(column + 1) * g.edge_count)?,
         ),
         PotentialBase::Metric(key) => {
-            PlanMetric::Own(potentials.own_metric(key, || metric_costs(&g, key)))
+            PlanMetric::Own(potentials.own_metric(&g, key, || metric_costs(&g, key)))
         }
     };
     let stored = metric.costs();

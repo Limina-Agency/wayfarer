@@ -111,6 +111,16 @@ impl RoutePackageMemoryProfile {
         }
     }
 
+    /// Whether the CCH potentials keep the arrays only customization reads
+    /// (about 45 bytes per node on a regional package: downward arcs,
+    /// levels and an arc per edge) once their metrics are customized. Mobile
+    /// drops them after each customization and builds them again for the
+    /// next (a column's first search, or a costing's own metric), which
+    /// takes about a third of the topology's build.
+    pub(crate) fn keeps_customization_arrays(self) -> bool {
+        self == Self::Desktop
+    }
+
     /// Threads a matrix searches its cells on; `None` uses the global pool.
     pub fn matrix_threads(self) -> Option<usize> {
         match self {
@@ -266,7 +276,7 @@ impl RoutingPackage {
             matrix_pool: OnceLock::new(),
             recost: model < wayfarer_costing::COSTING_MODEL_VERSION,
             destination_pockets: Default::default(),
-            cch: cch::CchCache::default(),
+            cch: cch::CchCache::new(memory.keeps_customization_arrays()),
         })
     }
 
@@ -312,9 +322,11 @@ impl RoutingPackage {
     /// stored column's metric on the first search on that column, so a
     /// session that only drives never customizes the walking column.
     ///
-    /// This takes about 0.45 s on a regional package (Małopolskie, 1.07 M
+    /// This takes about 0.23 s on a regional package (Małopolskie, 1.07 M
     /// nodes, on 4 threads) and holds the topology and metrics in memory
-    /// (about 140 MB there; about 110 MB with one column customized). Every pooled search state that uses them
+    /// (about 140 MB there, and about 110 MB with one column customized; on
+    /// the Mobile profile, which drops the arrays only customization reads,
+    /// about 91 MB). Every pooled search state that uses them
     /// allocates 8 bytes per node of scratch on first use (16 with discount
     /// gates; about 9 MB there). Later calls return at once. `None` when the
     /// package stores no node order (written without one) or the node graph

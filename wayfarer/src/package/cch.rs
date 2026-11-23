@@ -19,7 +19,9 @@
 //!    cost of the edges they stand for (turn costs left out, which keeps the
 //!    metric a lower bound: turn costs are never negative), then every lower
 //!    triangle is relaxed, node by node in elimination-tree level order, in
-//!    parallel within a level ("pull": a node writes only its own arcs).
+//!    parallel within a level ("pull": a node writes only its own arcs);
+//!    above the last wide level, each node as soon as its children are done
+//!    (see `CchTopology::customize`).
 //!    Weights are f32 rounded *down* from f64 sums, so every stored weight
 //!    respects its lower triangles exactly and the up-down distances are exact
 //!    shortest distances of a metric no higher than the column.
@@ -87,6 +89,16 @@ pub(crate) struct CchTopology {
     up_head: Vec<u32>,
     /// By rank: elimination-tree parent (the lowest upward neighbour).
     parent: Vec<u32>,
+    /// The arrays only customization reads, built with the topology. Unless
+    /// the topology keeps them ([`Self::keep_customization_arrays`]), each
+    /// customization drops them when it ends and no other one is running,
+    /// and the next one builds them again from the package.
+    customization: Mutex<Option<Arc<CustomizationArrays>>>,
+    keep_customization: bool,
+}
+
+/// The arrays only customization reads (see [`CchTopology::customization`]).
+pub(crate) struct CustomizationArrays {
     /// By rank: downward arcs as (lower node, its arc to this one).
     first_down: Vec<u32>,
     down_tail: Vec<u32>,
@@ -98,6 +110,11 @@ pub(crate) struct CchTopology {
     /// Per package edge: its arc, with [`UP_BIT`] when it runs lower → higher
     /// rank; `NO_NODE` for a loop.
     edge_arc: Vec<u32>,
+    /// The edges by blocks of [`SOURCE_BLOCK`] source nodes: where each
+    /// block starts, then the edge count. All the edges of one arc and
+    /// direction leave the same node (the lower one up, the higher one
+    /// down), so they fall in one block.
+    edge_blocks: Vec<u32>,
 }
 
 /// One customized metric: per arc, the weight lower → higher rank (`up`) and
@@ -108,6 +125,14 @@ pub(crate) struct CchMetric {
     /// Unique in the process, so that a potential's memo can name the
     /// metric it was computed on (see [`PotentialScratch`]).
     id: u64,
+}
+
+impl CchMetric {
+    /// The weights up and down, by arc (tests).
+    #[cfg(test)]
+    pub(crate) fn weights(&self) -> (&[f32], &[f32]) {
+        (&self.up, &self.down)
+    }
 }
 
 /// The next [`CchMetric::id`].
@@ -153,7 +178,12 @@ struct StoredMetric {
 }
 
 impl StoredMetric {
-    fn get_or_customize(&self, topology: &CchTopology, cost: &[f32]) -> &CchMetric {
+    fn get_or_customize(
+        &self,
+        topology: &CchTopology,
+        g: &Sections<'_>,
+        cost: &[f32],
+    ) -> &CchMetric {
         if let Some((metric, _)) = self.ready.get() {
             return metric;
         }
@@ -183,7 +213,7 @@ impl StoredMetric {
         // unwinds: one of them then customizes.
         let _done = owner.then_some(Built(self));
         let started = Instant::now();
-        let metric = topology.customize(cost);
+        let metric = topology.customize(g, cost);
         let _ = self
             .ready
             .set((metric, started.elapsed().as_secs_f64() * 1e3));
@@ -215,7 +245,7 @@ impl CchPotentials {
         Some(
             self.metrics
                 .get(column)?
-                .get_or_customize(&self.topology, cost),
+                .get_or_customize(&self.topology, g, cost),
         )
     }
 
@@ -241,6 +271,7 @@ impl CchPotentials {
     /// The metric of `key`, customized from `costs()` on a miss.
     pub(crate) fn own_metric(
         &self,
+        g: &Sections<'_>,
         key: MetricKey,
         costs: impl FnOnce() -> Vec<f32>,
     ) -> Arc<OwnMetric> {
@@ -254,7 +285,7 @@ impl CchPotentials {
         }
         let costs = costs();
         let metric = Arc::new(OwnMetric {
-            metric: self.topology.customize(&costs),
+            metric: self.topology.customize(g, &costs),
             costs,
         });
         if let Ok(mut own) = self.own.lock() {
@@ -271,34 +302,56 @@ impl CchPotentials {
 }
 
 /// A package's potentials, built on first use.
-#[derive(Default)]
 pub(crate) struct CchCache {
     ready: OnceLock<Option<Arc<CchPotentials>>>,
+    /// Whether the topology keeps its customization arrays
+    /// ([`CchTopology::keep_customization_arrays`]).
+    keep_customization: bool,
+}
+
+impl Default for CchCache {
+    fn default() -> Self {
+        Self::new(true)
+    }
 }
 
 impl CchCache {
+    /// A cache whose topology keeps its customization arrays or not
+    /// (`keep_customization`).
+    pub(crate) fn new(keep_customization: bool) -> Self {
+        Self {
+            ready: OnceLock::new(),
+            keep_customization,
+        }
+    }
+
     /// Builds the topology on the first call; later calls return it. Each
     /// stored column's metric is customized on first use
     /// ([`CchPotentials::stored_metric`]).
     pub(crate) fn prepare(&self, g: &Sections<'_>) -> Option<&Arc<CchPotentials>> {
         self.ready
-            .get_or_init(|| CchPotentials::build(g).map(Arc::new))
+            .get_or_init(|| CchPotentials::build(g, self.keep_customization).map(Arc::new))
             .as_ref()
     }
 
     /// [`Self::prepare`], with every stored column's metric customized.
     pub(crate) fn prepare_all(&self, g: &Sections<'_>) -> Option<&Arc<CchPotentials>> {
         let potentials = self.prepare(g)?;
-        for column in 0..potentials.stored_column_count() {
-            potentials.stored_metric(g, column);
-        }
+        // Columns customize side by side: each one's narrow top keeps few
+        // threads busy.
+        (0..potentials.stored_column_count())
+            .into_par_iter()
+            .for_each(|column| {
+                potentials.stored_metric(g, column);
+            });
         Some(potentials)
     }
 }
 
 impl CchPotentials {
-    fn build(g: &Sections<'_>) -> Option<Self> {
-        let (topology, topology_stats) = CchTopology::build(g)?;
+    fn build(g: &Sections<'_>, keep_customization: bool) -> Option<Self> {
+        let (mut topology, topology_stats) = CchTopology::build(g)?;
+        topology.keep_customization_arrays(keep_customization);
         let columns = g.edge_cost.len().checked_div(g.edge_count).unwrap_or(0);
         Some(Self {
             topology,
@@ -406,87 +459,6 @@ impl CchTopology {
         drop((orig_head, first_orig, first_child, next_sibling, list));
         up_head.shrink_to_fit();
         let arcs = up_head.len();
-        // Downward lists.
-        let mut first_down = vec![0u32; n + 1];
-        for head in &up_head {
-            first_down[*head as usize + 1] += 1;
-        }
-        for y in 0..n {
-            first_down[y + 1] += first_down[y];
-        }
-        let mut fill = first_down.clone();
-        let mut down_tail = vec![0u32; arcs];
-        let mut down_arc = vec![0u32; arcs];
-        for x in 0..n {
-            for a in first_up[x]..first_up[x + 1] {
-                let y = up_head[a as usize] as usize;
-                down_tail[fill[y] as usize] = x as u32;
-                down_arc[fill[y] as usize] = a;
-                fill[y] += 1;
-            }
-        }
-        drop(fill);
-        // Elimination-tree levels.
-        let mut level = vec![0u32; n];
-        for x in 0..n {
-            let p = parent[x];
-            if p != NO_NODE {
-                level[p as usize] = level[p as usize].max(level[x] + 1);
-            }
-        }
-        let level_count = level.iter().copied().max().map_or(0, |l| l as usize + 1);
-        let mut level_start = vec![0u32; level_count + 1];
-        for l in &level {
-            level_start[*l as usize + 1] += 1;
-        }
-        for l in 0..level_count {
-            level_start[l + 1] += level_start[l];
-        }
-        let mut fill = level_start.clone();
-        let mut level_order = vec![0u32; n];
-        for (x, l) in level.iter().enumerate() {
-            let l = *l as usize;
-            level_order[fill[l] as usize] = x as u32;
-            fill[l] += 1;
-        }
-        drop((level, fill));
-        // Package edges → arcs, by blocks of source nodes.
-        let mut edge_arc = vec![NO_NODE; g.edge_count];
-        const BLOCK: usize = 4096;
-        let blocks = (0..n.div_ceil(BLOCK))
-            .map(|block| g.first_out[(block * BLOCK).min(n)] as usize)
-            .chain(std::iter::once(g.edge_count))
-            .collect::<Vec<_>>();
-        let mut rest = edge_arc.as_mut_slice();
-        let mut chunks = Vec::with_capacity(blocks.len());
-        for pair in blocks.windows(2) {
-            let (chunk, tail) = rest.split_at_mut(pair[1] - pair[0]);
-            chunks.push(chunk);
-            rest = tail;
-        }
-        chunks
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(block, arcs_of)| {
-                let first_edge = g.first_out[block * BLOCK] as usize;
-                for u in block * BLOCK..((block + 1) * BLOCK).min(n) {
-                    for e in g.first_out[u]..g.first_out[u + 1] {
-                        let Some((lo, hi)) = ends(u, e) else {
-                            continue;
-                        };
-                        let list = &up_head
-                            [first_up[lo as usize] as usize..first_up[lo as usize + 1] as usize];
-                        let at = list.binary_search(&hi).expect("every edge has an arc");
-                        let arc = first_up[lo as usize] + at as u32;
-                        arcs_of[e as usize - first_edge] =
-                            if rank[u] < rank[g.edge_target[e as usize] as usize] {
-                                arc | UP_BIT
-                            } else {
-                                arc
-                            };
-                    }
-                }
-            });
         // Statistics: elimination-tree depth = upward search space size.
         let mut depth = vec![0u32; n];
         for x in (0..n).rev() {
@@ -499,20 +471,21 @@ impl CchTopology {
         }
         stats.elimination_tree_height = depth.iter().copied().max().unwrap_or(0) as usize;
         stats.arc_count = arcs;
-        stats.topology_ms = started.elapsed().as_secs_f64() * 1e3;
         let topology = Self {
             rank,
             node,
             first_up,
             up_head,
             parent,
-            first_down,
-            down_tail,
-            down_arc,
-            level_order,
-            level_start,
-            edge_arc,
+            customization: Mutex::new(None),
+            keep_customization: true,
         };
+        let arrays = CustomizationArrays::build(g, &topology);
+        *topology
+            .customization
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(arrays));
+        stats.topology_ms = started.elapsed().as_secs_f64() * 1e3;
         Some((topology, stats))
     }
 
@@ -662,71 +635,431 @@ impl CchTopology {
         for (v, r) in rank.iter().enumerate() {
             node[*r as usize] = v as u32;
         }
-        let topology = Self {
-            rank,
-            node,
-            first_up,
-            up_head,
-            parent,
+        let arrays = CustomizationArrays {
             first_down,
             down_tail,
             down_arc,
             level_order,
             level_start,
             edge_arc,
+            edge_blocks: source_blocks(g),
+        };
+        let topology = Self {
+            rank,
+            node,
+            first_up,
+            up_head,
+            parent,
+            customization: Mutex::new(Some(Arc::new(arrays))),
+            keep_customization: true,
         };
         Some((topology, stats))
     }
 
-    /// Whether `other` has the same arrays (tests).
+    /// Whether `other` has the same arrays (tests); the customization
+    /// arrays of both must be built.
     #[cfg(test)]
     pub(crate) fn same_arrays(&self, other: &Self) -> bool {
+        let (ours, theirs) = (self.held_arrays(), other.held_arrays());
+        let (Some(a), Some(b)) = (ours, theirs) else {
+            return false;
+        };
         self.rank == other.rank
             && self.node == other.node
             && self.first_up == other.first_up
             && self.up_head == other.up_head
             && self.parent == other.parent
-            && self.first_down == other.first_down
-            && self.down_tail == other.down_tail
-            && self.down_arc == other.down_arc
-            && self.level_order == other.level_order
-            && self.level_start == other.level_start
-            && self.edge_arc == other.edge_arc
+            && a.first_down == b.first_down
+            && a.down_tail == b.down_tail
+            && a.down_arc == b.down_arc
+            && a.level_order == b.level_order
+            && a.level_start == b.level_start
+            && a.edge_arc == b.edge_arc
+            && a.edge_blocks == b.edge_blocks
     }
 
+    /// Topology arrays in memory, with the customization arrays when they
+    /// are held.
     fn heap_bytes(&self) -> usize {
         4 * (self.rank.len()
             + self.node.len()
             + self.first_up.len()
             + self.up_head.len()
-            + self.parent.len()
-            + self.first_down.len()
-            + self.down_tail.len()
-            + self.down_arc.len()
-            + self.level_order.len()
-            + self.level_start.len()
-            + self.edge_arc.len())
+            + self.parent.len())
+            + self.held_arrays().map_or(0, |arrays| arrays.heap_bytes())
+    }
+
+    /// The customization arrays, if held now.
+    pub(crate) fn held_arrays(&self) -> Option<Arc<CustomizationArrays>> {
+        self.customization
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether customizations keep their arrays (see [`Self::customization`]);
+    /// a topology keeps them unless told otherwise. A topology that does not
+    /// still holds the arrays it was built with until its first
+    /// customization ends.
+    pub(crate) fn keep_customization_arrays(&mut self, keep: bool) {
+        self.keep_customization = keep;
+    }
+
+    /// The customization arrays, built from `g` when they are not held.
+    fn customization_arrays(&self, g: &Sections<'_>) -> Arc<CustomizationArrays> {
+        let mut held = self
+            .customization
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        held.get_or_insert_with(|| Arc::new(CustomizationArrays::build(g, self)))
+            .clone()
+    }
+
+    /// Drops the customization arrays when they are not kept and no
+    /// customization holds them but the caller's `arrays`.
+    fn release_customization_arrays(&self, arrays: Arc<CustomizationArrays>) {
+        if self.keep_customization {
+            return;
+        }
+        let mut held = self
+            .customization
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // The topology's and the caller's.
+        if Arc::strong_count(&arrays) == 2 {
+            *held = None;
+        }
     }
 
     pub(crate) fn arc_count(&self) -> usize {
         self.up_head.len()
     }
+}
 
-    // ---------------------------------------------------------------------
-    // Customization
-    // ---------------------------------------------------------------------
+/// A customization's view of a topology and its customization arrays.
+struct Customizer<'a> {
+    t: &'a CchTopology,
+    c: &'a CustomizationArrays,
+}
 
+impl CchTopology {
+    /// Customizes `cost` (a column of `g`: one cost per package edge,
+    /// infinite = unusable); see [`Customizer::customize`].
+    pub(crate) fn customize(&self, g: &Sections<'_>, cost: &[f32]) -> CchMetric {
+        let arrays = self.customization_arrays(g);
+        let metric = Customizer {
+            t: self,
+            c: &arrays,
+        }
+        .customize(cost);
+        self.release_customization_arrays(arrays);
+        metric
+    }
+
+    /// [`Customizer::customize_sequential`] (tests).
+    #[cfg(test)]
+    pub(crate) fn customize_sequential(
+        &self,
+        g: &Sections<'_>,
+        cost: &[f32],
+    ) -> (Vec<f32>, Vec<f32>) {
+        let arrays = self.customization_arrays(g);
+        Customizer {
+            t: self,
+            c: &arrays,
+        }
+        .customize_sequential(cost)
+    }
+}
+
+impl Customizer<'_> {
     /// Input weights: per arc the least cost of its edges each way.
+    ///
+    /// In parallel by blocks of source nodes ([`CustomizationArrays::edge_blocks`]): the
+    /// edges of one arc and direction are all in one block, so each weight is
+    /// written by one task, from its edges in edge order, as a single pass
+    /// would.
     fn input_weights(&self, cost: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        let arcs = self.arc_count();
+        let arcs = self.t.arc_count();
         let mut up = vec![f32::INFINITY; arcs];
         let mut down = vec![f32::INFINITY; arcs];
-        for (edge, code) in self.edge_arc.iter().enumerate() {
-            if *code == NO_NODE {
+        let up_ptr = SyncPtr(up.as_mut_ptr());
+        let down_ptr = SyncPtr(down.as_mut_ptr());
+        self.c.edge_blocks.par_windows(2).for_each(|block| {
+            let edges = block[0] as usize..block[1] as usize;
+            for (code, c) in self.c.edge_arc[edges.clone()].iter().zip(&cost[edges]) {
+                if *code == NO_NODE || !c.is_finite() {
+                    continue;
+                }
+                let a = (*code & !UP_BIT) as usize;
+                let weights = if *code & UP_BIT != 0 {
+                    up_ptr
+                } else {
+                    down_ptr
+                };
+                // SAFETY: only this block has edges of arc `a` this way.
+                unsafe {
+                    let weight = weights.0.add(a);
+                    *weight = (*weight).min(*c);
+                }
+            }
+        });
+        (up, down)
+    }
+
+    /// Customizes `cost` (a column: one cost per package edge, infinite =
+    /// unusable).
+    ///
+    /// Wide elimination-tree levels go bottom up, each relaxing its nodes in
+    /// parallel. Above the last wide level (the top separators: few nodes,
+    /// each with long arc lists), a node starts as soon as its children are
+    /// done rather than with its level, and a node with much work splits its
+    /// downward arcs among tasks ([`Self::relax_node_split`]). Every weight
+    /// is the least of its input and its triangles' sums rounded down,
+    /// whatever the order, so the metric is the same bits on any number of
+    /// threads.
+    pub(crate) fn customize(&self, cost: &[f32]) -> CchMetric {
+        let (mut up, mut down) = self.input_weights(cost);
+        let up_ptr = SyncPtr(up.as_mut_ptr());
+        let down_ptr = SyncPtr(down.as_mut_ptr());
+        let levels = self.c.level_start.len() - 1;
+        // The levels from `top` up are all narrow.
+        let top = (0..levels)
+            .rev()
+            .find(|level| {
+                self.c.level_start[level + 1] - self.c.level_start[*level]
+                    > NARROW_LEVEL_NODES as u32
+            })
+            .map_or(0, |level| level + 1);
+        for level in 0..top {
+            let ranks = &self.c.level_order
+                [self.c.level_start[level] as usize..self.c.level_start[level + 1] as usize];
+            // SAFETY: a node writes only its own arcs, and reads arcs of
+            // lower levels (finished) or its own; nodes of one level are
+            // distinct.
+            ranks
+                .par_iter()
+                .for_each(|y| unsafe { self.relax_node(*y as usize, up_ptr, down_ptr) });
+        }
+        let narrow = &self.c.level_order[self.c.level_start[top] as usize..];
+        if !narrow.is_empty() {
+            // SAFETY: as `relax_top` requires: the levels below are done.
+            unsafe { self.relax_top(narrow, up_ptr, down_ptr) };
+        }
+        CchMetric {
+            up,
+            down,
+            id: NEXT_METRIC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Relaxes the nodes `ranks`, the top levels of the elimination tree
+    /// (every ancestor of one of them is one of them), each once its
+    /// children among them are done.
+    ///
+    /// # Safety
+    /// Every other node must be relaxed, and nothing else may write the
+    /// arcs of `ranks` meanwhile.
+    unsafe fn relax_top(&self, ranks: &[u32], up_ptr: SyncPtr, down_ptr: SyncPtr) {
+        use std::sync::atomic::AtomicU32;
+        let index = ranks
+            .iter()
+            .enumerate()
+            .map(|(index, y)| (*y, index))
+            .collect::<FxHashMap<_, _>>();
+        let parent_index = ranks
+            .iter()
+            .map(|y| index.get(&self.t.parent[*y as usize]).copied())
+            .collect::<Vec<_>>();
+        let mut children = vec![0u32; ranks.len()];
+        for parent in parent_index.iter().flatten() {
+            children[*parent] += 1;
+        }
+        let ready = (0..ranks.len())
+            .filter(|at| children[*at] == 0)
+            .collect::<Vec<_>>();
+        let pending = children.into_iter().map(AtomicU32::new).collect::<Vec<_>>();
+        let top = Top {
+            customizer: self,
+            ranks,
+            parent_index,
+            pending,
+            up_ptr,
+            down_ptr,
+        };
+        let top = &top;
+        rayon::scope(|scope| {
+            for at in ready {
+                scope.spawn(move |scope| top.run(scope, at));
+            }
+        });
+    }
+
+    /// The triangles node `y` relaxes, plus its downward arcs: about its
+    /// share of a customization's work.
+    fn triangle_work(&self, y: usize) -> usize {
+        (self.c.first_down[y] as usize..self.c.first_down[y + 1] as usize)
+            .map(|k| {
+                let x = self.c.down_tail[k] as usize;
+                self.t.first_up[x + 1] as usize - self.c.down_arc[k] as usize
+            })
+            .sum()
+    }
+
+    /// Relaxes every lower triangle of node `y`'s arcs (pull).
+    ///
+    /// # Safety
+    /// Only `y` may write `y`'s arcs while this runs, and the arcs of `y`'s
+    /// downward neighbours must be final.
+    unsafe fn relax_node(&self, y: usize, up_ptr: SyncPtr, down_ptr: SyncPtr) {
+        let ys = self.t.first_up[y] as usize;
+        let downs = self.c.first_down[y] as usize..self.c.first_down[y + 1] as usize;
+        // SAFETY: y's own arcs, which only this call writes.
+        unsafe {
+            self.relax_triangles(
+                y,
+                downs,
+                up_ptr,
+                down_ptr,
+                up_ptr.0.add(ys),
+                down_ptr.0.add(ys),
+            );
+        }
+    }
+
+    /// [`Self::relax_node`] with `y`'s downward arcs split into chunks of
+    /// about [`SPLIT_CHUNK_WORK`], relaxed in parallel, each into weights of
+    /// its own, which then lower `y`'s by their least: the same bits, since
+    /// each weight is the least of the same values.
+    ///
+    /// # Safety
+    /// As [`Self::relax_node`].
+    unsafe fn relax_node_split(&self, y: usize, up_ptr: SyncPtr, down_ptr: SyncPtr) {
+        let (ys, ye) = (self.t.first_up[y] as usize, self.t.first_up[y + 1] as usize);
+        let degree = ye - ys;
+        if degree == 0 {
+            return;
+        }
+        // Chunks of downward arcs with about `SPLIT_CHUNK_WORK` each.
+        let mut chunks = Vec::new();
+        let downs = self.c.first_down[y] as usize..self.c.first_down[y + 1] as usize;
+        let (mut start, mut work) = (downs.start, 0);
+        for k in downs {
+            let x = self.c.down_tail[k] as usize;
+            work += self.t.first_up[x + 1] as usize - self.c.down_arc[k] as usize;
+            if work >= SPLIT_CHUNK_WORK {
+                chunks.push(start..k + 1);
+                (start, work) = (k + 1, 0);
+            }
+        }
+        if start < self.c.first_down[y + 1] as usize {
+            chunks.push(start..self.c.first_down[y + 1] as usize);
+        }
+        let infinite = || (vec![f32::INFINITY; degree], vec![f32::INFINITY; degree]);
+        let (least_up, least_down) = chunks
+            .into_par_iter()
+            .map(|downs| {
+                let (mut up, mut down) = infinite();
+                // SAFETY: reads arcs of x (final) and writes the chunk's own
+                // weights.
+                unsafe {
+                    self.relax_triangles(
+                        y,
+                        downs,
+                        up_ptr,
+                        down_ptr,
+                        up.as_mut_ptr(),
+                        down.as_mut_ptr(),
+                    );
+                }
+                (up, down)
+            })
+            .reduce(infinite, |(mut up, mut down), (other_up, other_down)| {
+                for (weight, other) in up.iter_mut().zip(other_up) {
+                    *weight = weight.min(other);
+                }
+                for (weight, other) in down.iter_mut().zip(other_down) {
+                    *weight = weight.min(other);
+                }
+                (up, down)
+            });
+        // SAFETY: y's own arcs, which only this call writes.
+        unsafe {
+            for (j, (least_up, least_down)) in least_up.into_iter().zip(least_down).enumerate() {
+                let (up, down) = (up_ptr.0.add(ys + j), down_ptr.0.add(ys + j));
+                *up = (*up).min(least_up);
+                *down = (*down).min(least_down);
+            }
+        }
+    }
+
+    /// Lowers `out_up[j]` and `out_down[j]`, the weights of `y`'s `j`-th
+    /// upward arc (to `z`) each way, by the triangles `y`-`x`-`z` of `y`'s
+    /// downward arcs `downs` (indices into `down_tail`).
+    ///
+    /// # Safety
+    /// The arcs of every `x` must be final, and `out_up` and `out_down` must
+    /// hold one weight per upward arc of `y` that nothing else writes.
+    unsafe fn relax_triangles(
+        &self,
+        y: usize,
+        downs: std::ops::Range<usize>,
+        up_ptr: SyncPtr,
+        down_ptr: SyncPtr,
+        out_up: *mut f32,
+        out_down: *mut f32,
+    ) {
+        let (ys, ye) = (self.t.first_up[y] as usize, self.t.first_up[y + 1] as usize);
+        if ys == ye {
+            return;
+        }
+        let heads = &self.t.up_head[ys..ye];
+        let up = up_ptr.0;
+        let down = down_ptr.0;
+        for k in downs {
+            let x = self.c.down_tail[k] as usize;
+            let a_xy = self.c.down_arc[k] as usize;
+            // SAFETY: arcs of x are final (lower level).
+            let (w_xy, w_yx) = unsafe { (*up.add(a_xy), *down.add(a_xy)) };
+            if !w_xy.is_finite() && !w_yx.is_finite() {
                 continue;
             }
+            let x_end = self.t.first_up[x + 1] as usize;
+            let mut j = 0usize;
+            for a_xz in a_xy + 1..x_end {
+                let z = self.t.up_head[a_xz];
+                while heads[j] < z {
+                    j += 1;
+                }
+                debug_assert_eq!(heads[j], z);
+                // SAFETY: as above; `j` is one of y's arcs.
+                unsafe {
+                    let (w_xz, w_zx) = (*up.add(a_xz), *down.add(a_xz));
+                    // y -> x -> z
+                    let via_up = f64::from(w_yx) + f64::from(w_xz);
+                    if via_up < f64::from(*out_up.add(j)) {
+                        *out_up.add(j) = round_down(via_up);
+                    }
+                    // z -> x -> y
+                    let via_down = f64::from(w_zx) + f64::from(w_xy);
+                    if via_down < f64::from(*out_down.add(j)) {
+                        *out_down.add(j) = round_down(via_down);
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`Self::customize`] the way it was first written: input weights and
+    /// nodes in sequence. Kept to check that `customize` gives the same bits.
+    #[cfg(test)]
+    pub(crate) fn customize_sequential(&self, cost: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let arcs = self.t.arc_count();
+        let mut up = vec![f32::INFINITY; arcs];
+        let mut down = vec![f32::INFINITY; arcs];
+        for (edge, code) in self.c.edge_arc.iter().enumerate() {
             let c = cost[edge];
-            if !c.is_finite() {
+            if *code == NO_NODE || !c.is_finite() {
                 continue;
             }
             let a = (*code & !UP_BIT) as usize;
@@ -736,82 +1069,191 @@ impl CchTopology {
                 down[a] = down[a].min(c);
             }
         }
-        (up, down)
-    }
-
-    /// Customizes `cost` (a column: one cost per package edge, infinite =
-    /// unusable).
-    pub(crate) fn customize(&self, cost: &[f32]) -> CchMetric {
-        let (mut up, mut down) = self.input_weights(cost);
         let up_ptr = SyncPtr(up.as_mut_ptr());
         let down_ptr = SyncPtr(down.as_mut_ptr());
-        for level in 0..self.level_start.len() - 1 {
-            let ranks = &self.level_order
-                [self.level_start[level] as usize..self.level_start[level + 1] as usize];
-            let work = |y: &u32| {
-                // SAFETY: a node writes only its own arcs, and reads arcs of
-                // lower levels (finished) or its own; nodes of one level are
-                // distinct.
-                unsafe { self.relax_node(*y as usize, up_ptr, down_ptr) };
-            };
-            if ranks.len() > 64 {
-                ranks.par_iter().for_each(work);
-            } else {
-                ranks.iter().for_each(work);
+        for y in &self.c.level_order {
+            // SAFETY: one node at a time, in level order.
+            unsafe { self.relax_node(*y as usize, up_ptr, down_ptr) };
+        }
+        (up, down)
+    }
+}
+
+impl CustomizationArrays {
+    /// The arrays of `topology`, the topology of `g`.
+    fn build(g: &Sections<'_>, topology: &CchTopology) -> Self {
+        let n = g.node_count;
+        let (rank, first_up, up_head, parent) = (
+            topology.rank.as_slice(),
+            topology.first_up.as_slice(),
+            topology.up_head.as_slice(),
+            topology.parent.as_slice(),
+        );
+        let arcs = up_head.len();
+        let ends = |u: usize, e: u32| {
+            let v = g.edge_target[e as usize] as usize;
+            (v != u).then(|| {
+                let (ru, rv) = (rank[u], rank[v]);
+                if ru < rv { (ru, rv) } else { (rv, ru) }
+            })
+        };
+        // Downward lists.
+        let mut first_down = vec![0u32; n + 1];
+        for head in up_head {
+            first_down[*head as usize + 1] += 1;
+        }
+        for y in 0..n {
+            first_down[y + 1] += first_down[y];
+        }
+        let mut fill = first_down.clone();
+        let mut down_tail = vec![0u32; arcs];
+        let mut down_arc = vec![0u32; arcs];
+        for x in 0..n {
+            for a in first_up[x]..first_up[x + 1] {
+                let y = up_head[a as usize] as usize;
+                down_tail[fill[y] as usize] = x as u32;
+                down_arc[fill[y] as usize] = a;
+                fill[y] += 1;
             }
         }
-        CchMetric {
-            up,
-            down,
-            id: NEXT_METRIC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        drop(fill);
+        // Elimination-tree levels.
+        let mut level = vec![0u32; n];
+        for x in 0..n {
+            let p = parent[x];
+            if p != NO_NODE {
+                level[p as usize] = level[p as usize].max(level[x] + 1);
+            }
+        }
+        let level_count = level.iter().copied().max().map_or(0, |l| l as usize + 1);
+        let mut level_start = vec![0u32; level_count + 1];
+        for l in &level {
+            level_start[*l as usize + 1] += 1;
+        }
+        for l in 0..level_count {
+            level_start[l + 1] += level_start[l];
+        }
+        let mut fill = level_start.clone();
+        let mut level_order = vec![0u32; n];
+        for (x, l) in level.iter().enumerate() {
+            let l = *l as usize;
+            level_order[fill[l] as usize] = x as u32;
+            fill[l] += 1;
+        }
+        drop((level, fill));
+        // Package edges → arcs, by blocks of source nodes.
+        let mut edge_arc = vec![NO_NODE; g.edge_count];
+        const BLOCK: usize = SOURCE_BLOCK;
+        let edge_blocks = source_blocks(g);
+        let mut rest = edge_arc.as_mut_slice();
+        let mut chunks = Vec::with_capacity(edge_blocks.len());
+        for pair in edge_blocks.windows(2) {
+            let (chunk, tail) = rest.split_at_mut((pair[1] - pair[0]) as usize);
+            chunks.push(chunk);
+            rest = tail;
+        }
+        chunks
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(block, arcs_of)| {
+                let first_edge = g.first_out[block * BLOCK] as usize;
+                for u in block * BLOCK..((block + 1) * BLOCK).min(n) {
+                    for e in g.first_out[u]..g.first_out[u + 1] {
+                        let Some((lo, hi)) = ends(u, e) else {
+                            continue;
+                        };
+                        let list = &up_head
+                            [first_up[lo as usize] as usize..first_up[lo as usize + 1] as usize];
+                        let at = list.binary_search(&hi).expect("every edge has an arc");
+                        let arc = first_up[lo as usize] + at as u32;
+                        arcs_of[e as usize - first_edge] =
+                            if rank[u] < rank[g.edge_target[e as usize] as usize] {
+                                arc | UP_BIT
+                            } else {
+                                arc
+                            };
+                    }
+                }
+            });
+        Self {
+            first_down,
+            down_tail,
+            down_arc,
+            level_order,
+            level_start,
+            edge_arc,
+            edge_blocks,
         }
     }
 
-    /// Relaxes every lower triangle of node `y`'s arcs (pull).
-    ///
-    /// # Safety
-    /// Only `y` may write `y`'s arcs while this runs, and the arcs of `y`'s
-    /// downward neighbours must be final.
-    unsafe fn relax_node(&self, y: usize, up_ptr: SyncPtr, down_ptr: SyncPtr) {
-        let (ys, ye) = (self.first_up[y] as usize, self.first_up[y + 1] as usize);
-        if ys == ye {
-            return;
+    fn heap_bytes(&self) -> usize {
+        4 * (self.first_down.len()
+            + self.down_tail.len()
+            + self.down_arc.len()
+            + self.level_order.len()
+            + self.level_start.len()
+            + self.edge_arc.len()
+            + self.edge_blocks.len())
+    }
+}
+
+/// Source nodes per block of [`CustomizationArrays::edge_blocks`].
+const SOURCE_BLOCK: usize = 4096;
+
+/// [`CustomizationArrays::edge_blocks`] of `g`.
+fn source_blocks(g: &Sections<'_>) -> Vec<u32> {
+    (0..g.node_count.div_ceil(SOURCE_BLOCK))
+        .map(|block| g.first_out[block * SOURCE_BLOCK])
+        .chain(std::iter::once(g.edge_count as u32))
+        .collect()
+}
+
+/// Levels of up to this many nodes are narrow (see
+/// [`Customizer::customize`]; tests: few, so that the small test packages
+/// have wide levels too).
+const NARROW_LEVEL_NODES: usize = if cfg!(test) { 2 } else { 64 };
+/// Above the wide levels, a node with more [`Customizer::triangle_work`]
+/// than this splits its downward arcs among tasks of about
+/// [`SPLIT_CHUNK_WORK`] each (tests: tiny, so that the small test packages
+/// split too). On Malopolskie a unit is about 8 ns on one thread.
+const SPLIT_WORK: usize = if cfg!(test) { 4 } else { 40_000 };
+const SPLIT_CHUNK_WORK: usize = if cfg!(test) { 2 } else { 10_000 };
+
+/// The narrow top of a customization ([`Customizer::relax_top`]).
+struct Top<'t> {
+    customizer: &'t Customizer<'t>,
+    /// The nodes, and by node the index of its parent among them.
+    ranks: &'t [u32],
+    parent_index: Vec<Option<usize>>,
+    /// By node: its children not yet relaxed.
+    pending: Vec<std::sync::atomic::AtomicU32>,
+    up_ptr: SyncPtr,
+    down_ptr: SyncPtr,
+}
+
+impl<'t> Top<'t> {
+    /// Relaxes node `at` (an index into `ranks`), then its parent once it was
+    /// the last child left.
+    fn run<'s>(&'s self, scope: &rayon::Scope<'s>, at: usize)
+    where
+        't: 's,
+    {
+        let y = self.ranks[at] as usize;
+        let customizer = self.customizer;
+        // SAFETY: every descendant of y (each of its downward neighbours is
+        // one) is done: those among `ranks` released it, and the others were
+        // relaxed before the top.
+        unsafe {
+            if customizer.triangle_work(y) > SPLIT_WORK {
+                customizer.relax_node_split(y, self.up_ptr, self.down_ptr);
+            } else {
+                customizer.relax_node(y, self.up_ptr, self.down_ptr);
+            }
         }
-        let heads = &self.up_head[ys..ye];
-        let up = up_ptr.0;
-        let down = down_ptr.0;
-        for k in self.first_down[y] as usize..self.first_down[y + 1] as usize {
-            let x = self.down_tail[k] as usize;
-            let a_xy = self.down_arc[k] as usize;
-            // SAFETY: arcs of x are final (lower level).
-            let (w_xy, w_yx) = unsafe { (*up.add(a_xy), *down.add(a_xy)) };
-            if !w_xy.is_finite() && !w_yx.is_finite() {
-                continue;
-            }
-            let x_end = self.first_up[x + 1] as usize;
-            let mut j = 0usize;
-            for a_xz in a_xy + 1..x_end {
-                let z = self.up_head[a_xz];
-                while heads[j] < z {
-                    j += 1;
-                }
-                debug_assert_eq!(heads[j], z);
-                let a_yz = ys + j;
-                // SAFETY: as above; a_yz is y's own arc.
-                unsafe {
-                    let (w_xz, w_zx) = (*up.add(a_xz), *down.add(a_xz));
-                    // y -> x -> z
-                    let via_up = f64::from(w_yx) + f64::from(w_xz);
-                    if via_up < f64::from(*up.add(a_yz)) {
-                        *up.add(a_yz) = round_down(via_up);
-                    }
-                    // z -> x -> y
-                    let via_down = f64::from(w_zx) + f64::from(w_xy);
-                    if via_down < f64::from(*down.add(a_yz)) {
-                        *down.add(a_yz) = round_down(via_down);
-                    }
-                }
-            }
+        if let Some(parent) = self.parent_index[at]
+            && self.pending[parent].fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1
+        {
+            scope.spawn(move |scope| self.run(scope, parent));
         }
     }
 }
