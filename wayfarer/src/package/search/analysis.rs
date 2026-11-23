@@ -101,6 +101,26 @@ impl AnalysisPoint {
             })
             .collect()
     }
+
+    /// The points of several endpoints' candidates on compact edges `edges`,
+    /// `targets[i]` being candidate `i`'s endpoint: approach costs are
+    /// relative to the nearest candidate of the same endpoint.
+    pub(crate) fn of_targets(
+        candidates: &[crate::types::CorrelatedLocation],
+        targets: &[usize],
+        edges: impl IntoIterator<Item = u32>,
+    ) -> Vec<Self> {
+        candidates
+            .iter()
+            .zip(edges)
+            .zip(super::approach_costs_by_target(candidates, targets))
+            .map(|((candidate, edge), approach)| Self {
+                edge,
+                fraction: candidate.fraction_along_edge,
+                approach,
+            })
+            .collect()
+    }
 }
 
 pub(crate) struct AnalysisQuery<'c> {

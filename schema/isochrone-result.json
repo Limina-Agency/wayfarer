@@ -12,6 +12,13 @@
     "origin": {
       "$ref": "#/$defs/CorrelatedLocation"
     },
+    "origins": {
+      "description": "Where each of the request's `origins` snapped, in order (origin 0 is\n`origin`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CorrelatedLocation"
+      }
+    },
     "settledNodeCount": {
       "type": "integer",
       "format": "uint",

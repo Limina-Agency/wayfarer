@@ -710,27 +710,21 @@ impl<'a> ReferenceEngine<'a> {
             );
         }
         let policy = CorrelationPolicy::from(&request.options);
-        let candidates = Correlator::new(&self.view)
-            .search_expanding(
-                request.origin,
-                request.profile,
-                &policy,
-                &Default::default(),
-            )
-            .candidates;
-        let origin = candidates
-            .first()
-            .cloned()
-            .ok_or(RouteError::NoCandidate { endpoint: "origin" })?;
+        let correlator = Correlator::new(&self.view);
+        let origins = crate::isochrone::origin_candidates(&request, |point| {
+            correlator
+                .search_expanding(point, request.profile, &policy, &Default::default())
+                .candidates
+        })?;
         let context = self.path_context > 0;
         let pass = |allow_destination_only: bool| {
             let records = self.records(
                 request.profile,
                 &request.options,
                 allow_destination_only,
-                candidates.iter().map(|location| location.edge_id),
+                origins.candidates.iter().map(|location| location.edge_id),
             );
-            isochrone(&records, &request, &candidates, origin.clone(), context)
+            isochrone(&records, &request, &origins, context)
         };
         if !strict_destination_only(&request.options, request.profile) {
             return Ok(pass(true));
@@ -2602,10 +2596,10 @@ struct Crossing {
 fn isochrone(
     records: &Records<'_>,
     request: &RouteIsochroneRequest,
-    candidates: &[CorrelatedLocation],
-    origin: CorrelatedLocation,
+    origins: &crate::isochrone::OriginCandidates,
     restriction_contexts: bool,
 ) -> RouteIsochroneResult {
+    let candidates = &origins.candidates;
     let contours = &request.contours;
     let limit = |metric| {
         contours
@@ -2693,9 +2687,18 @@ fn isochrone(
         entry.1 = entry.1.min(duration_s);
         entry.2 = entry.2.min(distance_m);
     };
-    // A farther candidate starts at its approach cost. The approach is a
-    // penalty, not travel, so time starts at zero (as in matrix rows).
-    for (candidate, approach) in candidates.iter().zip(endpoint_approach(candidates)) {
+    // A farther candidate starts at its approach cost, relative to its own
+    // origin's nearest one. The approach is a penalty, not travel, so time
+    // starts at zero (as in matrix rows).
+    let approach = approach_costs(
+        &origins
+            .targets
+            .iter()
+            .copied()
+            .zip(candidates)
+            .collect::<Vec<_>>(),
+    );
+    for (candidate, approach) in candidates.iter().zip(approach) {
         let Some(edge) = records.edge_by_id(candidate.edge_id) else {
             continue;
         };
@@ -2878,7 +2881,8 @@ fn isochrone(
         })
         .collect();
     RouteIsochroneResult {
-        origin,
+        origin: origins.snapped[0].clone(),
+        origins: origins.snapped[1..].to_vec(),
         buckets,
         visited_edge_count: visited,
         settled_node_count: settled,

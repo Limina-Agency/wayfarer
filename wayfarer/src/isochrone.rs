@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::correlator::Correlator;
 use crate::costing::CostingPolicy;
-use crate::limits::MAX_ISOCHRONE_CONTOURS;
+use crate::limits::{MAX_ISOCHRONE_CONTOURS, MAX_ISOCHRONE_ORIGINS};
 use crate::package::destination::relax_split_costs;
 use crate::package::profile_bit;
 use crate::package::search::analysis::{
@@ -15,7 +15,7 @@ use crate::trip::{
     apply_query_overlays, invalid_point, validate_query_options, validate_query_overlays,
 };
 use crate::types::{
-    CorrelatedLocation, CorrelationPolicy, RouteError, RouteIsochroneBoundaryFragment,
+    CorrelatedLocation, CorrelationPolicy, GeoPoint, RouteError, RouteIsochroneBoundaryFragment,
     RouteIsochroneBucket, RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneRequest,
     RouteIsochroneResult,
 };
@@ -66,41 +66,83 @@ impl RoutingEngine {
         // An origin with no connected road within the radius widens the
         // search as route and matrix locations do (and as far as the SAR
         // `off_network` relaxation reaches).
-        let origin_search = correlator.search_expanding(
-            request.origin,
-            request.profile,
-            &policy,
-            &Default::default(),
-        );
-        let origin = origin_search
-            .candidates
-            .first()
-            .cloned()
-            .ok_or(RouteError::NoCandidate { endpoint: "origin" })?;
-
-        let candidates = &origin_search.candidates;
+        let origins = origin_candidates(request, |point| {
+            correlator
+                .search_expanding(point, request.profile, &policy, &Default::default())
+                .candidates
+        })?;
         if !self
             .package()
             .confines_destination_only(&request.options, request.profile)
         {
-            return self.isochrone_search(request, candidates, &origin, true);
+            return self.isochrone_search(request, &origins, true);
         }
-        let strict = self.isochrone_search(request, candidates, &origin, false)?;
+        let strict = self.isochrone_search(request, &origins, false)?;
         if !trapped(&strict) {
             return Ok(strict);
         }
-        // An origin that cannot leave without crossing a destination-only
-        // road gets the relaxed search, as routes do.
-        let relaxed = self.isochrone_search(request, candidates, &origin, true)?;
+        // Origins that cannot leave without crossing a destination-only road
+        // get the relaxed search, as routes do. With several origins, the
+        // reach is the whole isochrone's.
+        let relaxed = self.isochrone_search(request, &origins, true)?;
         Ok(pick_relaxed(strict, relaxed))
     }
 }
 
-/// The request against [`crate::limits`]: a valid origin, one to
+/// The candidates of every origin of an isochrone request, in order.
+pub(crate) struct OriginCandidates {
+    /// Every origin's candidates, origin by origin.
+    pub(crate) candidates: Vec<CorrelatedLocation>,
+    /// The origin of each candidate (an index into the request's origins,
+    /// `origin` being 0).
+    pub(crate) targets: Vec<usize>,
+    /// Each origin's nearest candidate, as reported.
+    pub(crate) snapped: Vec<CorrelatedLocation>,
+}
+
+/// Snaps every origin of `request` with `search`. `NoCandidate` for the
+/// origin endpoint when any origin has no candidate.
+pub(crate) fn origin_candidates(
+    request: &RouteIsochroneRequest,
+    mut search: impl FnMut(GeoPoint) -> Vec<CorrelatedLocation>,
+) -> Result<OriginCandidates, RouteError> {
+    let mut origins = OriginCandidates {
+        candidates: Vec::new(),
+        targets: Vec::new(),
+        snapped: Vec::new(),
+    };
+    let points = std::iter::once(request.origin).chain(request.origins.iter().map(|o| o.point));
+    for (index, point) in points.enumerate() {
+        let candidates = search(point);
+        let nearest = candidates
+            .first()
+            .cloned()
+            .ok_or(RouteError::NoCandidate { endpoint: "origin" })?;
+        origins.snapped.push(nearest);
+        origins
+            .targets
+            .extend(std::iter::repeat_n(index, candidates.len()));
+        origins.candidates.extend(candidates);
+    }
+    Ok(origins)
+}
+
+/// The request against [`crate::limits`]: one to [`MAX_ISOCHRONE_ORIGINS`]
+/// valid origins, one to
 /// [`MAX_ISOCHRONE_CONTOURS`] contours, each positive, finite and not repeated
 /// on its metric, and the overlays and options a route accepts.
 fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
-    if invalid_point(request.origin) {
+    if 1 + request.origins.len() > MAX_ISOCHRONE_ORIGINS {
+        return Err(RouteError::RequestTooLarge {
+            what: "isochrone origins",
+        });
+    }
+    if invalid_point(request.origin)
+        || request
+            .origins
+            .iter()
+            .any(|origin| invalid_point(origin.point))
+    {
         return Err(RouteError::InvalidRequest {
             reason: "origin coordinates",
         });
@@ -169,10 +211,10 @@ impl RoutingEngine {
     fn isochrone_search(
         &self,
         request: &RouteIsochroneRequest,
-        candidates: &[CorrelatedLocation],
-        origin: &CorrelatedLocation,
+        origin_candidates: &OriginCandidates,
         allow_destination_only: bool,
     ) -> Result<RouteIsochroneResult, RouteError> {
+        let candidates = &origin_candidates.candidates;
         let access = self.route_graph_view();
         let graph = access.routing_package();
         let overlay = request
@@ -206,7 +248,8 @@ impl RoutingEngine {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let origins = AnalysisPoint::of_candidates(candidates, edges);
+        // Approach costs are per origin.
+        let origins = AnalysisPoint::of_targets(candidates, &origin_candidates.targets, edges);
         let contours = request
             .contours
             .iter()
@@ -301,6 +344,7 @@ impl RoutingEngine {
                     destinations: &[],
                     origin_edges: &origin_edges,
                     destination_edges: &[],
+                    origin_targets: &origin_candidates.targets,
                     destination_targets: &[],
                     max_visited_edge_count: request.max_expansion_edge_count,
                     cancellation: &request.options.cancellation,
@@ -386,7 +430,8 @@ impl RoutingEngine {
             })
             .collect();
         Ok(RouteIsochroneResult {
-            origin: origin.clone(),
+            origin: origin_candidates.snapped[0].clone(),
+            origins: origin_candidates.snapped[1..].to_vec(),
             buckets,
             visited_edge_count: outcome.counters.visited_edge_count,
             settled_node_count: outcome.counters.settled_edge_count,
@@ -681,5 +726,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn several_origins_are_validated_and_each_must_snap() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        let on_grid = GeoPoint::new(52.0, 21.0056);
+        let mut request = minutes(on_grid, 2.0);
+        request.origins = vec![
+            crate::RouteIsochroneOrigin::new(GeoPoint::new(51.993, 21.0024));
+            crate::limits::MAX_ISOCHRONE_ORIGINS - 1
+        ];
+        let result = engine.isochrone(request.clone()).unwrap();
+        assert_eq!(
+            result.origins.len(),
+            crate::limits::MAX_ISOCHRONE_ORIGINS - 1
+        );
+
+        request
+            .origins
+            .push(crate::RouteIsochroneOrigin::new(on_grid));
+        assert_eq!(
+            engine.isochrone(request.clone()).unwrap_err(),
+            RouteError::RequestTooLarge {
+                what: "isochrone origins"
+            }
+        );
+        request.origins = vec![crate::RouteIsochroneOrigin::new(GeoPoint::new(
+            f64::NAN,
+            21.0,
+        ))];
+        assert_eq!(
+            engine.isochrone(request.clone()).unwrap_err(),
+            RouteError::InvalidRequest {
+                reason: "origin coordinates"
+            }
+        );
+        // An origin with nothing within the widest radius fails the request,
+        // as the first origin would.
+        request.origins = vec![crate::RouteIsochroneOrigin::new(GeoPoint::new(52.1, 21.0))];
+        assert_eq!(
+            engine.isochrone(request).unwrap_err(),
+            RouteError::NoCandidate { endpoint: "origin" }
+        );
+    }
+
+    #[test]
+    fn origins_are_optional_on_the_wire() {
+        let request = minutes(GeoPoint::new(52.0, 21.0056), 2.0);
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("origins").is_none());
+        let mut with_more = request.clone();
+        with_more.origins = vec![crate::RouteIsochroneOrigin::new(GeoPoint::new(
+            51.993, 21.0024,
+        ))];
+        let json = serde_json::to_value(&with_more).unwrap();
+        assert_eq!(json["origins"][0]["point"]["lat"], 51.993);
+        assert_eq!(
+            serde_json::from_value::<RouteIsochroneRequest>(json).unwrap(),
+            with_more
+        );
+
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        let result = engine.isochrone(request).unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json.get("origins").is_none());
+        let result = engine.isochrone(with_more).unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["origins"].as_array().unwrap().len(), 1);
     }
 }

@@ -31,6 +31,9 @@ pub const MAX_CORRELATION_DISTANCE_M: u32 = 10_000;
 pub const MAX_MATRIX_CELLS: usize = 250_000;
 /// The most contours one isochrone request may ask for.
 pub const MAX_ISOCHRONE_CONTOURS: usize = 16;
+/// The most origins one isochrone request may carry (`origin` and
+/// `origins` together).
+pub const MAX_ISOCHRONE_ORIGINS: usize = 64;
 /// The most targets one nearest-targets request may carry.
 pub const MAX_NEAREST_TARGETS: usize = 10_000;
 
