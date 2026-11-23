@@ -81,7 +81,10 @@ pub(crate) fn build_maneuvers_with(
     spans.push((maneuvers.len(), 0));
     maneuvers.push(maneuver(
         RouteManeuverKind::Start,
-        instruction("Start on", first_edge.and_then(|edge| edge.name.as_deref())),
+        Phrase::plain(instruction(
+            "Start on",
+            first_edge.and_then(|edge| edge.name.as_deref()),
+        )),
         "route.start",
         first_edge,
         None,
@@ -103,10 +106,10 @@ pub(crate) fn build_maneuvers_with(
             let shape_segment = shapes.segment(index);
             let mut hazard = maneuver(
                 RouteManeuverKind::Hazard,
-                instruction(
+                Phrase::plain(instruction(
                     "Hazard warning on",
                     edge.name.as_deref().or(edge.ref_name.as_deref()),
-                ),
+                )),
                 "route.hazard",
                 Some(edge),
                 None,
@@ -165,7 +168,9 @@ pub(crate) fn build_maneuvers_with(
             .unwrap_or(false);
         let name_changed = previous_name != edge.name.as_deref();
         let entering_roundabout = edge.is_roundabout && !leg.edges[index - 1].is_roundabout;
-        if !entering_roundabout {
+        let boarding_ferry = edge.is_ferry && !leg.edges[index - 1].is_ferry;
+        let leaving_ferry = !edge.is_ferry && leg.edges[index - 1].is_ferry;
+        if !entering_roundabout && !boarding_ferry && !leaving_ferry {
             if !significant_turn && !name_changed {
                 continue;
             }
@@ -198,39 +203,36 @@ pub(crate) fn build_maneuvers_with(
             RouteManeuverKind::Continue
         };
         let is_ramp_maneuver = is_ramp_maneuver(edge, kind);
-        let instruction_text = if is_ramp_maneuver {
+        let modifier = maneuver_modifier(kind, turn_angle, fork_side);
+        let instruction_text = if boarding_ferry {
+            ferry_instruction(edge)
+        } else if is_ramp_maneuver {
             ramp_instruction(edge)
         } else {
             match kind {
-                RouteManeuverKind::Turn | RouteManeuverKind::UTurn => instruction_with_sign(
-                    turn_phrase(turn_angle.unwrap_or(0)),
-                    edge.name.as_deref(),
-                    edge,
-                ),
-                RouteManeuverKind::Keep => instruction_with_sign(
-                    keep_phrase(turn_angle.unwrap_or(0)),
-                    edge.name.as_deref(),
-                    edge,
-                ),
-                RouteManeuverKind::Fork => instruction_with_sign(
-                    fork_phrase(fork_side.unwrap_or(0)),
-                    edge.name.as_deref(),
-                    edge,
-                ),
-                RouteManeuverKind::Merge => {
-                    instruction_with_sign("Merge onto", edge.name.as_deref(), edge)
+                RouteManeuverKind::Turn | RouteManeuverKind::UTurn => {
+                    onto_with_sign(turn_phrase(modifier), edge)
                 }
+                RouteManeuverKind::Keep => {
+                    onto_with_sign(keep_phrase(turn_angle.unwrap_or(0)), edge)
+                }
+                RouteManeuverKind::Fork => {
+                    onto_with_sign(fork_phrase(fork_side.unwrap_or(0)), edge)
+                }
+                RouteManeuverKind::Merge => onto_with_sign("Merge", edge),
                 RouteManeuverKind::Roundabout => roundabout_instruction(
                     edge,
                     roundabout_exit.map(|(number, exit_index)| (number, &leg.edges[exit_index])),
                 ),
-                _ => instruction_with_sign("Continue onto", edge.name.as_deref(), edge),
+                _ => onto_with_sign("Continue", edge),
             }
         };
         let mut route_maneuver = maneuver(
             kind,
             instruction_text,
-            if is_ramp_maneuver {
+            if boarding_ferry {
+                "route.ferry"
+            } else if is_ramp_maneuver {
                 "route.ramp"
             } else {
                 instruction_key(kind)
@@ -246,7 +248,17 @@ pub(crate) fn build_maneuvers_with(
             None,
             roundabout_exit_number,
         );
+        if let Some(modifier) = modifier {
+            route_maneuver
+                .instruction_parameters
+                .insert("modifier".to_string(), modifier.to_string());
+        }
         if is_ramp_maneuver {
+            if let Some(exit_number) = exit_text_for_edge(edge) {
+                route_maneuver
+                    .instruction_parameters
+                    .insert("exit_number".to_string(), exit_number);
+            }
             route_maneuver
                 .instruction_parameters
                 .insert("guidance_kind".to_string(), "ramp".to_string());
@@ -284,6 +296,20 @@ pub(crate) fn build_maneuvers_with(
             name_changed,
             entering_roundabout,
         );
+        if boarding_ferry || leaving_ferry {
+            route_maneuver.instruction_parameters.insert(
+                "guidance_reason".to_string(),
+                if boarding_ferry {
+                    "boarding_ferry"
+                } else {
+                    "leaving_ferry"
+                }
+                .to_string(),
+            );
+            route_maneuver
+                .quality_flags
+                .retain(|flag| *flag != RouteGuidanceQualityFlag::WeakManeuverClassification);
+        }
         spans.push((maneuvers.len(), index));
         maneuvers.push(route_maneuver);
     }
@@ -315,7 +341,7 @@ pub(crate) fn build_maneuvers_with(
 
     let mut destination = maneuver(
         RouteManeuverKind::Destination,
-        "Arrive at destination".to_string(),
+        Phrase::plain("Arrive at destination".to_string()),
         "route.destination",
         leg.edges.last(),
         None,
@@ -508,7 +534,7 @@ fn dynamic_overlay_maneuver(
 
     RouteManeuver {
         kind: RouteManeuverKind::Continue,
-        concise_instruction: concise_instruction(&instruction),
+        concise_instruction: instruction.clone(),
         pre_transition_instruction: None,
         post_transition_instruction: Some(instruction.clone()),
         alert_instruction: Some(instruction.clone()),
@@ -665,7 +691,7 @@ fn connector_name(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
 /// that is not at a junction.
 fn maneuver(
     kind: RouteManeuverKind,
-    instruction: String,
+    phrase: Phrase,
     instruction_key: &str,
     edge: Option<&crate::types::RouteEdgeAttribution>,
     approach_edge: Option<&crate::types::RouteEdgeAttribution>,
@@ -676,6 +702,10 @@ fn maneuver(
     alert_instruction: Option<String>,
     roundabout_exit_number: Option<u16>,
 ) -> RouteManeuver {
+    let Phrase {
+        text: instruction,
+        concise: concise_instruction,
+    } = phrase;
     let road_name = edge.and_then(|edge| edge.name.clone());
     let bearing = bearing_after(geometry, begin_shape_index, end_shape_index)
         .map(|bearing| bearing.round() as u16 % 360);
@@ -715,6 +745,9 @@ fn maneuver(
     }
     if let Some(edge) = edge {
         append_sign_fact_parameters(&mut instruction_parameters, edge);
+        if !matches!(kind, RouteManeuverKind::Destination) {
+            append_road_fact_parameters(&mut instruction_parameters, edge);
+        }
     }
     let mut quality_flags = Vec::new();
     if road_name
@@ -746,7 +779,7 @@ fn maneuver(
 
     RouteManeuver {
         kind,
-        concise_instruction: concise_instruction(&instruction),
+        concise_instruction,
         pre_transition_instruction: pre_transition_instruction(kind, &instruction),
         post_transition_instruction: post_transition_instruction(kind, &instruction),
         alert_instruction,
@@ -778,28 +811,82 @@ fn maneuver(
     }
 }
 
+/// What the signs at the start of `edge` point to: its destination tags only.
+/// The road's own ref is no destination, and a road without signs gets no
+/// "toward" text.
 fn sign_text_for_edge(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
-    edge.destination
-        .clone()
-        .or_else(|| edge.destination_street.clone())
-        .or_else(|| edge.destination_ref.clone())
-        .or_else(|| edge.route_refs.first().cloned())
-        .or_else(|| edge.ref_name.clone())
+    [
+        &edge.destination,
+        &edge.destination_street,
+        &edge.destination_ref,
+    ]
+    .into_iter()
+    .filter_map(|value| value.as_deref().map(str::trim))
+    .find(|value| !value.is_empty())
+    .map(ToString::to_string)
 }
 
+/// The road number a maneuver leads via: the signed `destination:ref`, else
+/// the road's own ref. Exit numbers are `exit_number`, not branch text.
 fn branch_text_for_edge(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
-    edge.destination_ref
-        .clone()
-        .or_else(|| edge.junction_ref.clone())
-        .or_else(|| edge.ref_name.clone())
-}
-
-fn instruction_branch_text_for_edge(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
     edge.destination_ref
         .clone()
         .or_else(|| edge.ref_name.clone())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// The `;`-separated values of `values`, trimmed, without empty or repeated
+/// ones, joined with `;`.
+fn sign_list<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    let mut items = Vec::<&str>::new();
+    for item in values
+        .into_iter()
+        .flatten()
+        .flat_map(|value| value.split(';'))
+    {
+        let item = item.trim();
+        if !item.is_empty() && !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    (!items.is_empty()).then(|| items.join(";"))
+}
+
+/// The direction modifier of a maneuver, from its turn angle (or the side of
+/// its fork) with fixed integer thresholds: under 30° straight (slight for
+/// a keep, fork or merge, which name a side), under 60° slight, under 120°
+/// plain, up to 135° sharp, beyond that a U-turn. None without an angle, and
+/// for maneuvers that are not a change of direction.
+fn maneuver_modifier(
+    kind: RouteManeuverKind,
+    turn_angle: Option<i16>,
+    fork_side: Option<i16>,
+) -> Option<&'static str> {
+    let angle = match kind {
+        RouteManeuverKind::UTurn => return Some("uturn"),
+        RouteManeuverKind::Start
+        | RouteManeuverKind::Waypoint
+        | RouteManeuverKind::Destination
+        | RouteManeuverKind::Hazard
+        | RouteManeuverKind::Roundabout => return None,
+        RouteManeuverKind::Fork => fork_side.or(turn_angle)?,
+        _ => turn_angle?,
+    };
+    let left = angle < 0;
+    let side = |left_value, right_value| Some(if left { left_value } else { right_value });
+    match angle.unsigned_abs() {
+        0..30 => match kind {
+            RouteManeuverKind::Keep | RouteManeuverKind::Fork | RouteManeuverKind::Merge => {
+                side("slight_left", "slight_right")
+            }
+            _ => Some("straight"),
+        },
+        30..60 => side("slight_left", "slight_right"),
+        60..120 => side("left", "right"),
+        120..=135 => side("sharp_left", "sharp_right"),
+        _ => Some("uturn"),
+    }
 }
 
 fn exit_text_for_edge(edge: &crate::types::RouteEdgeAttribution) -> Option<String> {
@@ -825,6 +912,59 @@ fn append_sign_fact_parameters(
         edge.destination_street.as_deref(),
     );
     insert_non_empty_parameter(parameters, "junction_ref", edge.junction_ref.as_deref());
+    if let Some(toward) = sign_list([
+        edge.destination.as_deref(),
+        edge.destination_street.as_deref(),
+    ]) {
+        parameters.insert("toward".to_string(), toward);
+    }
+    if let Some(via) = sign_list([edge.destination_ref.as_deref()]) {
+        parameters.insert("via".to_string(), via);
+    }
+}
+
+/// The facts of the road a maneuver enters: its type, a speed limit when
+/// known, and `toll`, `ferry` and `unpaved` when they hold.
+fn append_road_fact_parameters(
+    parameters: &mut BTreeMap<String, String>,
+    edge: &crate::types::RouteEdgeAttribution,
+) {
+    if let Ok(serde_json::Value::String(road_type)) = serde_json::to_value(edge.road_type) {
+        parameters.insert("road_type".to_string(), road_type);
+    }
+    if let Some(kph) = edge
+        .maxspeed_kph
+        .filter(|kph| kph.is_finite() && *kph > 0.0)
+    {
+        parameters.insert(
+            "speed_limit_kph".to_string(),
+            (kph.round() as u32).to_string(),
+        );
+    }
+    for (key, holds) in [
+        ("toll", edge.is_toll),
+        ("ferry", edge.is_ferry),
+        ("unpaved", is_unpaved(edge)),
+    ] {
+        if holds {
+            parameters.insert(key.to_string(), "true".to_string());
+        }
+    }
+}
+
+/// Whether `edge`'s surface is unpaved: gravel, dirt, mud or sand by the
+/// costing's classes, or tagged `unpaved`, `grass` or `pebblestone`.
+fn is_unpaved(edge: &crate::types::RouteEdgeAttribution) -> bool {
+    use wayfarer_costing::{SurfaceCostClass, surface_cost_class};
+    let surface = edge.surface.as_deref();
+    matches!(surface, Some("unpaved" | "grass" | "pebblestone"))
+        || matches!(
+            surface_cost_class(surface),
+            SurfaceCostClass::Gravel
+                | SurfaceCostClass::Dirt
+                | SurfaceCostClass::Mud
+                | SurfaceCostClass::Sand
+        )
 }
 
 fn insert_non_empty_parameter(
@@ -1086,19 +1226,19 @@ fn lane_indications(lane: &str) -> Vec<RouteLaneIndication> {
 fn roundabout_instruction(
     edge: &crate::types::RouteEdgeAttribution,
     exit: Option<(u16, &crate::types::RouteEdgeAttribution)>,
-) -> String {
+) -> Phrase {
     match exit {
         Some((exit_number, exit_edge)) => {
             let suffix = exit_edge.name.as_deref().unwrap_or("unnamed road");
             append_sign_guidance(
-                format!("Enter roundabout and take exit {exit_number} onto {suffix}"),
+                Phrase {
+                    text: format!("Enter roundabout and take exit {exit_number} onto {suffix}"),
+                    concise: suffix.to_string(),
+                },
                 exit_edge,
             )
         }
-        None => append_sign_guidance(
-            instruction("Enter roundabout onto", edge.name.as_deref()),
-            edge,
-        ),
+        None => onto_with_sign("Enter roundabout", edge),
     }
 }
 
@@ -1113,13 +1253,31 @@ fn is_ramp_maneuver(edge: &crate::types::RouteEdgeAttribution, kind: RouteManeuv
         )
 }
 
-fn ramp_instruction(edge: &crate::types::RouteEdgeAttribution) -> String {
-    let base = if let Some(exit_text) = exit_text_for_edge(edge) {
-        instruction(&format!("Take exit {exit_text} onto"), edge.name.as_deref())
-    } else {
-        instruction("Take ramp onto", edge.name.as_deref())
+fn ramp_instruction(edge: &crate::types::RouteEdgeAttribution) -> Phrase {
+    match exit_text_for_edge(edge) {
+        Some(exit_text) => onto_with_sign(&format!("Take exit {exit_text}"), edge),
+        None => onto_with_sign("Take ramp", edge),
+    }
+}
+
+/// Boarding a ferry: "Take the ferry", with its name when it has one.
+fn ferry_instruction(edge: &crate::types::RouteEdgeAttribution) -> Phrase {
+    let name = edge
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let text = match name {
+        Some(name) => format!("Take the ferry {name}"),
+        None => "Take the ferry".to_string(),
     };
-    append_sign_guidance(base, edge)
+    append_sign_guidance(
+        Phrase {
+            concise: name.map_or_else(|| text.clone(), ToString::to_string),
+            text,
+        },
+        edge,
+    )
 }
 
 /// The exit a route entering a roundabout at `entry_index` takes: its number,
@@ -1157,11 +1315,35 @@ fn instruction_key(kind: RouteManeuverKind) -> &'static str {
     }
 }
 
-fn concise_instruction(instruction: &str) -> String {
-    instruction
-        .split_once(" onto ")
-        .map(|(_, suffix)| suffix.to_string())
-        .unwrap_or_else(|| instruction.to_string())
+/// A maneuver's text, and its concise form: what it leads onto, with the
+/// signs' guidance, without the verb ("Main Street toward Centrum" for "Turn
+/// left onto Main Street toward Centrum"); or the whole text when it leads
+/// onto nothing named.
+#[derive(Debug, Clone, PartialEq)]
+struct Phrase {
+    text: String,
+    concise: String,
+}
+
+impl Phrase {
+    /// A text that is its own concise form.
+    fn plain(text: String) -> Self {
+        Self {
+            concise: text.clone(),
+            text,
+        }
+    }
+
+    /// `"{verb} onto {target}"`, concise `target`; just `verb` without one.
+    fn onto(verb: &str, target: Option<&str>) -> Self {
+        match target.map(str::trim).filter(|target| !target.is_empty()) {
+            Some(target) => Self {
+                text: format!("{verb} onto {target}"),
+                concise: target.to_string(),
+            },
+            None => Self::plain(verb.to_string()),
+        }
+    }
 }
 
 fn pre_transition_instruction(kind: RouteManeuverKind, instruction: &str) -> Option<String> {
@@ -1217,57 +1399,60 @@ fn instruction(prefix: &str, road_name: Option<&str>) -> String {
     }
 }
 
-fn instruction_with_sign(
-    prefix: &str,
-    road_name: Option<&str>,
-    edge: &crate::types::RouteEdgeAttribution,
-) -> String {
-    append_sign_guidance(instruction(prefix, road_name), edge)
+/// `"{verb} onto {road}"` with the signs' guidance, the road being `edge`'s
+/// name, else its ref (an unnamed DK94 is "onto DK94", not "toward DK94").
+fn onto_with_sign(verb: &str, edge: &crate::types::RouteEdgeAttribution) -> Phrase {
+    let target = connector_name(edge);
+    append_sign_guidance(Phrase::onto(verb, target.as_deref()), edge)
 }
 
-fn append_sign_guidance(base: String, edge: &crate::types::RouteEdgeAttribution) -> String {
-    let Some(sign_text) = sign_text_for_edge(edge).map(|value| value.trim().to_string()) else {
-        return base;
+/// Appends " toward {signs}" and " via {road number}" to the text and the
+/// concise form, each when the text does not say it already.
+fn append_sign_guidance(phrase: Phrase, edge: &crate::types::RouteEdgeAttribution) -> Phrase {
+    let Some(sign_text) = sign_text_for_edge(edge) else {
+        return phrase;
     };
-    if sign_text.is_empty() || base.to_lowercase().contains(&sign_text.to_lowercase()) {
-        return base;
+    if phrase
+        .text
+        .to_lowercase()
+        .contains(&sign_text.to_lowercase())
+    {
+        return phrase;
     }
-    let mut guidance = format!("{base} toward {sign_text}");
-    if let Some(branch_text) = instruction_branch_text_for_edge(edge) {
-        let guidance_lower = guidance.to_lowercase();
-        if !guidance_lower.contains(&branch_text.to_lowercase())
+    let mut guidance = format!(" toward {sign_text}");
+    if let Some(branch_text) = branch_text_for_edge(edge) {
+        let said = format!("{}{guidance}", phrase.text).to_lowercase();
+        if !said.contains(&branch_text.to_lowercase())
             && !sign_text.eq_ignore_ascii_case(&branch_text)
         {
             guidance = format!("{guidance} via {branch_text}");
         }
     }
-    guidance
+    Phrase {
+        text: format!("{}{guidance}", phrase.text),
+        concise: format!("{}{guidance}", phrase.concise),
+    }
 }
 
-fn turn_phrase(angle: i16) -> &'static str {
-    if !(-135..=135).contains(&angle) {
-        "Make a U-turn onto"
-    } else if angle < 0 {
-        "Turn left onto"
-    } else {
-        "Turn right onto"
+/// The verb of a turn with `modifier` ([`maneuver_modifier`]).
+fn turn_phrase(modifier: Option<&str>) -> &'static str {
+    match modifier {
+        Some("uturn") => "Make a U-turn",
+        Some("slight_left") => "Bear left",
+        Some("slight_right") => "Bear right",
+        Some("sharp_left") => "Turn sharp left",
+        Some("sharp_right") => "Turn sharp right",
+        Some("left") => "Turn left",
+        _ => "Turn right",
     }
 }
 
 fn keep_phrase(angle: i16) -> &'static str {
-    if angle < 0 {
-        "Keep left onto"
-    } else {
-        "Keep right onto"
-    }
+    if angle < 0 { "Keep left" } else { "Keep right" }
 }
 
 fn fork_phrase(angle: i16) -> &'static str {
-    if angle < 0 {
-        "Fork left onto"
-    } else {
-        "Fork right onto"
-    }
+    if angle < 0 { "Fork left" } else { "Fork right" }
 }
 
 /// The bearing (degrees) of the route arriving at `shape_index`, from the
@@ -1811,6 +1996,208 @@ mod tests {
                 .map(String::as_str),
             Some("7A")
         );
+        assert_eq!(
+            ramp.instruction_parameters
+                .get("exit_number")
+                .map(String::as_str),
+            Some("7A")
+        );
+        assert_eq!(ramp.concise_instruction, "A4 ramp toward Krakow");
+    }
+
+    /// A leg along `edges`, one geometry segment each, through `points`.
+    fn leg_through(edges: Vec<RouteEdgeAttribution>, points: &[(f64, f64)]) -> RouteLeg {
+        assert_eq!(points.len(), edges.len() + 1);
+        let shape_segments = edges
+            .iter()
+            .enumerate()
+            .map(|(index, edge)| RouteShapeSegment {
+                edge_id: edge.edge_id,
+                begin_shape_index: index,
+                end_shape_index: index + 1,
+                start_fraction: 0.0,
+                end_fraction: 1.0,
+                quality_flags: Vec::new(),
+                dynamic_overlay: None,
+            })
+            .collect();
+        RouteLeg {
+            distance_m: edges.iter().map(|edge| edge.distance_m).sum(),
+            duration_s: edges.iter().map(|edge| edge.duration_s).sum(),
+            geometry: points
+                .iter()
+                .map(|&(lat, lng)| GeoPoint::new(lat, lng))
+                .collect(),
+            polyline6: None,
+            geojson: None,
+            edges,
+            shape_segments,
+        }
+    }
+
+    fn parameter<'m>(maneuver: &'m RouteManeuver, key: &str) -> Option<&'m str> {
+        maneuver.instruction_parameters.get(key).map(String::as_str)
+    }
+
+    #[test]
+    fn modifiers_follow_fixed_angle_thresholds() {
+        use RouteManeuverKind::{Continue, Destination, Fork, Keep, Roundabout, Turn, UTurn};
+        let cases = [
+            (Continue, Some(12), None, Some("straight")),
+            (Keep, Some(-12), None, Some("slight_left")),
+            (Keep, Some(12), None, Some("slight_right")),
+            (Turn, Some(30), None, Some("slight_right")),
+            (Turn, Some(-59), None, Some("slight_left")),
+            (Turn, Some(60), None, Some("right")),
+            (Turn, Some(-119), None, Some("left")),
+            (Turn, Some(120), None, Some("sharp_right")),
+            (Turn, Some(-135), None, Some("sharp_left")),
+            (Turn, Some(136), None, Some("uturn")),
+            (UTurn, Some(-150), None, Some("uturn")),
+            // A fork names the side of its branch, not the turn angle's.
+            (Fork, Some(5), Some(-10), Some("slight_left")),
+            (Turn, None, None, None),
+            (Roundabout, Some(90), None, None),
+            (Destination, Some(90), None, None),
+        ];
+        for (kind, angle, fork_side, expected) in cases {
+            assert_eq!(
+                maneuver_modifier(kind, angle, fork_side),
+                expected,
+                "{kind:?} at {angle:?}"
+            );
+        }
+        assert_eq!(turn_phrase(Some("slight_left")), "Bear left");
+        assert_eq!(turn_phrase(Some("sharp_right")), "Turn sharp right");
+        assert_eq!(turn_phrase(Some("uturn")), "Make a U-turn");
+    }
+
+    #[test]
+    fn turns_carry_structured_parameters_and_no_false_toward() {
+        // East along Opolska, then left (north) onto an unnamed road whose
+        // only labels are its own refs and an exit number.
+        let mut unnamed = edge(2, "");
+        unnamed.name = None;
+        unnamed.ref_name = Some("DK94".to_string());
+        unnamed.route_refs = vec!["E40".to_string()];
+        unnamed.junction_ref = Some("7".to_string());
+        let leg = leg_through(
+            vec![edge(1, "Opolska"), unnamed],
+            &[(50.0, 20.0), (50.0, 20.001), (50.001, 20.001)],
+        );
+        let maneuvers = build_maneuvers(&leg);
+        let turn = maneuvers
+            .iter()
+            .find(|maneuver| maneuver.kind == RouteManeuverKind::Turn)
+            .expect("turn maneuver");
+        assert_eq!(turn.instruction, "Turn left onto DK94");
+        assert_eq!(turn.concise_instruction, "DK94");
+        assert_eq!(parameter(turn, "modifier"), Some("left"));
+        assert_eq!(turn.sign_text, None);
+        assert_eq!(parameter(turn, "sign_text"), None);
+        // Branch text is a road number, never the exit number.
+        assert_eq!(turn.branch_text.as_deref(), Some("DK94"));
+        // Not a ramp, so no exit number either.
+        assert_eq!(parameter(turn, "exit_number"), None);
+        assert_eq!(parameter(turn, "toward"), None);
+
+        // Signs: every destination, once, then the signed road number.
+        let mut signed = edge(2, "Zakopianka");
+        signed.destination = Some("Kraków; Tarnów".to_string());
+        signed.destination_street = Some("Tarnów;Wieliczka".to_string());
+        signed.destination_ref = Some("A4".to_string());
+        let leg = leg_through(
+            vec![edge(1, "Opolska"), signed],
+            &[(50.0, 20.0), (50.0, 20.001), (49.999, 20.001)],
+        );
+        let maneuvers = build_maneuvers(&leg);
+        let turn = maneuvers
+            .iter()
+            .find(|maneuver| maneuver.kind == RouteManeuverKind::Turn)
+            .expect("turn maneuver");
+        assert_eq!(
+            turn.instruction,
+            "Turn right onto Zakopianka toward Kraków; Tarnów via A4"
+        );
+        assert_eq!(
+            turn.concise_instruction,
+            "Zakopianka toward Kraków; Tarnów via A4"
+        );
+        assert_eq!(parameter(turn, "modifier"), Some("right"));
+        assert_eq!(parameter(turn, "toward"), Some("Kraków;Tarnów;Wieliczka"));
+        assert_eq!(parameter(turn, "via"), Some("A4"));
+    }
+
+    #[test]
+    fn maneuvers_carry_road_facts_and_ferries_get_their_own() {
+        let mut toll_road = edge(2, "A4");
+        toll_road.road_type = RoadType::Motorway;
+        toll_road.is_toll = true;
+        toll_road.maxspeed_kph = Some(140.0);
+        let mut ferry = edge(3, "Bac");
+        ferry.is_ferry = true;
+        let mut track = edge(4, "Bac");
+        track.road_type = RoadType::Track;
+        track.surface = Some("gravel".to_string());
+        // Straight east all the way: only the name change onto A4 and the
+        // ferry make maneuvers; the ferry's end does too, though the name
+        // stays.
+        let leg = leg_through(
+            vec![edge(1, "Opolska"), toll_road, ferry, track],
+            &[
+                (50.0, 20.0),
+                (50.0, 20.001),
+                (50.0, 20.002),
+                (50.0, 20.003),
+                (50.0, 20.004),
+            ],
+        );
+        let maneuvers = build_maneuvers(&leg);
+        let keys = maneuvers
+            .iter()
+            .map(|maneuver| maneuver.instruction_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                "route.start",
+                "route.keep",
+                "route.ferry",
+                "route.continue",
+                "route.destination"
+            ]
+        );
+        let onto_toll_road = &maneuvers[1];
+        assert_eq!(parameter(onto_toll_road, "road_type"), Some("motorway"));
+        assert_eq!(parameter(onto_toll_road, "toll"), Some("true"));
+        assert_eq!(parameter(onto_toll_road, "speed_limit_kph"), Some("140"));
+        assert_eq!(parameter(onto_toll_road, "ferry"), None);
+        // A keep names a side even when the road runs straight on.
+        assert_eq!(parameter(onto_toll_road, "modifier"), Some("slight_right"));
+
+        let boarding = &maneuvers[2];
+        assert_eq!(boarding.instruction, "Take the ferry Bac");
+        assert_eq!(boarding.concise_instruction, "Bac");
+        assert_eq!(parameter(boarding, "ferry"), Some("true"));
+        assert_eq!(
+            parameter(boarding, "guidance_reason"),
+            Some("boarding_ferry")
+        );
+        assert!(
+            !boarding
+                .quality_flags
+                .contains(&RouteGuidanceQualityFlag::WeakManeuverClassification)
+        );
+
+        let leaving = &maneuvers[3];
+        assert_eq!(leaving.instruction, "Continue onto Bac");
+        assert_eq!(parameter(leaving, "guidance_reason"), Some("leaving_ferry"));
+        assert_eq!(parameter(leaving, "road_type"), Some("track"));
+        assert_eq!(parameter(leaving, "unpaved"), Some("true"));
+        assert_eq!(parameter(leaving, "ferry"), None);
+
+        // The destination describes no road to enter.
+        assert_eq!(parameter(&maneuvers[4], "road_type"), None);
     }
 
     #[test]
@@ -1819,8 +2206,11 @@ mod tests {
         signed_edge.destination = Some("Krakow".to_string());
 
         assert_eq!(
-            instruction_with_sign("Continue onto", signed_edge.name.as_deref(), &signed_edge),
-            "Continue onto Krakow"
+            onto_with_sign("Continue", &signed_edge),
+            Phrase {
+                text: "Continue onto Krakow".to_string(),
+                concise: "Krakow".to_string(),
+            }
         );
     }
 

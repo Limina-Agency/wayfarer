@@ -88,6 +88,10 @@ pub struct RouteNavigationInput {
     /// without them it is the total duration in proportion to distance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shape_segment_durations_seconds: Vec<f64>,
+    /// The speed limit (km/h) of each of `shape_segments`' edges, `null`
+    /// where unknown or for a connector, for progress's `speedLimitKph`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape_segment_speed_limits_kph: Vec<Option<f32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance_meters: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,18 +108,20 @@ impl RouteNavigationInput {
         let mut edges = route.edge_attributions.iter();
         let mut shape_segments = Vec::new();
         let mut shape_segment_durations_seconds = Vec::new();
+        let mut shape_segment_speed_limits_kph = Vec::new();
         for shape in &route.shape_segments {
-            let duration_s = if shape
+            let edge = if shape
                 .segment
                 .quality_flags
                 .contains(&RouteShapeQualityFlag::SsvgConnector)
             {
-                0.0
+                None
             } else {
-                edges.next().map_or(0.0, |edge| edge.duration_s)
+                edges.next()
             };
             shape_segments.push(shape.segment.clone());
-            shape_segment_durations_seconds.push(duration_s);
+            shape_segment_durations_seconds.push(edge.map_or(0.0, |edge| edge.duration_s));
+            shape_segment_speed_limits_kph.push(edge.and_then(|edge| edge.maxspeed_kph));
         }
         Self {
             geometry: carried_points(&route.geometry, route.geojson.as_ref()),
@@ -123,6 +129,7 @@ impl RouteNavigationInput {
             maneuvers: route.maneuvers.clone(),
             shape_segments,
             shape_segment_durations_seconds,
+            shape_segment_speed_limits_kph: speed_limits_if_any(shape_segment_speed_limits_kph),
             distance_meters: Some(route.distance_m),
             duration_seconds: Some(route.duration_s),
         }
@@ -132,6 +139,7 @@ impl RouteNavigationInput {
     pub fn from_leg(route: &LegResult) -> Self {
         let mut shape_segments = Vec::new();
         let mut shape_segment_durations_seconds = Vec::new();
+        let mut shape_segment_speed_limits_kph = Vec::new();
         let mut shape_offset = 0;
         for leg in &route.legs {
             let mut edges = leg.edges.iter();
@@ -139,16 +147,17 @@ impl RouteNavigationInput {
                 let mut segment = segment.clone();
                 segment.begin_shape_index += shape_offset;
                 segment.end_shape_index += shape_offset;
-                let duration_s = if segment
+                let edge = if segment
                     .quality_flags
                     .contains(&RouteShapeQualityFlag::SsvgConnector)
                 {
-                    0.0
+                    None
                 } else {
-                    edges.next().map_or(0.0, |edge| edge.duration_s)
+                    edges.next()
                 };
                 shape_segments.push(segment);
-                shape_segment_durations_seconds.push(duration_s);
+                shape_segment_durations_seconds.push(edge.map_or(0.0, |edge| edge.duration_s));
+                shape_segment_speed_limits_kph.push(edge.and_then(|edge| edge.maxspeed_kph));
             }
             shape_offset += leg.geometry.len().saturating_sub(1);
         }
@@ -158,9 +167,20 @@ impl RouteNavigationInput {
             maneuvers: route.maneuvers.clone(),
             shape_segments,
             shape_segment_durations_seconds,
+            shape_segment_speed_limits_kph: speed_limits_if_any(shape_segment_speed_limits_kph),
             distance_meters: Some(route.distance_m),
             duration_seconds: Some(route.duration_s),
         }
+    }
+}
+
+/// The speed limits of a route's shape segments, or none when no segment has
+/// one (the input then leaves the key out).
+fn speed_limits_if_any(limits: Vec<Option<f32>>) -> Vec<Option<f32>> {
+    if limits.iter().any(Option::is_some) {
+        limits
+    } else {
+        Vec::new()
     }
 }
 
@@ -207,6 +227,10 @@ pub struct RouteNavigationProgress {
     pub active_segment_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_edge_id: Option<u64>,
+    /// The speed limit (km/h) of the active edge, from the input's
+    /// `shapeSegmentSpeedLimitsKph`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_limit_kph: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_dynamic_overlay: Option<RouteShapeDynamicOverlay>,
     pub snap_diagnostics: RouteNavigationSnapDiagnostics,
@@ -511,6 +535,13 @@ impl<'a> PreparedNavigationRoute<'a> {
             active_shape_index: snap.segment_index,
             active_segment_index: active_segment.map(|(index, _)| index),
             active_edge_id: active_segment.map(|(_, segment)| segment.edge_id),
+            speed_limit_kph: active_segment.and_then(|(index, _)| {
+                self.input
+                    .shape_segment_speed_limits_kph
+                    .get(index)
+                    .copied()
+                    .flatten()
+            }),
             active_dynamic_overlay: active_segment
                 .and_then(|(_, segment)| segment.dynamic_overlay.clone()),
             snap_diagnostics,
@@ -959,6 +990,7 @@ mod tests {
                 dynamic_overlay: None,
             }],
             shape_segment_durations_seconds: Vec::new(),
+            shape_segment_speed_limits_kph: Vec::new(),
             distance_meters: None,
             duration_seconds: Some(120.0),
         }
@@ -1236,6 +1268,7 @@ mod tests {
             ],
             shape_segments: Vec::new(),
             shape_segment_durations_seconds: Vec::new(),
+            shape_segment_speed_limits_kph: Vec::new(),
             distance_meters: None,
             duration_seconds: Some(80.0),
         }
@@ -1316,6 +1349,7 @@ mod tests {
             maneuvers: Vec::new(),
             shape_segments: Vec::new(),
             shape_segment_durations_seconds: Vec::new(),
+            shape_segment_speed_limits_kph: Vec::new(),
             distance_meters: None,
             duration_seconds: None,
         };
@@ -1404,6 +1438,7 @@ mod tests {
         ];
         // A fast first edge and a slow second one, of equal length.
         input.shape_segment_durations_seconds = vec![10.0, 110.0];
+        input.shape_segment_speed_limits_kph = vec![Some(50.0), None];
         let progress = evaluate_route_navigation_progress(
             &input,
             NavigationPositionSample {
@@ -1423,5 +1458,23 @@ mod tests {
         // 45% of 120 s.
         assert!((progress.duration_remaining_seconds - 99.0).abs() < 0.5);
         assert_eq!(progress.active_edge_id, Some(8));
+        // The second edge's limit is unknown.
+        assert_eq!(progress.speed_limit_kph, None);
+        input.shape_segment_speed_limits_kph = vec![None, Some(30.0)];
+        let progress = evaluate_route_navigation_progress(
+            &input,
+            NavigationPositionSample {
+                position: point(20.0011),
+                heading_degrees: None,
+                speed_meters_per_second: None,
+                sampled_at_ms: None,
+                accuracy_meters: None,
+                provider: None,
+            },
+            None,
+            RouteNavigationProgressOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(progress.speed_limit_kph, Some(30.0));
     }
 }

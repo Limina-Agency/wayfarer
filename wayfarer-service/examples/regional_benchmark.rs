@@ -351,6 +351,7 @@ fn navigation_progress_bench(case: &Case, route: &Response) -> Value {
         maneuvers: route.maneuvers.clone(),
         shape_segments: Vec::new(),
         shape_segment_durations_seconds: Vec::new(),
+        shape_segment_speed_limits_kph: Vec::new(),
         distance_meters: route.distance_m,
         duration_seconds: route.duration_s,
     };

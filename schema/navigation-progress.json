@@ -129,6 +129,14 @@
     "snappedPosition": {
       "$ref": "#/$defs/GeoPoint"
     },
+    "speedLimitKph": {
+      "description": "The speed limit (km/h) of the active edge, from the input's\n`shapeSegmentSpeedLimitsKph`.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
     "status": {
       "$ref": "#/$defs/RouteNavigationStatus"
     },
