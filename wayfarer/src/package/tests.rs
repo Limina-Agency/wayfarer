@@ -8308,6 +8308,56 @@ fn cch_topology_matches_the_reference_build() {
     }
 }
 
+/// Parallel customization gives the bits of nodes relaxed one at a time, in
+/// level order, on any number of threads: the wide levels, the narrow top
+/// and split nodes alike (their thresholds are tiny in tests).
+#[test]
+fn cch_customization_matches_the_sequential_one() {
+    let dir = tempdir().unwrap();
+    let graphs = [
+        ("grid", grid_graph()),
+        ("costing", costing_grid_graph()),
+        ("junction", junction_graph()),
+        ("restricted", randomly_restricted_grid(7)),
+        ("restricted-2", randomly_restricted_grid(11)),
+    ];
+    let bits = |weights: &[f32]| weights.iter().map(|w| w.to_bits()).collect::<Vec<_>>();
+    for (name, graph) in graphs {
+        let fixture = persist(&graph, &dir.path().join(format!("{name}.mrt")));
+        let view = fixture.package.file.view();
+        let (topology, _) = cch::CchTopology::build(&view).expect("topology");
+        let columns = view.edge_cost.len() / view.edge_count;
+        assert!(columns > 0, "{name}");
+        for column in 0..columns {
+            let cost = &view.edge_cost[column * view.edge_count..(column + 1) * view.edge_count];
+            // Every other edge a little dearer, so that parallel edges and
+            // triangles compete.
+            let skewed = cost
+                .iter()
+                .enumerate()
+                .map(|(edge, cost)| cost * (1.0 + (edge % 3) as f32 * 0.37))
+                .collect::<Vec<_>>();
+            for cost in [cost, skewed.as_slice()] {
+                let (up, down) = topology.customize_sequential(cost);
+                for threads in [1, 4] {
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap();
+                    let metric = pool.install(|| topology.customize(cost));
+                    let (got_up, got_down) = metric.weights();
+                    assert_eq!(bits(got_up), bits(&up), "{name} column {column}, {threads}");
+                    assert_eq!(
+                        bits(got_down),
+                        bits(&down),
+                        "{name} column {column}, {threads}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Searches customize a stored column's metric on first use, and only the
 /// columns they use; `prepare_potentials` customizes all of them. Threads
 /// asking for a metric at once, from inside rayon, all get the one stored.
