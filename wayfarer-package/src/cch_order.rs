@@ -16,7 +16,7 @@
 //! which repairs labels locally instead of searching the whole cell once
 //! per augmenting path as Dinic does on these graphs (one path per phase).
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rayon::prelude::*;
 
@@ -25,6 +25,8 @@ const NO_NODE: u32 = u32::MAX;
 const LEAF_CELL: usize = 64;
 /// Cells of at least this many nodes build their local graph in parallel.
 const PARALLEL_CELL: usize = 50_000;
+/// Cells of at least this many nodes ask whether to stop first.
+const STOP_CHECK_CELL: usize = 4_096;
 
 /// Undirected simple node graph in CSR form (both directions listed).
 pub struct NodeGraph {
@@ -99,6 +101,10 @@ struct Dissection<'a> {
     local: Vec<AtomicU32>,
     next_cell: AtomicU32,
     top_separator: AtomicU32,
+    /// Asked before each cell of [`STOP_CHECK_CELL`] nodes or more; once it
+    /// returns true the dissection gives up.
+    stop: &'a (dyn Fn() -> bool + Sync),
+    stopped: AtomicBool,
 }
 
 /// A cell's induced graph in local indexes.
@@ -216,6 +222,11 @@ impl Dissection<'_> {
 
     /// The order (lowest rank first) of a cell.
     fn order(&self, nodes: Vec<u32>, depth: usize) -> Vec<u32> {
+        if self.stopped.load(Ordering::Relaxed) || (nodes.len() >= STOP_CHECK_CELL && (self.stop)())
+        {
+            self.stopped.store(true, Ordering::Relaxed);
+            return Vec::new();
+        }
         if nodes.len() <= LEAF_CELL {
             let id = self.claim(&nodes);
             let lg = self.local_graph(&nodes, id);
@@ -263,34 +274,17 @@ impl Dissection<'_> {
     /// four inertial-flow cuts.
     fn separator(&self, nodes: &[u32], lg: &LocalGraph) -> Vec<u32> {
         const DIRECTIONS: [(i128, i128); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+        // A cell lists its nodes in ascending order, so local indexes break
+        // ties between equal projections as the node ids do.
+        debug_assert!(nodes.is_sorted());
         let candidates = DIRECTIONS
             .par_iter()
             .map(|(dx, dy)| {
-                // Only which nodes are the lowest and highest quarter
-                // matters: two selections on (projection, node) give the
-                // same sets as a full sort.
-                let mut keyed = nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(local, node)| {
-                        let at = *node as usize;
-                        let key = i128::from(self.x[at]) * dx + i128::from(self.y[at]) * dy;
-                        (key, *node, local as u32)
-                    })
-                    .collect::<Vec<_>>();
-                let k = (nodes.len() / 4).max(1);
-                let mut side = vec![0u8; nodes.len()];
-                keyed.select_nth_unstable(k - 1);
-                for (_, _, local) in &keyed[..k] {
-                    side[*local as usize] = 1;
-                }
-                let rest = &mut keyed[k..];
-                let at = rest.len() - k;
-                rest.select_nth_unstable(at);
-                for (_, _, local) in &rest[at..] {
-                    side[*local as usize] = 2;
-                }
-                drop(keyed);
+                let key = |local: usize| {
+                    let at = nodes[local] as usize;
+                    i128::from(self.x[at]) * dx + i128::from(self.y[at]) * dy
+                };
+                let side = quarter_sides(nodes.len(), key);
                 inertial_cut(lg, &side)
             })
             .collect::<Vec<_>>();
@@ -299,6 +293,51 @@ impl Dissection<'_> {
             .min_by_key(|separator| separator.len())
             .unwrap_or_default()
     }
+}
+
+/// The sources (1) and sinks (2) of an inertial-flow cut of a cell of `n`
+/// nodes, by local index: the lowest quarter by (projection `key`, local
+/// index) and the highest quarter of the rest. Only which nodes are in them
+/// matters, so two selections give the same sets as a full sort; the pairs
+/// are packed into a `u64` (projection above the index) when the cell's
+/// projections span less than 2^32, as real coordinates always do.
+fn quarter_sides(n: usize, key: impl Fn(usize) -> i128) -> Vec<u8> {
+    let k = (n / 4).max(1);
+    let mut side = vec![0u8; n];
+    let (low, high) = (0..n).fold((i128::MAX, i128::MIN), |(low, high), local| {
+        let value = key(local);
+        (low.min(value), high.max(value))
+    });
+    if high - low <= i128::from(u32::MAX) {
+        let mut keyed = (0..n)
+            .map(|local| ((key(local) - low) as u64) << 32 | local as u64)
+            .collect::<Vec<_>>();
+        keyed.select_nth_unstable(k - 1);
+        for packed in &keyed[..k] {
+            side[(*packed as u32) as usize] = 1;
+        }
+        let rest = &mut keyed[k..];
+        let at = rest.len() - k;
+        rest.select_nth_unstable(at);
+        for packed in &rest[at..] {
+            side[(*packed as u32) as usize] = 2;
+        }
+    } else {
+        let mut keyed = (0..n)
+            .map(|local| (key(local), local as u32))
+            .collect::<Vec<_>>();
+        keyed.select_nth_unstable(k - 1);
+        for (_, local) in &keyed[..k] {
+            side[*local as usize] = 1;
+        }
+        let rest = &mut keyed[k..];
+        let at = rest.len() - k;
+        rest.select_nth_unstable(at);
+        for (_, local) in &rest[at..] {
+            side[*local as usize] = 2;
+        }
+    }
+    side
 }
 
 /// A cell's flow network: the nodes of `side` 0 keep their local order as
@@ -636,6 +675,20 @@ pub struct OrderStats {
 /// The CCH elimination order (rank → node) of `graph`, whose nodes have
 /// fixed-point unit vectors `xyz_fixed` (three per node).
 pub fn elimination_order(graph: &NodeGraph, xyz_fixed: &[i32]) -> (Vec<u32>, OrderStats) {
+    elimination_order_until(graph, xyz_fixed, &|| false).expect("an order that never stops")
+}
+
+/// [`elimination_order`], given up (`None`) once `stop` returns true: it is
+/// asked now and then (between big cells of the dissection), from the thread
+/// pool's threads.
+pub fn elimination_order_until(
+    graph: &NodeGraph,
+    xyz_fixed: &[i32],
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Option<(Vec<u32>, OrderStats)> {
+    if stop() {
+        return None;
+    }
     let mut stats = OrderStats::default();
     let n = graph.first.len().saturating_sub(1);
     // Degree ≤ 2 nodes first, iteratively, in place in a copy of the CSR:
@@ -719,12 +772,17 @@ pub fn elimination_order(graph: &NodeGraph, xyz_fixed: &[i32]) -> (Vec<u32>, Ord
         local: (0..n).map(|_| AtomicU32::new(0)).collect(),
         next_cell: AtomicU32::new(0),
         top_separator: AtomicU32::new(0),
+        stop,
+        stopped: AtomicBool::new(false),
     };
     let core_order = dissection.order(core, 0);
+    if dissection.stopped.load(Ordering::Relaxed) {
+        return None;
+    }
     stats.top_separator = dissection.top_separator.load(Ordering::Relaxed) as usize;
     order.extend(core_order);
     debug_assert_eq!(order.len(), n);
-    (order, stats)
+    Some((order, stats))
 }
 
 /// Rank per node of an elimination `order` (rank → node).
@@ -744,4 +802,97 @@ pub fn is_permutation(rank: &[u32]) -> bool {
         let r = *r as usize;
         r < seen.len() && !std::mem::replace(&mut seen[r], true)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sides a full sort of (projection, local index) gives.
+    fn sorted_sides(keys: &[i128]) -> Vec<u8> {
+        let n = keys.len();
+        let k = (n / 4).max(1);
+        let mut by_key = (0..n).collect::<Vec<_>>();
+        by_key.sort_by_key(|local| (keys[*local], *local));
+        let mut side = vec![0u8; n];
+        for local in &by_key[..k] {
+            side[*local] = 1;
+        }
+        for local in &by_key[n - k..] {
+            side[*local] = 2;
+        }
+        side
+    }
+
+    /// A `side` × `side` grid of nodes 0.001° apart, four-neighboured.
+    fn grid(side: u32) -> (NodeGraph, Vec<i32>) {
+        let mut first_out = vec![0u32];
+        let mut target = Vec::new();
+        let mut xyz = Vec::new();
+        for row in 0..side {
+            for column in 0..side {
+                let node = row * side + column;
+                if column > 0 {
+                    target.push(node - 1);
+                }
+                if column + 1 < side {
+                    target.push(node + 1);
+                }
+                if row > 0 {
+                    target.push(node - side);
+                }
+                if row + 1 < side {
+                    target.push(node + side);
+                }
+                first_out.push(target.len() as u32);
+                let (lat, lng) = (
+                    50.0 + f64::from(row) * 1e-3,
+                    19.0 + f64::from(column) * 1e-3,
+                );
+                xyz.extend(crate::format::fixed_xyz(crate::format::unit_xyz(lat, lng)));
+            }
+        }
+        (NodeGraph::new(&first_out, &target), xyz)
+    }
+
+    #[test]
+    fn a_stopped_order_gives_up() {
+        let (graph, xyz) = grid(100);
+        let (order, _) = elimination_order(&graph, &xyz);
+        assert!(is_permutation(&ranks(&order)));
+        assert_eq!(
+            elimination_order_until(&graph, &xyz, &|| false).map(|(order, _)| order),
+            Some(order)
+        );
+        assert!(elimination_order_until(&graph, &xyz, &|| true).is_none());
+        // Stopped once the dissection has started.
+        let asked = AtomicU32::new(0);
+        let stop = || asked.fetch_add(1, Ordering::Relaxed) >= 1;
+        assert!(elimination_order_until(&graph, &xyz, &stop).is_none());
+    }
+
+    #[test]
+    fn quarter_sides_match_a_full_sort() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for n in [65usize, 100, 257, 1_000] {
+            // Narrow keys with many ties, real-coordinate spans, and spans
+            // past 2^32 (the unpacked path).
+            for span in [8u64, 1 << 26, 1 << 40] {
+                let keys = (0..n)
+                    .map(|_| (next() % span) as i128 - (span / 2) as i128)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    quarter_sides(n, |local| keys[local]),
+                    sorted_sides(&keys),
+                    "n {n}, span {span}"
+                );
+            }
+        }
+    }
 }

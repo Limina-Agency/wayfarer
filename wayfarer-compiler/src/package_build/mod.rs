@@ -1351,7 +1351,12 @@ fn build_package_from(
     let order_started = Instant::now();
     let cch_rank = if options.cch_order {
         let graph = wayfarer_package::cch_order::NodeGraph::new(&first_out, &edge_target);
-        let (order, _) = wayfarer_package::cch_order::elimination_order(&graph, &node_xyz);
+        // A cancel stops the order between its big cells.
+        let (order, _) =
+            wayfarer_package::cch_order::elimination_order_until(&graph, &node_xyz, &|| {
+                job.cancelled()
+            })
+            .ok_or_else(cancelled_error)?;
         wayfarer_package::cch_order::ranks(&order)
     } else {
         Vec::new()
