@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "CompileResult",
-  "description": "The package a compile wrote.",
+  "description": "The package a compile wrote. Later releases may add fields.",
   "type": "object",
   "properties": {
     "byteLen": {

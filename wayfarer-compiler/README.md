@@ -37,8 +37,20 @@ the `wayfarer compile --request` command and the C ABI take; only `input` and
 
 ```json
 {"input": "monaco.osm.pbf", "output": "routing.mrt", "scratchDir": "/tmp",
- "graphId": "monaco", "country": "MC", "memory": "low", "threads": 2}
+ "graphId": "monaco", "country": "MC", "memory": "low", "threads": 2,
+ "profiles": ["wheeled", "on_foot", "legged"]}
 ```
+
+`profiles` names the profiles whose costs the package stores, a column each
+(default `["wheeled", "on_foot"]`); the engine derives the others' from the
+package when a profile is first used. A stored column adds about 8 bytes an
+edge and is customized when the package opens. The same set gives the same
+bytes, whatever its order.
+
+`CompileRequest` is `#[non_exhaustive]`: build it with `CompileRequest::new`
+and its builder methods (`.country("MC")`, `.threads(2)`,
+`.profiles([MobilityProfile::Wheeled])`, ...) or set its public fields, so
+that options added later don't break the build.
 
 A host that cannot take callbacks (a C ABI, a UI event loop) starts a
 `CompileJob` and polls it:

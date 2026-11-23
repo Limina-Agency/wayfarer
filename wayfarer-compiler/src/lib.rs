@@ -72,7 +72,7 @@ pub use api::{
     host_protocol,
 };
 pub use compile_job::CompileJob;
-pub use wayfarer_package::CancelToken;
+pub use wayfarer_package::{CancelToken, MobilityProfile};
 
 use job::{Job, ProgressFn};
 use profiling::Phase;
@@ -209,6 +209,8 @@ pub(crate) struct RouteArchiveCompileRequest {
     pub route_archive_path: PathBuf,
     /// As [`CompileRequest::threads`].
     pub threads: Option<usize>,
+    /// The package build's options ([`CompileRequest::profiles`]).
+    pub package_options: PackageBuildOptions,
 }
 
 /// The written routing package, as the compile saw it.
@@ -318,7 +320,7 @@ fn compile_with_job(
         road_graph,
         Some(&graph_manifest),
         &request.route_archive_path,
-        &PackageBuildOptions::default(),
+        &request.package_options,
         Some(&request.graph.temp_dir),
         job,
     )
@@ -3392,6 +3394,7 @@ mod tests {
             },
             route_archive_path: dir.join("routing.mrt"),
             threads: Some(2),
+            package_options: PackageBuildOptions::default(),
         };
         compile_route_archive(&request, &|| false, &mut |_| {}).unwrap();
         request.route_archive_path

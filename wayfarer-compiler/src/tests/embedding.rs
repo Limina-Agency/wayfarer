@@ -476,3 +476,85 @@ fn the_overall_share_rises_through_the_stages() {
     assert_eq!(CompileStage::CollectRoads.overall(Some(0.0)), 0.0);
     assert_eq!(CompileStage::WritePackage.overall(Some(1.0)), 1.0);
 }
+
+#[test]
+fn the_profiles_option_stores_the_set_given_in_slot_order() {
+    use MobilityProfile::{Default, Legged, OnFoot, Wheeled};
+    let dir = tempfile::tempdir().unwrap();
+    let compile_into = |name: &str, profiles: Option<Vec<MobilityProfile>>| {
+        let mut request = monaco_request(dir.path());
+        request.output = dir.path().join(name).join("routing.mrt");
+        request.profiles = profiles;
+        compile(&request, &CancelToken::new(), |_| {}).unwrap();
+        request.output
+    };
+    let default = compile_into("default", None);
+    // The default set, in another order with a repeat and `default`
+    // (`wheeled`'s column): the same bytes.
+    let shuffled = compile_into("shuffled", Some(vec![OnFoot, Default, Wheeled, OnFoot]));
+    assert_eq!(
+        std::fs::read(&default).unwrap(),
+        std::fs::read(&shuffled).unwrap()
+    );
+
+    let legged = compile_into("legged", Some(vec![Legged, Wheeled, OnFoot]));
+    let package = wayfarer_package::format::PackageFile::open(&legged).unwrap();
+    assert_eq!(package.counts().column_count, 3);
+    assert_eq!(package.column_for(Wheeled), Some(0));
+    assert_eq!(package.column_for(Default), Some(0));
+    assert_eq!(package.column_for(OnFoot), Some(1));
+    assert_eq!(package.column_for(Legged), Some(2));
+    // Legged routes are the same whether its costs are stored or derived.
+    let leg = |path: &std::path::Path| {
+        let request = LegRequest::new(
+            GeoPoint::new(43.7397, 7.4275),
+            GeoPoint::new(43.7290, 7.4160),
+            Legged,
+        );
+        let result = package_engine(path).route_leg(request).unwrap();
+        (result.edge_ids, result.duration_s, result.distance_m)
+    };
+    assert_eq!(leg(&legged), leg(&default));
+
+    let walking_only = compile_into("on-foot", Some(vec![OnFoot]));
+    let package = wayfarer_package::format::PackageFile::open(&walking_only).unwrap();
+    assert_eq!(package.counts().column_count, 1);
+    assert_eq!(package.column_for(Wheeled), None);
+}
+
+#[test]
+fn the_profiles_option_is_camel_case_json_and_never_empty() {
+    let request: CompileRequest = serde_json::from_str(
+        r#"{"input": "a.osm.pbf", "output": "a.mrt", "profiles": ["on_foot", "legged"]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        request,
+        CompileRequest::new("a.osm.pbf", "a.mrt")
+            .profiles([MobilityProfile::OnFoot, MobilityProfile::Legged])
+    );
+    assert_eq!(
+        request.package_build_options().profiles,
+        [MobilityProfile::OnFoot, MobilityProfile::Legged]
+    );
+    assert_eq!(
+        CompileRequest::new("a.osm.pbf", "a.mrt")
+            .package_build_options()
+            .profiles,
+        PackageBuildOptions::default().profiles
+    );
+    assert!(
+        serde_json::from_str::<CompileRequest>(
+            r#"{"input": "a.osm.pbf", "output": "a.mrt", "profiles": ["car"]}"#
+        )
+        .is_err()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let request = fixture(dir.path(), Some(1)).profiles([]);
+    let error = compile(&request, &CancelToken::new(), |_| {}).unwrap_err();
+    assert_eq!(
+        error,
+        CompileError::InvalidRequest("the profile list is empty".into())
+    );
+    assert_eq!(tree(dir.path()), ["fixture.osm.pbf"]);
+}

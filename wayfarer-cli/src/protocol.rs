@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 use serde_json::json;
+#[cfg(test)]
+use wayfarer_compiler::MobilityProfile;
 use wayfarer_compiler::host_protocol::{self, Detail};
 use wayfarer_compiler::{
     CancelToken, CompileError, CompileProgress, CompileRequest, CompileStage, MemoryProfile,
@@ -21,7 +23,9 @@ use crate::compile::{CANCELLED_STATUS, read_request, stop_soon};
 
 const PROTOCOL_VERSION: u32 = 1;
 
-/// The protocol request, as hosts send it.
+/// The protocol's own request, as hosts sent it before the protocol took a
+/// `CompileRequest`. Deprecated: still read, with a warning on stderr, and to
+/// be removed before 1.0. It has no field for options added since.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProtocolRequest {
@@ -46,29 +50,32 @@ enum BuildProfile {
 
 impl From<ProtocolRequest> for CompileRequest {
     fn from(request: ProtocolRequest) -> Self {
-        CompileRequest {
-            input: request.input_pbf_path,
-            output: request.route_archive_path,
-            scratch_dir: Some(request.temp_dir),
-            graph_id: Some(request.graph_id),
-            country: request.country_code,
-            memory: match request.build_profile {
+        let mut compile = CompileRequest::new(request.input_pbf_path, request.route_archive_path)
+            .scratch_dir(request.temp_dir)
+            .graph_id(request.graph_id)
+            .memory(match request.build_profile {
                 BuildProfile::DesktopFull => MemoryProfile::Standard,
                 BuildProfile::MobileOperational => MemoryProfile::Low,
-            },
-            threads: request.threads,
-        }
+            });
+        compile.country = request.country_code;
+        compile.threads = request.threads;
+        compile
     }
 }
 
-/// A request as JSON: the protocol request (it has `inputPbfPath`) or a
-/// `CompileRequest`.
-pub(crate) fn parse_request(bytes: &[u8]) -> Result<CompileRequest, serde_json::Error> {
+/// What a host sending the protocol's own request is told on stderr.
+pub(crate) const DEPRECATED_REQUEST: &str = "the host protocol's own request \
+     (inputPbfPath, tempDir, routeArchivePath, buildProfile) is deprecated and will be removed \
+     before 1.0: send a CompileRequest ({\"input\", \"output\", ...}), the JSON the C ABI takes";
+
+/// A request as JSON: a `CompileRequest`, or the protocol's own (it has
+/// `inputPbfPath`), and whether it was the protocol's own.
+pub(crate) fn parse_request(bytes: &[u8]) -> Result<(CompileRequest, bool), serde_json::Error> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
     if value.get("inputPbfPath").is_some() {
-        Ok(ProtocolRequest::deserialize(value)?.into())
+        Ok((ProtocolRequest::deserialize(value)?.into(), true))
     } else {
-        CompileRequest::deserialize(value)
+        Ok((CompileRequest::deserialize(value)?, false))
     }
 }
 
@@ -192,12 +199,13 @@ mod tests {
 
     #[test]
     fn protocol_3_requests_still_parse() {
-        let request = parse_request(
+        let (request, deprecated) = parse_request(
             br#"{"inputPbfPath": "/data/monaco.osm.pbf", "tempDir": "/tmp/work",
                  "graphId": "monaco", "countryCode": "MC",
                  "buildProfile": "mobile_operational", "routeArchivePath": "/data/routing.mrt"}"#,
         )
         .unwrap();
+        assert!(deprecated);
         assert_eq!(
             request,
             CompileRequest::new("/data/monaco.osm.pbf", "/data/routing.mrt")
@@ -206,7 +214,7 @@ mod tests {
                 .country("MC")
                 .memory(MemoryProfile::Low)
         );
-        let request = parse_request(
+        let (request, _) = parse_request(
             br#"{"inputPbfPath": "a.osm.pbf", "tempDir": "t", "graphId": "a",
                  "countryCode": null, "buildProfile": "desktop_full",
                  "routeArchivePath": "a.mrt", "threads": 4}"#,
@@ -234,12 +242,17 @@ mod tests {
 
     #[test]
     fn compile_requests_parse_too() {
-        let request =
-            parse_request(br#"{"input": "a.osm.pbf", "output": "a.mrt", "memory": "low"}"#)
-                .unwrap();
+        let (request, deprecated) = parse_request(
+            br#"{"input": "a.osm.pbf", "output": "a.mrt", "memory": "low",
+                 "profiles": ["legged", "wheeled"]}"#,
+        )
+        .unwrap();
+        assert!(!deprecated);
         assert_eq!(
             request,
-            CompileRequest::new("a.osm.pbf", "a.mrt").memory(MemoryProfile::Low)
+            CompileRequest::new("a.osm.pbf", "a.mrt")
+                .memory(MemoryProfile::Low)
+                .profiles([MobilityProfile::Legged, MobilityProfile::Wheeled])
         );
         assert!(parse_request(br#"{"input": "a.osm.pbf"}"#).is_err());
     }

@@ -60,16 +60,21 @@ compile_package() {
   local bin="$1" out="$2" name="$3" pbf="$4" country="$5"
   local dir="$out/$name"
   rm -rf "$dir" && mkdir -p "$dir/scratch"
-  cat >"$dir/request.json" <<EOF
+  local started=$SECONDS
+  # The host protocol's events. The `wayfarer` binary (0.1.3 on) takes a
+  # CompileRequest; a bin_dir built before it has the old
+  # `wayfarer-compiler`, which takes only the protocol's own request.
+  if [[ -x "$bin/wayfarer" ]]; then
+    cat >"$dir/request.json" <<EOF
+{"input":"$pbf","output":"$dir/routing.mrt","scratchDir":"$dir/scratch","graphId":"$name",
+ "country":"$country"}
+EOF
+    "$bin/wayfarer" compile --protocol --request "$dir/request.json" >"$dir/compile.log"
+  else
+    cat >"$dir/request.json" <<EOF
 {"inputPbfPath":"$pbf","tempDir":"$dir/scratch","graphId":"$name","countryCode":"$country",
  "buildProfile":"desktop_full","routeArchivePath":"$dir/routing.mrt"}
 EOF
-  local started=$SECONDS
-  # The host protocol's request and events; a bin_dir built before the
-  # `wayfarer` binary has the old `wayfarer-compiler` instead.
-  if [[ -x "$bin/wayfarer" ]]; then
-    "$bin/wayfarer" compile --protocol --request "$dir/request.json" >"$dir/compile.log"
-  else
     "$bin/wayfarer-compiler" --request "$dir/request.json" >"$dir/compile.log"
   fi
   rm -rf "$dir/scratch"

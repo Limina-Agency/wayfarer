@@ -299,7 +299,9 @@ typedef struct WayfarerCompileJob WayfarerCompileJob;
  * "output": "<routing.mrt>", "scratchDir" (optional; a fresh subdirectory is
  * made and removed), "graphId" (default: from the input's name), "country"
  * (ISO code), "memory": "standard" | "low" (memory use and speed, never the
- * package's bytes), "threads"}. `cancel` (may be NULL) stops it, its timeout
+ * package's bytes), "threads", "profiles" (the profiles whose costs are
+ * stored, default ["wheeled", "on_foot"]; see schema/compile-request.json)}.
+ * `cancel` (may be NULL) stops it, its timeout
  * included; a cancelled or failed compile removes its scratch and partial
  * output and keeps any package that was at "output" before. A package open
  * at "output" is replaced (see "Replacing a package"). On success
