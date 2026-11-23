@@ -1131,14 +1131,23 @@ fn matrix_row_with(
     // rebuilt over the remaining targets and the queue re-keyed. Raising a
     // consistent potential mid-search keeps settled labels exact, so the last,
     // most expensive target gets a focused search rather than a flood.
+    // Each candidate's node counts at what its finish adds there: the rest
+    // of its edge and its approach cost (the least of them per node).
     let open_target_nodes = |open: &[bool]| {
         let mut nodes = candidates
             .iter()
             .filter(|candidate| open[candidate.target])
-            .map(|candidate| graph.edge_source(candidate.point.edge as usize))
+            .filter_map(|candidate| {
+                let point = candidate.point;
+                // A finish never crosses an impassable edge.
+                let cost = f64::from(query.edge_cost(graph, point.edge));
+                let offset = cost * point.fraction.clamp(0.0, 1.0) + point.approach;
+                (cost.is_finite() && !offset.is_nan())
+                    .then_some((graph.edge_source(point.edge as usize), offset))
+            })
             .collect::<Vec<_>>();
-        nodes.sort_unstable();
-        nodes.dedup();
+        nodes.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        nodes.dedup_by_key(|(node, _)| *node);
         nodes
     };
     let mut open = searched;
@@ -1154,7 +1163,7 @@ fn matrix_row_with(
             if targets.is_empty() || targets.len() > cch_max_target_nodes() {
                 TargetPotential::None
             } else {
-                TargetPotential::Cch(plan.potential(
+                TargetPotential::Cch(plan.potential_with_offsets(
                     &targets,
                     false,
                     &query.gates,

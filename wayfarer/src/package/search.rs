@@ -57,9 +57,27 @@ pub(crate) enum PlanMetric<'g> {
 impl<'g> PotentialPlan<'g> {
     /// The potential towards `targets` (`reversed`: from them), with
     /// `gates` (ignored unless the plan is gated).
+    #[cfg(any(test, feature = "experimental-regions"))]
     pub(crate) fn potential<'a>(
         &'a self,
         targets: &[u32],
+        reversed: bool,
+        gates: &[gates::DiscountGate],
+        scratch: &'a std::cell::RefCell<PotentialScratch>,
+        gated_scratch: &'a std::cell::RefCell<PotentialScratch>,
+    ) -> GatedPotential<'a> {
+        let targets = targets.iter().map(|node| (*node, 0.0)).collect::<Vec<_>>();
+        self.potential_with_offsets(&targets, reversed, gates, scratch, gated_scratch)
+    }
+
+    /// The potential towards (node, offset) `targets` (`reversed`: from
+    /// them), with `gates` (ignored unless the plan is gated): the bound
+    /// counts a target reached at its node at its offset (request costs), a
+    /// lower bound on what is left from there, such as the rest of an
+    /// endpoint candidate's edge and its approach cost.
+    pub(crate) fn potential_with_offsets<'a>(
+        &'a self,
+        targets: &[(u32, f64)],
         reversed: bool,
         gates: &[gates::DiscountGate],
         scratch: &'a std::cell::RefCell<PotentialScratch>,
@@ -1493,12 +1511,51 @@ impl<'q> Run<'_, '_, 'q> {
             .iter()
             .map(|edge| g.edge_target[*edge as usize])
             .collect::<Vec<_>>();
-        // CCH potentials where they apply, else the straight-line bound.
+        // CCH potentials where they apply, else the straight-line bound. A
+        // candidate's node counts at what it adds to a path there: the rest
+        // of its edge and its approach cost, as its seed or finish charges
+        // them. A candidate on an impassable edge is never seeded or
+        // finished, so it bounds nothing.
         let plan = Self::potentials(g, self.q);
         let cch = plan.as_ref().map(|plan| {
+            let to_destinations = destinations
+                .iter()
+                .enumerate()
+                .filter_map(|(index, d)| {
+                    let cost = f64::from(self.edge_cost(d.edge));
+                    let offset = cost * d.fraction + self.destination_approach[index];
+                    cost.is_finite().then_some((d.source, offset))
+                })
+                .collect::<Vec<_>>();
+            let from_origins = self
+                .q
+                .origins
+                .iter()
+                .zip(origins)
+                .enumerate()
+                .filter_map(|(index, (origin, edge))| {
+                    let cost = f64::from(self.edge_cost(*edge));
+                    let remaining = (1.0 - origin.fraction_along_edge).clamp(0.0, 1.0);
+                    let offset = cost * remaining + self.origin_approach[index];
+                    cost.is_finite()
+                        .then_some((g.edge_target[*edge as usize], offset))
+                })
+                .collect::<Vec<_>>();
             (
-                plan.potential(&target_nodes, false, self.q.gates, &scratch[0], &scratch[2]),
-                plan.potential(&origin_nodes, true, self.q.gates, &scratch[1], &scratch[3]),
+                plan.potential_with_offsets(
+                    &to_destinations,
+                    false,
+                    self.q.gates,
+                    &scratch[0],
+                    &scratch[2],
+                ),
+                plan.potential_with_offsets(
+                    &from_origins,
+                    true,
+                    self.q.gates,
+                    &scratch[1],
+                    &scratch[3],
+                ),
             )
         });
         let forward_h = |node: u32| {
