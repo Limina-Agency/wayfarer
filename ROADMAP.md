@@ -841,7 +841,7 @@ Sub-lanes run independently of each other.
 
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
-| FEAT-W0 | One evaluation time in local time: `departure_at_ms` drives conditionals, package `timeZone` (POSIX rule) or a request offset, per-leg departure; parser fixes (`;` in parentheses, `AND`, `24:00`). Parser fixes done in 0.3 (#28); local time waits on decision D3 | P0 | — |
+| FEAT-W0 | One evaluation time in local time: `departure_at_ms` drives conditionals, package `timeZone` (POSIX rule) or a request offset, per-leg departure; parser fixes (`;` in parentheses, `AND`, `24:00`). Parser fixes done in 0.3 (#28); local time per D3: one time zone per package plus a request offset | P0 | — |
 | FEAT-W1 | Depart-at with restrictions and overlay windows evaluated along the route | P1 | FEAT-W0, API-7a |
 | FEAT-W2 | Arrive-by | P1 | FEAT-W1 |
 | FEAT-W3 | Bulk speed layer (engine-level derived column) for traffic and historical speeds | P2 | API-6 |
@@ -993,7 +993,7 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.2 | Released 2026-11-19: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
-| 0.5 | Under way: format 3 behind an off-by-default switch (FMT 1 on `main`), FEAT-A2 core, FEAT-A10, FEAT-G0 and G4a, two-phase snapping (QW-2), parallel customization, matrix and compile speed-ups (all on `main`); then FEAT-D2 (clip), approach offsets (QW-3), the route request options, lean leg records; FEAT-P0a, P0d and W0 after decisions D2 and D3; FEAT-X1 after QW-2 and QW-3 |
+| 0.5 | Under way: format 3 behind an off-by-default switch (FMT 1 on `main`), FEAT-A2 core, FEAT-A10, FEAT-G0 and G4a, two-phase snapping (QW-2), parallel customization, matrix and compile speed-ups (all on `main`); then FEAT-D2 (clip), approach offsets (QW-3), the route request options, lean leg records; FEAT-P0a, P0d and W0 (decisions D2 and D3 taken); FEAT-X1 after QW-2 and QW-3 |
 | 0.6 – 0.9 | FEAT-X1 if not in 0.5, X2a, X1b, A1, A3, A8, A5, D3, G5a; FEAT-T1 reader behind `experimental-elevation`; API-0b (builders, `apiVersion` and `warnings`, one release tag); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; format 3 (layout changes only); FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
@@ -1075,15 +1075,14 @@ entries are collected in the release PR.
     It decides whether REG-7 to REG-9 are planned or stay in `EXP`.
 14. ~~Poland on a phone, offline.~~ Answered (format-3 decision D12): a 1.x
     goal; REG-12 shipped in 0.3 and REG-13's hooks are in format 3.
-15. **SAR on foot and `foot=no`** (decision D2, open; FEAT-P0a and the COST
-    lane wait on it). Once bicycle-only ways close to walkers
-    (FEAT-P0a), should Legged follow `foot=no` strictly? Proposal: strict,
-    with an `open` overlay when a team needs it.
-16. **Time** (decision D3, open for the time zone; FEAT-W0 waits on it).
-    One time zone per package with a request offset for multi-zone
-    extracts? Without a departure, reject windowed overlays or
-    treat them as always active? Proposal: keep the fallback but report it
-    until API-7a, then require a time.
+15. ~~SAR on foot and `foot=no`.~~ Answered (decision D2, 2026-11-23):
+    once bicycle-only ways close to walkers (FEAT-P0a), Legged ignores
+    `foot=no`; the proposal to follow it strictly was not taken.
+16. **Time.** ~~Time zones~~ answered (decision D3, 2026-11-23): one time
+    zone per package plus a per-request offset (FEAT-W0). Still open:
+    without a departure, reject windowed overlays or treat them as always
+    active? Proposal: keep the fallback but report it until API-7a, then
+    require a time.
 17. **Costed access legs' pricing.** Cost factor (proposal 2.0 walkers, 1.5
     vehicles), default radius and candidate count for FEAT-X1.
 18. ~~Format 3 shape.~~ Answered (format-3 decision D5): optional sections
