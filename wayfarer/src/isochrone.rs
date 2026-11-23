@@ -596,4 +596,90 @@ mod tests {
             assert_eq!(starts(expected), starts(actual));
         }
     }
+
+    #[test]
+    fn overlay_time_contours_do_not_count_the_approach_penalty_as_seconds() {
+        // The streets of the test above, plus a third one 1 km north that the
+        // origin never reaches. Blocking part of it sends the isochrone
+        // through the overlay search without changing what it reaches.
+        let graph = graph(vec![
+            street(1, (51.99991, 21.0), (51.99991, 21.004), (1, 2)),
+            street(2, (52.00036, 21.0), (52.00036, 21.004), (3, 4)),
+            street(3, (52.01, 21.0), (52.01, 21.004), (5, 6)),
+        ]);
+        let engine = crate::test_support::engine(&graph);
+        let snapped = |at: GeoPoint| {
+            let mut snap = SnapRequest::new(at, MobilityProfile::OnFoot);
+            snap.max_distance_m = Some(5);
+            let edges = engine
+                .snap(snap)
+                .candidates
+                .iter()
+                .map(|candidate| candidate.edge_id)
+                .collect::<Vec<_>>();
+            assert!(!edges.is_empty());
+            edges
+        };
+        let far = snapped(GeoPoint::new(52.00036, 21.002));
+        let unreached = snapped(GeoPoint::new(52.01, 21.002));
+        let overlay = crate::RouteDynamicOverlay::from_blocked_ranges(
+            &unreached
+                .iter()
+                .map(|edge_id| crate::RouteEdgeRange {
+                    edge_id: *edge_id,
+                    start_fraction: 0.4,
+                    end_fraction: 0.6,
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(!overlay.split_edge_ranges.is_empty());
+
+        let mut request = minutes(GeoPoint::new(52.0, 21.002), 1.0);
+        request.contours.push(RouteIsochroneContour {
+            contour: 1.0e6,
+            metric: RouteIsochroneMetric::Cost,
+        });
+        let plain = engine.isochrone(request.clone()).unwrap();
+        request.options.dynamic_overlay = Some(overlay);
+        let result = engine.isochrone(request).unwrap();
+        assert!(!far.contains(&result.origin.edge_id));
+
+        // The farther street's seed costs its approach, but its time starts
+        // at zero, as on the plain search.
+        let time = result
+            .buckets
+            .iter()
+            .filter(|bucket| bucket.metric == RouteIsochroneMetric::TimeSeconds)
+            .flat_map(|bucket| &bucket.boundary_fragments)
+            .filter(|fragment| far.contains(&fragment.edge_id))
+            .map(|fragment| fragment.start_metric)
+            .collect::<Vec<_>>();
+        assert!(!time.is_empty());
+        assert!(time.iter().all(|start| *start == 0.0), "{time:?}");
+
+        // The overlay reaches exactly what the plain search does.
+        assert_eq!(plain.buckets.len(), result.buckets.len());
+        for (plain, overlay) in plain.buckets.iter().zip(&result.buckets) {
+            assert_eq!(plain.edge_ids, overlay.edge_ids);
+            assert_eq!(
+                plain.boundary_fragments.len(),
+                overlay.boundary_fragments.len()
+            );
+            for (plain, overlay) in plain
+                .boundary_fragments
+                .iter()
+                .zip(&overlay.boundary_fragments)
+            {
+                assert_eq!(plain.edge_id, overlay.edge_id);
+                for (plain, overlay) in [
+                    (plain.start_fraction, overlay.start_fraction),
+                    (plain.end_fraction, overlay.end_fraction),
+                    (plain.start_metric, overlay.start_metric),
+                    (plain.end_metric, overlay.end_metric),
+                ] {
+                    assert!((plain - overlay).abs() < 1e-6, "{plain} vs {overlay}");
+                }
+            }
+        }
+    }
 }
