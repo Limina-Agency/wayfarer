@@ -48,6 +48,7 @@ enum Command {
     Verify(package::VerifyArgs),
     Route(query::RouteArgs),
     Matrix(query::MatrixArgs),
+    Nearest(query::NearestArgs),
     Isochrone(query::IsochroneArgs),
     #[command(name = "match")]
     Match(query::MatchArgs),
@@ -91,6 +92,7 @@ fn main() {
         Command::Verify(args) => package::verify(args),
         Command::Route(args) => query::route(args),
         Command::Matrix(args) => query::matrix(args),
+        Command::Nearest(args) => query::nearest(args),
         Command::Isochrone(args) => query::isochrone(args),
         Command::Match(args) => query::map_match(args),
         Command::Snap(args) => query::snap(args),
@@ -161,6 +163,62 @@ mod tests {
             .is_ok()
         );
         assert!(parse(&["isochrone", "a.mrt", "--from", "1,1", "--minutes", "5"]).is_ok());
+        assert!(
+            parse(&[
+                "isochrone",
+                "a.mrt",
+                "--from",
+                "1,1",
+                "--distance-m",
+                "500",
+                "--distance-m",
+                "1000"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "isochrone",
+                "a.mrt",
+                "--from",
+                "1,1",
+                "--minutes",
+                "5",
+                "--distance-m",
+                "500"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["isochrone", "a.mrt", "--from", "1,1"]).is_err());
+        assert!(parse(&["isochrone", "a.mrt", "--request", "-"]).is_ok());
+        assert!(
+            parse(&[
+                "nearest", "a.mrt", "--source", "1,1", "--target", "2,2", "--target", "3,3", "-k",
+                "2"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "nearest",
+                "a.mrt",
+                "--source",
+                "1,1",
+                "--target",
+                "2,2",
+                "--direction",
+                "to_source"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["nearest", "a.mrt", "--request", "nearest.json"]).is_ok());
+        assert!(parse(&["nearest", "a.mrt", "--source", "1,1"]).is_err());
+        assert!(
+            parse(&[
+                "nearest", "a.mrt", "--source", "1,1", "--target", "2,2", "-k", "0"
+            ])
+            .is_err()
+        );
         assert!(parse(&["snap", "a.mrt", "--at", "1,1"]).is_ok());
         assert!(parse(&["match", "a.mrt", "--request", "trace.json"]).is_ok());
         assert!(parse(&["match", "a.mrt"]).is_err());

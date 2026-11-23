@@ -1,4 +1,4 @@
-//! `wayfarer route | matrix | isochrone | match | snap`: requests on a
+//! `wayfarer route | matrix | nearest | isochrone | match | snap`: requests on a
 //! routing package, from flags or from the request JSON the C ABI takes
 //! (`--request`), with the result as JSON (or GeoJSON) on stdout.
 
@@ -10,9 +10,9 @@ use clap::Args;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use wayfarer::{
-    GeoPoint, GeometryFormat, MapMatchRequest, MobilityProfile, RouteIsochroneContour,
-    RouteIsochroneMetric, RouteIsochroneRequest, RouteMatrixRequest, RouteRequest, RoutingEngine,
-    SnapRequest,
+    GeoPoint, GeometryFormat, MapMatchRequest, MobilityProfile, NearestDirection, NearestRequest,
+    RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneRequest, RouteMatrixRequest,
+    RouteRequest, RoutingEngine, SnapRequest,
 };
 use wayfarer_service::geojson::route_feature_collection;
 use wayfarer_service::{
@@ -202,7 +202,56 @@ pub(crate) fn matrix(args: MatrixArgs) -> Result<(), Failure> {
     print_json(&engine.matrix(request))
 }
 
-/// What is reachable from `--from` within `--minutes` (or a request).
+/// The `k` of the `--target`s cheapest to reach from `--source` (or to reach
+/// it from), by route cost.
+#[derive(Debug, Args)]
+pub(crate) struct NearestArgs {
+    #[command(flatten)]
+    common: Common,
+    /// The source, `lat,lng`.
+    #[arg(long, value_parser = parse_point, required_unless_present = "request", allow_hyphen_values = true)]
+    source: Option<GeoPoint>,
+    /// A target, `lat,lng` (repeatable; hits name targets by their index in
+    /// this order, from 0).
+    #[arg(long = "target", value_parser = parse_point, required_unless_present = "request", allow_hyphen_values = true)]
+    targets: Vec<GeoPoint>,
+    /// How many targets to return (at most the number of targets).
+    #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    k: u32,
+    /// Which way travel is measured: from_source (the targets the source
+    /// reaches soonest) or to_source (the targets that reach it soonest).
+    #[arg(long, default_value = "from_source", value_parser = parse_direction)]
+    direction: NearestDirection,
+}
+
+/// A nearest-targets direction by its JSON name.
+fn parse_direction(text: &str) -> Result<NearestDirection, String> {
+    serde_json::from_value(Value::String(text.to_string()))
+        .map_err(|_| format!("unknown direction `{text}` (from_source, to_source)"))
+}
+
+pub(crate) fn nearest(args: NearestArgs) -> Result<(), Failure> {
+    let engine = args.common.engine()?;
+    let request = match args.common.request::<NearestRequest>()? {
+        Some(request) => request,
+        None => NearestRequest {
+            direction: args.direction,
+            ..NearestRequest::new(
+                args.source.expect("required without --request"),
+                args.targets,
+                args.k as usize,
+                args.common.profile,
+            )
+        },
+    };
+    let result = engine
+        .nearest(request)
+        .map_err(|error| Failure::new(error.to_string()))?;
+    print_json(&result)
+}
+
+/// What is reachable from `--from` within `--minutes` or `--distance-m` (or a
+/// request).
 #[derive(Debug, Args)]
 pub(crate) struct IsochroneArgs {
     #[command(flatten)]
@@ -211,8 +260,28 @@ pub(crate) struct IsochroneArgs {
     #[arg(long, value_parser = parse_point, required_unless_present = "request", allow_hyphen_values = true)]
     from: Option<GeoPoint>,
     /// A travel-time contour in minutes (repeatable).
-    #[arg(long, required_unless_present = "request")]
+    #[arg(long, required_unless_present_any = ["request", "distance_m"])]
     minutes: Vec<f64>,
+    /// A distance contour in metres along the cheapest path (repeatable; may
+    /// be combined with `--minutes`).
+    #[arg(long, value_name = "METRES")]
+    distance_m: Vec<f64>,
+}
+
+impl IsochroneArgs {
+    /// The contours the flags ask for: time first, then distance, each in the
+    /// order given.
+    fn contours(&self) -> Vec<RouteIsochroneContour> {
+        let time = self.minutes.iter().map(|minutes| RouteIsochroneContour {
+            contour: minutes * 60.0,
+            metric: RouteIsochroneMetric::TimeSeconds,
+        });
+        let distance = self.distance_m.iter().map(|&metres| RouteIsochroneContour {
+            contour: metres,
+            metric: RouteIsochroneMetric::DistanceM,
+        });
+        time.chain(distance).collect()
+    }
 }
 
 pub(crate) fn isochrone(args: IsochroneArgs) -> Result<(), Failure> {
@@ -222,13 +291,7 @@ pub(crate) fn isochrone(args: IsochroneArgs) -> Result<(), Failure> {
         None => RouteIsochroneRequest::new(
             args.from.expect("required without --request"),
             args.common.profile,
-            args.minutes
-                .iter()
-                .map(|minutes| RouteIsochroneContour {
-                    contour: minutes * 60.0,
-                    metric: RouteIsochroneMetric::TimeSeconds,
-                })
-                .collect(),
+            args.contours(),
         ),
     };
     let result = engine
@@ -306,5 +369,46 @@ mod tests {
         assert!(parse_point("50.06").is_err());
         assert_eq!(parse_profile("on_foot").unwrap(), MobilityProfile::OnFoot);
         assert!(parse_profile("car").is_err());
+        assert_eq!(
+            parse_direction("to_source").unwrap(),
+            NearestDirection::ToSource
+        );
+        assert!(parse_direction("towards").is_err());
+    }
+
+    #[test]
+    fn isochrone_flags_give_time_then_distance_contours() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: IsochroneArgs,
+        }
+        let Wrapper { args } = Wrapper::try_parse_from([
+            "isochrone",
+            "a.mrt",
+            "--from",
+            "1,1",
+            "--distance-m",
+            "800",
+            "--minutes",
+            "5",
+            "--distance-m",
+            "400",
+        ])
+        .unwrap();
+        let contours: Vec<_> = args
+            .contours()
+            .into_iter()
+            .map(|contour| (contour.metric, contour.contour))
+            .collect();
+        assert_eq!(
+            contours,
+            [
+                (RouteIsochroneMetric::TimeSeconds, 300.0),
+                (RouteIsochroneMetric::DistanceM, 800.0),
+                (RouteIsochroneMetric::DistanceM, 400.0),
+            ]
+        );
     }
 }

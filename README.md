@@ -93,7 +93,7 @@ overlap 0.97.
 | `wayfarer-service` | Routing sources, readiness checks and route workflows (waypoints, direct legs) over the engine |
 | `wayfarer-ffi` | The C ABI (`include/wayfarer.h`): JSON requests and results |
 | `wayfarer-compiler` | The compiler library: `compile` a `CompileRequest`, with progress and cancellation, or poll a `CompileJob` |
-| `wayfarer-cli` | The `wayfarer` command line: `compile`, `info`, `verify`, `route`, `matrix`, `isochrone`, `match`, `snap` |
+| `wayfarer-cli` | The `wayfarer` command line: `compile`, `info`, `verify`, `route`, `matrix`, `nearest`, `isochrone`, `match`, `snap` |
 | `wayfarer-road-graph`, `wayfarer-line-network` | The compiler's road graph and line network |
 
 The compiler reads PBF through [`osm-pbf-ingest`](https://github.com/Limina-Agency/osm-pbf-ingest),
@@ -194,9 +194,9 @@ scripts/check.sh
 
 runs what CI runs: formatting, clippy (warnings are errors), tests, the Monaco
 package built, verified and described with the release CLI (checked against
-`fixtures/monaco-info.json`), a route, matrix and isochrone through the CLI, a
-route and cancelled routes through the C ABI (`wayfarer-ffi/examples/route.c`
-and `cancel.c`), and the Kraków centre regression gate. CI runs it on Linux
+`fixtures/monaco-info.json`), a route, matrix, nearest and isochrone through
+the CLI, a route and cancelled routes through the C ABI
+(`wayfarer-ffi/examples/route.c` and `cancel.c`), and the Kraków centre regression gate. CI runs it on Linux
 and macOS (Apple silicon), runs the tests and the Monaco package check on
 Windows and a 32-bit Linux target, and builds the crates with the oldest Rust
 they claim (`rust-version`).
