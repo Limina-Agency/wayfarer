@@ -205,6 +205,14 @@
           "type": "number",
           "format": "double"
         },
+        "durationS": {
+          "description": "With `attributes`: the sum of `edges`' durations and junction delays\n(s).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "edgeIds": {
           "description": "Traversed directed edges in order, from the first matched sample's\nedge to the last's; consecutive edges connect.",
           "type": "array",
@@ -212,6 +220,13 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0
+          }
+        },
+        "edges": {
+          "description": "With `attributes`: each of `edge_ids`' road attributes, the first and\nlast clipped to the matched positions, costed with the profile's\ndefault options (durations are expected ones, not the trace's).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteEdgeAttribution"
           }
         },
         "firstSampleIndex": {
@@ -258,6 +273,15 @@
           "type": "number",
           "format": "double"
         },
+        "edgeIndex": {
+          "description": "With `attributes`: the index of the sample's edge in its sub-path's\n`edges` (and `edge_ids`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
         "fractionAlongEdge": {
           "type": "number",
           "format": "double",
@@ -276,6 +300,14 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "observedSpeedMps": {
+          "description": "With `attributes`: the speed the trace moved at from the sub-path's\nprevious matched sample, along the path, over the time between their\ntimestamps (m/s); none for a sub-path's first sample or without both\ntimestamps.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "rawPosition": {
           "$ref": "#/$defs/GeoPoint"
@@ -363,6 +395,585 @@
         "reason",
         "maxCorrelationDistanceMeters",
         "candidateLimit"
+      ]
+    },
+    "RoadType": {
+      "type": "string",
+      "enum": [
+        "motorway",
+        "primary",
+        "secondary",
+        "tertiary",
+        "residential",
+        "track",
+        "path",
+        "other"
+      ]
+    },
+    "RouteCostBreakdown": {
+      "type": "object",
+      "properties": {
+        "accessRestrictionPenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "avoidedEdgePenalty": {
+          "type": "number",
+          "format": "double"
+        },
+        "baseDistanceCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "bridgeTunnelFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "destinationOnlyPenalty": {
+          "type": "number",
+          "format": "double"
+        },
+        "ferryPenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "fordFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "gatePenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "overlayMultiplier": {
+          "type": "number",
+          "format": "double"
+        },
+        "profileTimeFactor": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "roadTypeFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "routeRefFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "sarFactor": {
+          "description": "The SAR relaxation's factor on an edge the profile may not legally\nuse (1 elsewhere).",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "smoothnessFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "speedTimeS": {
+          "type": "number",
+          "format": "double"
+        },
+        "surfaceFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "tollPenalty": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "totalCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "tracktypeFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "turnPenalty": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "baseDistanceCost",
+        "speedTimeS",
+        "profileTimeFactor",
+        "roadTypeFactor",
+        "surfaceFactor",
+        "tracktypeFactor",
+        "smoothnessFactor",
+        "fordFactor",
+        "bridgeTunnelFactor",
+        "tollPenalty",
+        "ferryPenalty",
+        "gatePenalty",
+        "accessRestrictionPenalty",
+        "destinationOnlyPenalty",
+        "avoidedEdgePenalty",
+        "overlayMultiplier",
+        "routeRefFactor",
+        "sarFactor",
+        "turnPenalty",
+        "totalCost"
+      ]
+    },
+    "RouteEdgeAttribution": {
+      "type": "object",
+      "properties": {
+        "adminCountryId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "adminRegionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "conditionalRestrictions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "constrainedSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "costBreakdown": {
+          "$ref": "#/$defs/RouteCostBreakdown",
+          "default": {
+            "accessRestrictionPenalty": 1.0,
+            "avoidedEdgePenalty": 1.0,
+            "baseDistanceCost": 0.0,
+            "bridgeTunnelFactor": 1.0,
+            "destinationOnlyPenalty": 1.0,
+            "ferryPenalty": 1.0,
+            "fordFactor": 1.0,
+            "gatePenalty": 1.0,
+            "overlayMultiplier": 1.0,
+            "profileTimeFactor": 1.0,
+            "roadTypeFactor": 1.0,
+            "routeRefFactor": 1.0,
+            "sarFactor": 1.0,
+            "smoothnessFactor": 1.0,
+            "speedTimeS": 0.0,
+            "surfaceFactor": 1.0,
+            "tollPenalty": 1.0,
+            "totalCost": 0.0,
+            "tracktypeFactor": 1.0,
+            "turnPenalty": 0.0
+          }
+        },
+        "destination": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "destinationRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "destinationStreet": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "description": "Time on this edge's traversed stretch.",
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "freeFlowSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "hasFord": {
+          "type": "boolean"
+        },
+        "hasGate": {
+          "type": "boolean",
+          "default": false
+        },
+        "hasWarningOverlay": {
+          "type": "boolean"
+        },
+        "inferredSpeedKph": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "isAccessRestricted": {
+          "type": "boolean",
+          "default": false
+        },
+        "isBridge": {
+          "type": "boolean"
+        },
+        "isDestinationOnly": {
+          "type": "boolean",
+          "default": false
+        },
+        "isFerry": {
+          "type": "boolean",
+          "default": false
+        },
+        "isLink": {
+          "type": "boolean",
+          "default": false
+        },
+        "isRoundabout": {
+          "type": "boolean"
+        },
+        "isToll": {
+          "type": "boolean",
+          "default": false
+        },
+        "isTunnel": {
+          "type": "boolean"
+        },
+        "junctionBranchAnglesDeg": {
+          "description": "Signed angles (degrees, negative to the left) from the approach to each\nother edge the profile may take at the junction this edge starts at\n(U-turns excluded); empty on a leg's first edge.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768
+          }
+        },
+        "junctionDelayS": {
+          "description": "Time lost at the junction this edge starts at, entering it from the\nleg's previous edge (turning, yielding, signals); 0 on a leg's first\nedge. A leg's duration is its edges' `duration_s` plus their\n`junction_delay_s`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "junctionIncomingEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "junctionJoiningAnglesDeg": {
+          "description": "Signed angles (degrees) from the arrival of each other edge the profile\nmay use into that junction to this edge's departure.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768
+          }
+        },
+        "junctionOutgoingEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "junctionRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "laneConnectivityAvailable": {
+          "type": "boolean",
+          "default": false
+        },
+        "laneCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "default": null,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "lanes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "layer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "maxspeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opposingEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "refName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roadType": {
+          "$ref": "#/$defs/RoadType"
+        },
+        "roundaboutExitCount": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 0,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "routeRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sharedEdgeInfoId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "smoothness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "speedSource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteSpeedSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speedSourceProvenance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "surface": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timezoneId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "tracktype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "traversalDirection": {
+          "$ref": "#/$defs/TraversalDirection"
+        },
+        "turnLanes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "turnLanesBackward": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "turnLanesForward": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "warningRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        }
+      },
+      "required": [
+        "edgeId",
+        "sharedEdgeInfoId",
+        "roadType",
+        "name",
+        "refName",
+        "routeRefs",
+        "surface",
+        "tracktype",
+        "smoothness",
+        "maxspeedKph",
+        "inferredSpeedKph",
+        "laneCount",
+        "lanes",
+        "turnLanes",
+        "turnLanesForward",
+        "turnLanesBackward",
+        "laneConnectivityAvailable",
+        "speedSourceProvenance",
+        "freeFlowSpeedKph",
+        "constrainedSpeedKph",
+        "adminCountryId",
+        "adminRegionId",
+        "timezoneId",
+        "conditionalRestrictions",
+        "opposingEdgeId",
+        "layer",
+        "level",
+        "destination",
+        "destinationRef",
+        "destinationStreet",
+        "junctionRef",
+        "isBridge",
+        "isTunnel",
+        "hasFord",
+        "isToll",
+        "isFerry",
+        "hasGate",
+        "isAccessRestricted",
+        "isDestinationOnly",
+        "isLink",
+        "isRoundabout",
+        "roundaboutExitCount",
+        "hasWarningOverlay",
+        "warningRanges",
+        "junctionOutgoingEdgeCount",
+        "junctionIncomingEdgeCount",
+        "distanceM",
+        "durationS",
+        "junctionDelayS",
+        "traversalDirection",
+        "costBreakdown"
+      ]
+    },
+    "RouteEdgeRange": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction"
+      ]
+    },
+    "RouteSpeedSource": {
+      "type": "string",
+      "enum": [
+        "posted",
+        "inferred",
+        "free_flow",
+        "constrained",
+        "conditional",
+        "fixed",
+        "default"
+      ]
+    },
+    "TraversalDirection": {
+      "type": "string",
+      "enum": [
+        "forward",
+        "backward"
       ]
     }
   }

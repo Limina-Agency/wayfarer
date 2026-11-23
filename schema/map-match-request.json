@@ -8,6 +8,7 @@
       "$ref": "#/$defs/MapMatchOptions",
       "default": {
         "alternativeCount": 2,
+        "attributes": false,
         "backtrackPenalty": 8.0,
         "betaM": 10.0,
         "breakageDistanceM": 2000.0,
@@ -68,6 +69,11 @@
           "format": "uint",
           "default": 2,
           "minimum": 0
+        },
+        "attributes": {
+          "description": "Whether each sub-path lists the road attributes of its edges\n(`MapMatchSubPath::edges`, as a route leg's) with its expected\nduration, and each matched sample its edge there and the speed the\ntrace moved at to reach it.",
+          "type": "boolean",
+          "default": false
         },
         "backtrackPenalty": {
           "description": "Cost (negative log-likelihood) of a U-turn onto the opposing edge, at a\nnode or mid-edge. Formerly the penalty for moving backwards along one\nedge id.",

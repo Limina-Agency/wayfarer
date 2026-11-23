@@ -4679,6 +4679,69 @@ fn point_along(points: &[GeoPoint], distance_m: f64) -> GeoPoint {
 }
 
 #[test]
+fn map_matching_attributes_match_the_route_legs_edges() {
+    // A clean 1 Hz trace along a grid route: the match's edge attributes are
+    // the route leg's, the first and last clipped to the matched positions.
+    let graph = grid_graph();
+    let engine = crate::test_support::engine(&graph);
+    let points = grid_points();
+    let route = route(
+        &engine,
+        points[0],
+        points[1],
+        MobilityProfile::Wheeled,
+        |_| {},
+    )
+    .unwrap();
+    let geometry_m = route
+        .geometry
+        .windows(2)
+        .map(|segment| segment[0].distance_to(segment[1]))
+        .sum::<f64>();
+    // Every 8 m, and at the destination.
+    let steps = (geometry_m / 8.0).ceil() as i32;
+    let samples = (0..=steps)
+        .map(|at| (f64::from(at) * 8.0).min(geometry_m))
+        .enumerate()
+        .map(|(at, along)| crate::NavigationPositionSample {
+            position: point_along(&route.geometry, along),
+            heading_degrees: None,
+            speed_meters_per_second: None,
+            sampled_at_ms: Some(at as i64 * 1000),
+            accuracy_meters: None,
+            provider: None,
+        })
+        .collect::<Vec<_>>();
+
+    let result = crate::map_matching::match_navigation_trace(
+        engine.route_graph_view(),
+        &samples,
+        MobilityProfile::Wheeled,
+        crate::MapMatchOptions {
+            attributes: true,
+            ..crate::MapMatchOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.matched_edge_ids, route.edge_ids);
+    let matched = &result.sub_paths[0].edges;
+    let routed = &route.legs[0].edges;
+    assert_eq!(matched.len(), routed.len());
+    let last = routed.len() - 1;
+    assert_eq!(matched[1..last], routed[1..last]);
+    for at in [0, last] {
+        assert_eq!(matched[at].edge_id, routed[at].edge_id);
+        assert!((matched[at].distance_m - routed[at].distance_m).abs() < 1.0);
+    }
+    let last_sample = result.samples.len() - 1;
+    for sample in &result.samples[1..last_sample] {
+        let speed = sample.observed_speed_mps.unwrap();
+        assert!((speed - 8.0).abs() < 0.5, "observed {speed} m/s");
+    }
+}
+
+#[test]
 fn map_matching_recovers_a_noisy_route_on_the_grid() {
     const SEEDS: u64 = 20;
     let graph = grid_graph();

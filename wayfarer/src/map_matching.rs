@@ -54,7 +54,9 @@ use crate::graph_view::PackageGraphView;
 use crate::navigation::NavigationPositionSample;
 use crate::package::restrictions::{ComplexAutomata, ROOT};
 use crate::package::{EDGE_FLAG_SHAPE_REVERSED, NO_HEADING, SearchGraph, profile_bit};
-use crate::types::{CorrelationScoreBreakdown, GeoPoint, MobilityProfile};
+use crate::types::{
+    CorrelationScoreBreakdown, GeoPoint, MobilityProfile, RouteEdgeAttribution, RouteOptions,
+};
 
 const CANCELLED: &str = "map matching was cancelled";
 
@@ -142,6 +144,11 @@ pub struct MapMatchOptions {
     /// Route distance between timestamped samples is at most this speed
     /// times their time apart, plus twice their sigmas (m/s).
     pub max_speed_mps: f64,
+    /// Whether each sub-path lists the road attributes of its edges
+    /// (`MapMatchSubPath::edges`, as a route leg's) with its expected
+    /// duration, and each matched sample its edge there and the speed the
+    /// trace moved at to reach it.
+    pub attributes: bool,
 }
 
 impl Default for MapMatchOptions {
@@ -163,6 +170,7 @@ impl Default for MapMatchOptions {
             max_consecutive_outliers: DEFAULT_MAX_CONSECUTIVE_OUTLIERS,
             outlier_cost: DEFAULT_OUTLIER_COST,
             max_speed_mps: DEFAULT_MAX_SPEED_MPS,
+            attributes: false,
         }
     }
 }
@@ -193,6 +201,16 @@ pub struct MatchedTraceSample {
     pub sub_path_index: usize,
     #[serde(default)]
     pub fraction_along_edge: f64,
+    /// With `attributes`: the index of the sample's edge in its sub-path's
+    /// `edges` (and `edge_ids`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_index: Option<usize>,
+    /// With `attributes`: the speed the trace moved at from the sub-path's
+    /// previous matched sample, along the path, over the time between their
+    /// timestamps (m/s); none for a sub-path's first sample or without both
+    /// timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_speed_mps: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +244,15 @@ pub struct MapMatchSubPath {
     /// `distance_jump` or `no_transition` (none for the first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub break_reason: Option<String>,
+    /// With `attributes`: each of `edge_ids`' road attributes, the first and
+    /// last clipped to the matched positions, costed with the profile's
+    /// default options (durations are expected ones, not the trace's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<RouteEdgeAttribution>,
+    /// With `attributes`: the sum of `edges`' durations and junction delays
+    /// (s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -527,7 +554,22 @@ pub fn match_navigation_trace_cancellable(
         return Err("trace produced no matchable samples".to_string());
     };
     let terminal = terminal as usize;
-    let best = trace.assemble(terminal, true);
+    let mut best = trace.assemble(terminal, true, options.attributes);
+    if options.attributes {
+        let costing = RouteOptions::default();
+        for (sub_path, pieces) in best.sub_paths.iter_mut().zip(&best.pieces) {
+            sub_path.edges =
+                crate::route_leg::path_edge_attributions(access, profile, &costing, pieces)
+                    .map_err(|error| error.to_string())?;
+            sub_path.duration_s = Some(
+                sub_path
+                    .edges
+                    .iter()
+                    .map(|edge| edge.duration_s + edge.junction_delay_s)
+                    .sum(),
+            );
+        }
+    }
 
     let mut on_path = vec![false; steps.len()];
     for sample in &best.samples {
@@ -571,7 +613,7 @@ pub fn match_navigation_trace_cancellable(
         if alternatives.len() >= limit {
             break;
         }
-        let alternative = trace.assemble(ending, false);
+        let alternative = trace.assemble(ending, false, false);
         let same_samples = alternative.samples.len() == best.samples.len()
             && alternative
                 .samples
@@ -1146,12 +1188,17 @@ struct Trace<'a, 'g> {
 struct Assembled {
     samples: Vec<MatchedTraceSample>,
     sub_paths: Vec<MapMatchSubPath>,
+    /// Each sub-path's traversed pieces `(edge, from, to)`, parallel to its
+    /// `edge_ids`.
+    pieces: Vec<Vec<(u32, f64, f64)>>,
     edge_ids: Vec<u64>,
 }
 
 impl Trace<'_, '_> {
-    /// The match ending at candidate `terminal`: its samples and sub-paths.
-    fn assemble(&self, terminal: usize, with_geometry: bool) -> Assembled {
+    /// The match ending at candidate `terminal`: its samples and sub-paths,
+    /// with each sample's edge index and observed speed when
+    /// `with_attributes`.
+    fn assemble(&self, terminal: usize, with_geometry: bool, with_attributes: bool) -> Assembled {
         let mut path = Vec::new();
         let mut current = terminal as u32;
         while current != NO_STATE {
@@ -1162,6 +1209,7 @@ impl Trace<'_, '_> {
 
         let mut samples = Vec::with_capacity(path.len());
         let mut sub_paths = Vec::new();
+        let mut pieces = Vec::new();
         let mut builder: Option<SubPathBuilder<'_>> = None;
         for index in path {
             let state = &self.states[index];
@@ -1175,7 +1223,11 @@ impl Trace<'_, '_> {
                     step.sample_index,
                 ),
                 (link, _) => {
-                    sub_paths.extend(builder.take().map(SubPathBuilder::finish));
+                    if let Some(done) = builder.take() {
+                        let (sub_path, spans) = done.finish();
+                        sub_paths.push(sub_path);
+                        pieces.push(spans);
+                    }
                     let reason = match link {
                         Link::Break(reason) => Some(reason),
                         _ => None,
@@ -1189,9 +1241,18 @@ impl Trace<'_, '_> {
                     ));
                 }
             }
-            samples.push(self.matched_sample(candidate, step, sub_paths.len()));
+            let mut sample = self.matched_sample(candidate, step, sub_paths.len());
+            if with_attributes && let Some(builder) = builder.as_mut() {
+                sample.edge_index = builder.edges.len().checked_sub(1);
+                sample.observed_speed_mps = builder.observed_speed_mps(step.sampled_at_ms);
+            }
+            samples.push(sample);
         }
-        sub_paths.extend(builder.map(SubPathBuilder::finish));
+        if let Some(done) = builder {
+            let (sub_path, spans) = done.finish();
+            sub_paths.push(sub_path);
+            pieces.push(spans);
+        }
         let edge_ids = compact_edge_sequence(
             sub_paths
                 .iter()
@@ -1200,6 +1261,7 @@ impl Trace<'_, '_> {
         Assembled {
             samples,
             sub_paths,
+            pieces,
             edge_ids,
         }
     }
@@ -1231,6 +1293,8 @@ impl Trace<'_, '_> {
             },
             sub_path_index,
             fraction_along_edge: candidate.fraction,
+            edge_index: None,
+            observed_speed_mps: None,
         }
     }
 }
@@ -1240,9 +1304,13 @@ struct SubPathBuilder<'g> {
     g: SearchGraph<'g>,
     with_geometry: bool,
     edges: Vec<u32>,
+    /// The traversed fractions of each of `edges`.
+    spans: Vec<(f64, f64)>,
     /// The furthest fraction reached on the last edge (jitter backwards
     /// along it does not move the path).
     cursor: f64,
+    /// The path distance and timestamp of the last matched sample.
+    last_fix: (f64, Option<i64>),
     geometry: Vec<GeoPoint>,
     distance_m: f64,
     shape: Vec<GeoPoint>,
@@ -1264,7 +1332,9 @@ impl<'g> SubPathBuilder<'g> {
             g,
             with_geometry,
             edges: vec![candidate.edge],
+            spans: vec![(candidate.fraction, candidate.fraction)],
             cursor: candidate.fraction,
+            last_fix: (0.0, None),
             geometry: if with_geometry {
                 vec![candidate.point]
             } else {
@@ -1301,6 +1371,7 @@ impl<'g> SubPathBuilder<'g> {
             from.max(self.cursor)
         } else {
             self.edges.push(edge);
+            self.spans.push((from, from));
             self.cursor = from;
             from
         };
@@ -1309,14 +1380,41 @@ impl<'g> SubPathBuilder<'g> {
         }
         self.distance_m += (to - from) * f64::from(self.g.edge_length[edge as usize]);
         self.cursor = to;
+        if let Some(span) = self.spans.last_mut() {
+            span.1 = to;
+        }
         if self.with_geometry {
             self.g.edge_shape(edge, &mut self.shape);
             append_clipped(&self.shape, from, to, &mut self.geometry);
         }
     }
 
-    fn finish(self) -> MapMatchSubPath {
-        MapMatchSubPath {
+    /// The speed along the path from the last matched sample to one at
+    /// `sampled_at_ms`, the path's end (m/s), which then becomes the last.
+    /// None for the sub-path's first sample.
+    fn observed_speed_mps(&mut self, sampled_at_ms: Option<i64>) -> Option<f64> {
+        let (from_m, from_ms) =
+            std::mem::replace(&mut self.last_fix, (self.distance_m, sampled_at_ms));
+        if self.matched_sample_count < 2 {
+            return None;
+        }
+        match (from_ms, sampled_at_ms) {
+            (Some(from), Some(to)) if to > from => {
+                Some((self.distance_m - from_m) / ((to - from) as f64 / 1000.0))
+            }
+            _ => None,
+        }
+    }
+
+    /// The sub-path, and its traversed pieces `(edge, from, to)`.
+    fn finish(self) -> (MapMatchSubPath, Vec<(u32, f64, f64)>) {
+        let pieces = self
+            .edges
+            .iter()
+            .zip(&self.spans)
+            .map(|(edge, (from, to))| (*edge, *from, *to))
+            .collect();
+        let sub_path = MapMatchSubPath {
             first_sample_index: self.first_sample_index,
             last_sample_index: self.last_sample_index,
             matched_sample_count: self.matched_sample_count,
@@ -1328,7 +1426,10 @@ impl<'g> SubPathBuilder<'g> {
             geometry: self.geometry,
             distance_meters: self.distance_m,
             break_reason: self.break_reason.map(str::to_string),
-        }
+            edges: Vec::new(),
+            duration_s: None,
+        };
+        (sub_path, pieces)
     }
 }
 
@@ -2110,5 +2211,157 @@ mod tests {
         assert_eq!(result.matched_sample_count, 28);
         assert_eq!(result.sub_paths.len(), 1);
         assert_eq!(result.matched_edge_ids, edges_along(&graph, 50.0, true));
+    }
+
+    /// Matches `samples` with and without `attributes`, checks that the
+    /// attributes leave the match itself unchanged and describe its edges,
+    /// and returns the match with them.
+    fn match_with_attributes(
+        engine: &RoutingEngine,
+        samples: &[NavigationPositionSample],
+    ) -> MapMatchResult {
+        let plain = match_trace(engine, samples);
+        let result = match_navigation_trace(
+            engine.route_graph_view(),
+            samples,
+            MobilityProfile::Wheeled,
+            MapMatchOptions {
+                attributes: true,
+                ..MapMatchOptions::default()
+            },
+        )
+        .expect("trace match");
+
+        let mut stripped = result.clone();
+        for sample in &mut stripped.samples {
+            sample.edge_index = None;
+            sample.observed_speed_mps = None;
+        }
+        for sub_path in &mut stripped.sub_paths {
+            sub_path.edges.clear();
+            sub_path.duration_s = None;
+        }
+        assert_eq!(stripped, plain, "attributes must not change the match");
+
+        for sub_path in &result.sub_paths {
+            assert_eq!(
+                sub_path
+                    .edges
+                    .iter()
+                    .map(|edge| edge.edge_id)
+                    .collect::<Vec<_>>(),
+                sub_path.edge_ids
+            );
+            let distance_m = sub_path
+                .edges
+                .iter()
+                .map(|edge| edge.distance_m)
+                .sum::<f64>();
+            assert!(
+                (distance_m - sub_path.distance_meters).abs() < 0.5,
+                "edges cover {distance_m} m of {} m",
+                sub_path.distance_meters
+            );
+            let duration_s = sub_path
+                .edges
+                .iter()
+                .map(|edge| edge.duration_s + edge.junction_delay_s)
+                .sum::<f64>();
+            assert_eq!(sub_path.duration_s, Some(duration_s));
+            assert!(duration_s > 0.0);
+        }
+        for sample in &result.samples {
+            let sub_path = &result.sub_paths[sample.sub_path_index];
+            let edge_index = sample.edge_index.expect("edge index");
+            assert_eq!(sub_path.edge_ids[edge_index], sample.matched_edge_id);
+            assert_eq!(
+                sample.observed_speed_mps.is_none(),
+                sample.sample_index == sub_path.first_sample_index
+            );
+        }
+        result
+    }
+
+    #[test]
+    fn trace_match_reports_attributes_of_the_matched_edges() {
+        // Four segments east, one fix a second at 8.0 m/s.
+        let ways = (0..4)
+            .map(|at| {
+                let lng = 20.0 + 0.001 * f64::from(at);
+                road(i64::from(at) + 1, vec![(50.0, lng), (50.0, lng + 0.001)])
+            })
+            .collect::<Vec<_>>();
+        let graph = graph_of(ways);
+        let engine = crate::test_support::engine(&graph);
+        let samples = (0..30)
+            .map(|at| fix(50.0, 20.0003 + STEP_LNG * f64::from(at), i64::from(at)))
+            .collect::<Vec<_>>();
+
+        let result = match_with_attributes(&engine, &samples);
+
+        let sub_path = &result.sub_paths[0];
+        assert_eq!(sub_path.edge_ids, edges_along(&graph, 50.0, true));
+        assert!(
+            sub_path
+                .edges
+                .iter()
+                .all(|edge| edge.name.as_deref() == Some("Road"))
+        );
+        // The first and last edges are clipped to the matched positions.
+        let full_m = engine
+            .route_graph_view()
+            .edge_by_id(sub_path.edge_ids[0])
+            .expect("edge")
+            .edge
+            .distance_m;
+        let first = &sub_path.edges[0];
+        assert!((first.distance_m - 0.7 * f64::from(full_m)).abs() < 1.0);
+        assert!(sub_path.edges.last().unwrap().distance_m < f64::from(full_m));
+        // The path enters every edge after the first through a junction.
+        assert_eq!(sub_path.edges[0].junction_outgoing_edge_count, 0);
+        assert!(
+            sub_path.edges[1..]
+                .iter()
+                .all(|edge| edge.junction_outgoing_edge_count > 0)
+        );
+        for sample in &result.samples[1..] {
+            let speed = sample.observed_speed_mps.expect("speed");
+            assert!((speed - 8.0).abs() < 0.1, "observed {speed} m/s");
+        }
+    }
+
+    #[test]
+    fn trace_match_attributes_follow_a_mid_edge_u_turn() {
+        let graph = graph_of(vec![
+            road(1, vec![(50.0, 20.0), (50.0, 20.002)]),
+            road(2, vec![(50.0, 20.002), (50.0, 20.004)]),
+        ]);
+        let engine = crate::test_support::engine(&graph);
+        let step = 0.00007;
+        let mut lngs = (0..30)
+            .map(|at| 20.0005 + step * at as f64)
+            .collect::<Vec<_>>();
+        let turn = *lngs.last().unwrap();
+        lngs.extend((1..=25).map(|at| turn - step * at as f64));
+        let samples = lngs
+            .iter()
+            .enumerate()
+            .map(|(at, lng)| fix(50.0, *lng, at as i64))
+            .collect::<Vec<_>>();
+
+        let result = match_with_attributes(&engine, &samples);
+
+        let edges = &result.sub_paths[0].edges;
+        assert_eq!(edges.len(), 4);
+        // The westbound edge entered mid-edge has no junction before it.
+        assert_eq!(edges[2].cost_breakdown.turn_penalty, 0.0);
+        assert_eq!(edges[2].junction_delay_s, 0.0);
+        assert_eq!(
+            (
+                edges[2].junction_outgoing_edge_count,
+                edges[2].junction_incoming_edge_count
+            ),
+            (0, 0)
+        );
     }
 }
