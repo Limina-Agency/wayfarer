@@ -718,6 +718,17 @@ impl<'a> ReferenceEngine<'a> {
         &self,
         request: RouteIsochroneRequest,
     ) -> Result<RouteIsochroneResult, RouteError> {
+        let mut result = self.isochrone_buckets(&request)?;
+        // The engine's polygon builder over the oracle's buckets.
+        crate::isochrone::polygon::draw(self.view.routing_package().view(), &request, &mut result);
+        Ok(result)
+    }
+
+    /// The oracle's isochrone without polygons.
+    fn isochrone_buckets(
+        &self,
+        request: &RouteIsochroneRequest,
+    ) -> Result<RouteIsochroneResult, RouteError> {
         self.ready(request.profile)?;
         if let Some(overlay) = &request.options.dynamic_overlay {
             assert!(
@@ -731,7 +742,7 @@ impl<'a> ReferenceEngine<'a> {
         }
         let policy = CorrelationPolicy::from(&request.options);
         let correlator = Correlator::new(&self.view);
-        let origins = crate::isochrone::origin_candidates(&request, |point| {
+        let origins = crate::isochrone::origin_candidates(request, |point| {
             correlator
                 .search_expanding(point, request.profile, &policy, &Default::default())
                 .candidates
@@ -744,13 +755,13 @@ impl<'a> ReferenceEngine<'a> {
                 allow_destination_only,
                 origins.candidates.iter().map(|location| location.edge_id),
             );
-            isochrone(&records, &request, &origins, context)
+            isochrone(&records, request, &origins, context)
         };
         if !strict_destination_only(&request.options, request.profile) {
             return Ok(pass(true));
         }
         if origins.snapped.len() > 1 {
-            return Ok(self.multi_origin_isochrone(&request, &origins, context));
+            return Ok(self.multi_origin_isochrone(request, &origins, context));
         }
         let strict = pass(false);
         if !crate::isochrone::trapped(&strict) {
@@ -3085,6 +3096,7 @@ fn isochrone_result(
                 edge_ids,
                 edge_origins,
                 boundary_fragments: boundary_fragments_for_contour(&fragments, contour),
+                polygon: None,
             }
         })
         .collect();
@@ -3095,6 +3107,7 @@ fn isochrone_result(
         visited_edge_count: visited,
         settled_node_count: settled,
         truncated,
+        polygons: None,
     }
 }
 

@@ -34,6 +34,9 @@ pub const MAX_ISOCHRONE_CONTOURS: usize = 16;
 /// The most origins one isochrone request may carry (`origin` and
 /// `origins` together).
 pub const MAX_ISOCHRONE_ORIGINS: usize = 64;
+/// The most grid nodes an isochrone's polygons are drawn on (about 32 MB
+/// of field); a larger grid takes larger cells.
+pub const MAX_ISOCHRONE_POLYGON_GRID_NODES: usize = 4_000_000;
 /// The most targets one nearest-targets request may carry.
 pub const MAX_NEAREST_TARGETS: usize = 10_000;
 

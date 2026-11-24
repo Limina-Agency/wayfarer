@@ -20,6 +20,8 @@ use crate::types::{
     RouteIsochroneRequest, RouteIsochroneResult,
 };
 
+pub(crate) mod polygon;
+
 impl RoutingEngine {
     pub fn isochrone(
         &self,
@@ -48,6 +50,12 @@ impl RoutingEngine {
         )?;
         request.options.cancellation.check()?;
         let mut result = self.isochrone_from(&request)?;
+        // Polygons are drawn from the buckets' edges, before they are left out.
+        polygon::draw(
+            self.route_graph_view().routing_package().view(),
+            &request,
+            &mut result,
+        );
         for bucket in &mut result.buckets {
             if !request.include_edge_ids {
                 bucket.edge_ids = Vec::new();
@@ -418,7 +426,8 @@ fn metric_index(metric: RouteIsochroneMetric) -> usize {
 /// The request against [`crate::limits`]: one to [`MAX_ISOCHRONE_ORIGINS`]
 /// valid origins, one to
 /// [`MAX_ISOCHRONE_CONTOURS`] contours, each positive, finite and not repeated
-/// on its metric, and the overlays and options a route accepts.
+/// on its metric, polygon options in range, and the overlays and options a
+/// route accepts.
 fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
     if 1 + request.origins.len() > MAX_ISOCHRONE_ORIGINS {
         return Err(RouteError::RequestTooLarge {
@@ -472,6 +481,9 @@ fn validate_request(request: &RouteIsochroneRequest) -> Result<(), RouteError> {
         return Err(RouteError::InvalidRequest {
             reason: "isochrone contours",
         });
+    }
+    if let Some(options) = &request.polygons {
+        polygon::validate(options)?;
     }
     validate_query_overlays(&request.overlays)?;
     validate_query_options(&request.options)
@@ -767,6 +779,7 @@ impl RoutingEngine {
                         &boundary_fragments,
                         contour,
                     ),
+                    polygon: None,
                 }
             })
             .collect();
@@ -777,6 +790,7 @@ impl RoutingEngine {
             visited_edge_count: outcome.counters.visited_edge_count,
             settled_node_count: outcome.counters.settled_edge_count,
             truncated: outcome.truncated,
+            polygons: None,
         }
     }
 }
@@ -1240,6 +1254,290 @@ mod tests {
         assert_eq!(
             bucket["edgeOrigins"].as_array().unwrap().len(),
             bucket["edgeIds"].as_array().unwrap().len()
+        );
+    }
+
+    /// Whether `point` is inside the multipolygon (even-odd within each
+    /// polygon, so holes are out).
+    fn covers(polygon: &crate::GeoJsonMultiPolygon, point: GeoPoint) -> bool {
+        polygon.coordinates.iter().any(|rings| {
+            rings
+                .iter()
+                .filter(|ring| {
+                    let mut inside = false;
+                    for pair in ring.windows(2) {
+                        let ([xi, yi], [xj, yj]) = (pair[0], pair[1]);
+                        if (yi > point.lat) != (yj > point.lat)
+                            && point.lng < (xj - xi) * (point.lat - yi) / (yj - yi) + xi
+                        {
+                            inside = !inside;
+                        }
+                    }
+                    inside
+                })
+                .count()
+                % 2
+                == 1
+        })
+    }
+
+    /// Twice the signed area of a closed ring, in square degrees.
+    fn ring_area(ring: &[[f64; 2]]) -> f64 {
+        ring.windows(2)
+            .map(|pair| pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1])
+            .sum()
+    }
+
+    fn reference(graph: &RoadGraph) -> crate::reference::ReferenceEngine<'_> {
+        crate::reference::ReferenceEngine::new(
+            graph,
+            std::sync::Arc::new(
+                crate::test_support::package(graph, &crate::test_support::test_options())
+                    .unwrap()
+                    .0,
+            ),
+        )
+    }
+
+    fn with_polygons(mut request: RouteIsochroneRequest) -> RouteIsochroneRequest {
+        request.polygons = Some(crate::RouteIsochronePolygonOptions::default());
+        request
+    }
+
+    #[test]
+    fn polygons_cover_the_reached_roads_nest_by_contour_and_match_the_reference() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        let mut request = with_polygons(minutes(GeoPoint::new(51.996, 21.0056), 1.0));
+        for seconds in [120.0, 240.0] {
+            request.contours.push(RouteIsochroneContour {
+                contour: seconds,
+                metric: RouteIsochroneMetric::TimeSeconds,
+            });
+        }
+        request.contours.push(RouteIsochroneContour {
+            contour: 200.0,
+            metric: RouteIsochroneMetric::DistanceM,
+        });
+        let result = engine.isochrone(request.clone()).unwrap();
+        // The grid's defaults: the reached area is under 2.56 km across, so
+        // 10 m cells and 15 m of spread.
+        assert_eq!(
+            result.polygons,
+            Some(crate::RouteIsochronePolygonOptions {
+                resolution_m: Some(10.0),
+                spread_m: Some(15.0),
+                denoise: Some(0.0),
+            })
+        );
+        let view = engine.route_graph_view().routing_package().view();
+        let mut shape = Vec::new();
+        for bucket in &result.buckets {
+            let polygon = bucket.polygon.as_ref().expect("every bucket is drawn");
+            assert!(!polygon.coordinates.is_empty());
+            for rings in &polygon.coordinates {
+                // RFC 7946: closed rings, the outer one counterclockwise and
+                // the holes clockwise.
+                for (index, ring) in rings.iter().enumerate() {
+                    assert!(ring.len() >= 4);
+                    assert_eq!(ring.first(), ring.last());
+                    assert_eq!(ring_area(ring) > 0.0, index == 0);
+                }
+            }
+            // Every point of every road the bucket reaches in full is inside,
+            // and every fragment's start.
+            for edge_id in &bucket.edge_ids {
+                let edge =
+                    crate::package::search::analysis::resolve_edge_id(view, *edge_id).unwrap();
+                view.edge_shape(edge, &mut shape);
+                let ends = (shape[0], shape[shape.len() - 1]);
+                for step in 0..=10 {
+                    let t = f64::from(step) / 10.0;
+                    let point = GeoPoint::new(
+                        ends.0.lat + (ends.1.lat - ends.0.lat) * t,
+                        ends.0.lng + (ends.1.lng - ends.0.lng) * t,
+                    );
+                    assert!(covers(polygon, point), "{edge_id} at {t}");
+                }
+            }
+            for fragment in &bucket.boundary_fragments {
+                assert!(covers(polygon, fragment.start), "{fragment:?}");
+            }
+        }
+        // The middle of the next block east, 55 m off every road, is out.
+        let block = GeoPoint::new(51.9965, 21.0072);
+        assert!(
+            result
+                .buckets
+                .iter()
+                .all(|bucket| !covers(bucket.polygon.as_ref().unwrap(), block))
+        );
+        // A wider time contour covers every point the narrower ones do.
+        let probes = (0..=60)
+            .flat_map(|row| {
+                (0..=60).map(move |col| {
+                    GeoPoint::new(
+                        52.0 - f64::from(row) * 0.000125,
+                        21.0 + f64::from(col) * 0.0002,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for pair in result.buckets[..3].windows(2) {
+            let (narrow, wide) = (
+                pair[0].polygon.as_ref().unwrap(),
+                pair[1].polygon.as_ref().unwrap(),
+            );
+            let inside = probes
+                .iter()
+                .filter(|point| covers(narrow, **point))
+                .count();
+            assert!(inside > 0);
+            for point in &probes {
+                assert!(!covers(narrow, *point) || covers(wide, *point), "{point:?}");
+            }
+            assert!(probes.iter().filter(|point| covers(wide, **point)).count() > inside);
+        }
+
+        // The oracle's buckets draw the same polygons.
+        let expected = reference(&graph).isochrone(request.clone()).unwrap();
+        assert_eq!(expected.polygons, result.polygons);
+        for (expected, actual) in expected.buckets.iter().zip(&result.buckets) {
+            assert_eq!(expected.edge_ids, actual.edge_ids);
+            assert_eq!(expected.polygon, actual.polygon);
+        }
+        // So does the same request again, and without edge ids.
+        assert_eq!(engine.isochrone(request.clone()).unwrap(), result);
+        request.include_edge_ids = false;
+        let bare = engine.isochrone(request).unwrap();
+        for (bare, full) in bare.buckets.iter().zip(&result.buckets) {
+            assert!(bare.edge_ids.is_empty());
+            assert_eq!(bare.polygon, full.polygon);
+        }
+    }
+
+    #[test]
+    fn unreached_blocks_are_holes_and_separate_origins_separate_polygons() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        // Half an hour on foot reaches the whole grid: one polygon, with a
+        // hole in each of the 7 × 7 blocks (about 110 m square, 15 m of
+        // spread on each side).
+        let all = engine
+            .isochrone(with_polygons(minutes(
+                GeoPoint::new(51.9965, 21.0056),
+                30.0,
+            )))
+            .unwrap();
+        let polygon = all.buckets[0].polygon.as_ref().unwrap();
+        assert_eq!(polygon.coordinates.len(), 1);
+        assert_eq!(polygon.coordinates[0].len(), 1 + 49);
+        // With more spread than half a block, the blocks fill in.
+        let mut request = with_polygons(minutes(GeoPoint::new(51.9965, 21.0056), 30.0));
+        request.polygons.as_mut().unwrap().spread_m = Some(80.0);
+        let filled = engine.isochrone(request).unwrap();
+        let polygon = filled.buckets[0].polygon.as_ref().unwrap();
+        assert_eq!(polygon.coordinates.len(), 1);
+        assert_eq!(polygon.coordinates[0].len(), 1);
+        assert_eq!(filled.polygons.as_ref().unwrap().spread_m, Some(80.0));
+
+        // Two origins in opposite corners, one minute each: two polygons,
+        // each around its own origin.
+        let corners = (GeoPoint::new(52.0, 21.0008), GeoPoint::new(51.993, 21.0104));
+        let mut request = with_polygons(minutes(corners.0, 0.5));
+        request.origins = vec![crate::RouteIsochroneOrigin::new(corners.1)];
+        let both = engine.isochrone(request.clone()).unwrap();
+        let polygon = both.buckets[0].polygon.as_ref().unwrap();
+        assert_eq!(polygon.coordinates.len(), 2);
+        assert!(covers(polygon, corners.0) && covers(polygon, corners.1));
+        let parts = polygon
+            .coordinates
+            .iter()
+            .map(|rings| crate::GeoJsonMultiPolygon {
+                coordinates: vec![rings.clone()],
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            parts
+                .iter()
+                .all(|part| covers(part, corners.0) != covers(part, corners.1))
+        );
+        // Denoise keeps the larger one only (ties go to the westernmost).
+        request.polygons.as_mut().unwrap().denoise = Some(1.0);
+        let denoised = engine.isochrone(request).unwrap();
+        assert_eq!(
+            denoised.buckets[0]
+                .polygon
+                .as_ref()
+                .unwrap()
+                .coordinates
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_bucket_that_reaches_nothing_has_an_empty_polygon() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        // A one-second contour from mid-block reaches no road in full and
+        // no fragment within it.
+        let mut request = with_polygons(minutes(GeoPoint::new(51.9965, 21.0056), 30.0));
+        request.contours = vec![RouteIsochroneContour {
+            contour: 1.0e-3,
+            metric: RouteIsochroneMetric::DistanceM,
+        }];
+        let result = engine.isochrone(request).unwrap();
+        let polygon = result.buckets[0].polygon.as_ref().unwrap();
+        assert!(polygon.coordinates.is_empty(), "{polygon:?}");
+        assert_eq!(
+            serde_json::to_value(polygon).unwrap(),
+            serde_json::json!({"type": "MultiPolygon", "coordinates": []})
+        );
+    }
+
+    #[test]
+    fn polygons_are_optional_on_the_wire_and_validated() {
+        let graph = grid();
+        let engine = crate::test_support::engine(&graph);
+        let request = minutes(GeoPoint::new(51.9965, 21.0056), 2.0);
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("polygons")
+                .is_none()
+        );
+        let json = serde_json::to_value(engine.isochrone(request.clone()).unwrap()).unwrap();
+        assert!(json.get("polygons").is_none());
+        assert!(json["buckets"][0].get("polygon").is_none());
+
+        let mut json = serde_json::to_value(&request).unwrap();
+        json["polygons"] = serde_json::json!({"resolutionM": 25.0, "denoise": 0.1});
+        let drawn: RouteIsochroneRequest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            drawn.polygons,
+            Some(crate::RouteIsochronePolygonOptions {
+                resolution_m: Some(25.0),
+                spread_m: None,
+                denoise: Some(0.1),
+            })
+        );
+        let result = serde_json::to_value(engine.isochrone(drawn).unwrap()).unwrap();
+        assert_eq!(result["polygons"]["resolutionM"], 25.0);
+        assert_eq!(result["polygons"]["spreadM"], 37.5);
+        assert_eq!(result["buckets"][0]["polygon"]["type"], "MultiPolygon");
+        // A misspelt option is refused, not ignored.
+        json["polygons"] = serde_json::json!({"resolution": 25.0});
+        assert!(serde_json::from_value::<RouteIsochroneRequest>(json).is_err());
+
+        let mut bad = with_polygons(request);
+        bad.polygons.as_mut().unwrap().resolution_m = Some(0.0);
+        assert_eq!(
+            engine.isochrone(bad).unwrap_err(),
+            RouteError::InvalidRequest {
+                reason: "isochrone polygon options"
+            }
         );
     }
 }
