@@ -183,6 +183,34 @@ fn a_cch_order_that_is_not_a_permutation_is_rejected() {
     assert!(RoutingPackage::from_bytes(&resigned(bytes)).is_err());
 }
 
+/// A package whose edge twins don't pair up is rejected when it opens: a
+/// twin of itself, one out of range, and one that doesn't point back.
+#[test]
+fn edge_twins_that_do_not_pair_up_are_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let bytes = std::fs::read(path).unwrap();
+    let range = section_range(&bytes, Section::EdgeTwin);
+    let edges = range.len() / 4;
+    assert!(edges >= 2, "the fixture has {edges} edges");
+    let mut tried = 0;
+    for (edge, twin) in [(0, 0), (1, u32::MAX - 1), (edges - 1, 0)] {
+        let mut bytes = bytes.clone();
+        let at = range.start + edge * 4;
+        let old = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        if old == twin {
+            continue;
+        }
+        bytes[at..at + 4].copy_from_slice(&twin.to_le_bytes());
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error.to_string().contains("twins"),
+            "edge {edge} twin {twin}: {error}"
+        );
+        tried += 1;
+    }
+    assert!(tried >= 2);
+}
+
 /// A package with an edge heading of 360 degrees or more is rejected when it
 /// opens; costing folded heading differences with `360 - delta`, which
 /// overflowed (found by the `package` fuzz target with debug assertions).

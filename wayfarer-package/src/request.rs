@@ -24,7 +24,8 @@ use rustc_hash::FxHashMap;
 
 use crate::format::{
     EDGE_FLAG_SHAPE_REVERSED, LEG_ATTRS_REVISION, NO_HEADING, PackageFile, ProfileMasks,
-    RoutingPackageError, Section, Sections, get_varint, put_varint, unzigzag, zigzag,
+    RoutingPackageError, Section, Sections, all_of, ascending, get_varint, put_varint, unzigzag,
+    zigzag,
 };
 use crate::{GeoPoint, GraphViewEdge, MobilityMode, MobilityProfile, lat_lng_envelope_for_radius};
 
@@ -1005,7 +1006,7 @@ impl PackageFile {
         let string_start = self.slice::<u32>(Section::StringStart);
         let offsets_ok = |starts: &[u32], len: usize| {
             starts.first() == Some(&0)
-                && starts.windows(2).all(|pair| pair[0] <= pair[1])
+                && ascending(starts)
                 && starts.last().is_some_and(|last| *last as usize == len)
         };
         let class_count = class_start.len().saturating_sub(1) as u32;
@@ -1043,7 +1044,7 @@ impl PackageFile {
                 .and_then(|cells| cells.checked_add(1))
                 != Some(cell_start.len())
             || !offsets_ok(cell_start, entries.len())
-            || entries.iter().any(|edge| *edge >= e)
+            || !all_of(entries, |edge| *edge < e)
             || !exceptions.len().is_multiple_of(2)
             || exceptions
                 .as_chunks::<2>()
@@ -1057,16 +1058,14 @@ impl PackageFile {
                 .zip(exceptions.as_chunks::<2>().0.iter().skip(1))
                 .any(|(left, right)| left[0] >= right[0])
             || self.slice::<u32>(Section::SharedAttrClass).len() != c.shared_info_count
-            || self
-                .slice::<u32>(Section::SharedAttrClass)
-                .iter()
-                .any(|class| *class >= class_count)
+            || !all_of(self.slice::<u32>(Section::SharedAttrClass), |class| {
+                *class < class_count
+            })
             || !offsets_ok(class_start, self.slice::<u8>(Section::AttrClassBytes).len())
             || !offsets_ok(string_start, self.slice::<u8>(Section::StringBytes).len())
-            || self
-                .slice::<u32>(Section::ConditionalPool)
-                .iter()
-                .any(|id| *id >= string_count)
+            || !all_of(self.slice::<u32>(Section::ConditionalPool), |id| {
+                *id < string_count
+            })
             || !sorted_exceptions_ok(
                 opposing_edge,
                 self.slice(Section::OpposingExceptionValue),
