@@ -23,9 +23,9 @@ use crate::{RoadEdge, RoadHierarchyTier, RoadNode, RoadType, SharedEdgeInfo, Tra
 use rustc_hash::FxHashMap;
 
 use crate::format::{
-    EDGE_FLAG_SHAPE_REVERSED, LEG_ATTRS_REVISION, NO_HEADING, PackageFile, ProfileMasks,
-    RoutingPackageError, Section, Sections, all_of, ascending, get_varint, put_varint, unzigzag,
-    zigzag,
+    ByteOffsets, EDGE_FLAG_SHAPE_REVERSED, GRID_BLOCK_CELLS, GRID_BLOCK_STARTS, LEG_ATTRS_REVISION,
+    NO_HEADING, PackageFile, ProfileMasks, RoutingPackageError, Section, Sections, all_of,
+    ascending, get_varint, grid_block_key, lattice_cell, put_varint, unzigzag, zigzag,
 };
 use crate::{GeoPoint, GraphViewEdge, MobilityMode, MobilityProfile, lat_lng_envelope_for_radius};
 
@@ -237,6 +237,137 @@ impl Grid {
             self.col(min_lng)..=self.col(max_lng),
         )
     }
+}
+
+/// The request grid: format 2's dense grid over the package's box
+/// (`RequestGrid`, `GridCellStart`), or format 3's covered blocks of the
+/// global lattice (`GridBlocks`, `GridBlockCellStart`). Either way each cell
+/// lists the `GridEntries` of the edges whose shapes meet it.
+#[derive(Clone, Copy)]
+pub enum RequestGrid<'g> {
+    Dense {
+        grid: Grid,
+        cell_start: &'g [u32],
+    },
+    Lattice {
+        /// Cell spacing in lattice ticks, (latitude, longitude).
+        spacing: [u32; 2],
+        /// `key, base` per covered block, sorted by key.
+        blocks: &'g [u64],
+        /// [`GRID_BLOCK_STARTS`] block-relative starts per covered block.
+        cell_start: &'g [u32],
+    },
+}
+
+impl RequestGrid<'_> {
+    /// Appends the entries of every cell that meets the box to `out`
+    /// (with repeats; callers sort and dedup).
+    pub fn entries_in(
+        &self,
+        min_lat: f64,
+        min_lng: f64,
+        max_lat: f64,
+        max_lng: f64,
+        entries: &[u32],
+        out: &mut Vec<u32>,
+    ) {
+        match self {
+            Self::Dense { grid, cell_start } => {
+                let (rows, cols) = grid.cells(min_lat, min_lng, max_lat, max_lng);
+                for row in rows {
+                    let first = row * grid.cols;
+                    let (start, end) = (
+                        cell_start[first + cols.start()] as usize,
+                        cell_start[first + cols.end() + 1] as usize,
+                    );
+                    out.extend_from_slice(&entries[start..end]);
+                }
+            }
+            Self::Lattice {
+                spacing,
+                blocks,
+                cell_start,
+            } => {
+                let side = GRID_BLOCK_CELLS as i32;
+                let (i0, i1) = (
+                    lattice_cell(min_lat, spacing[0]),
+                    lattice_cell(max_lat, spacing[0]),
+                );
+                let (j0, j1) = (
+                    lattice_cell(min_lng, spacing[1]),
+                    lattice_cell(max_lng, spacing[1]),
+                );
+                let block_count = blocks.len() / 2;
+                let find = |key: u64| {
+                    let (mut low, mut high) = (0, block_count);
+                    while low < high {
+                        let mid = (low + high) / 2;
+                        match blocks[mid * 2].cmp(&key) {
+                            std::cmp::Ordering::Less => low = mid + 1,
+                            std::cmp::Ordering::Greater => high = mid,
+                            std::cmp::Ordering::Equal => return Some(mid),
+                        }
+                    }
+                    None
+                };
+                for i in i0..=i1 {
+                    let (block_lat, row) = (i.div_euclid(side), i.rem_euclid(side) as usize);
+                    for block_lng in j0.div_euclid(side)..=j1.div_euclid(side) {
+                        let Some(block) = find(grid_block_key(block_lat, block_lng)) else {
+                            continue;
+                        };
+                        let first = if block_lng == j0.div_euclid(side) {
+                            j0.rem_euclid(side) as usize
+                        } else {
+                            0
+                        };
+                        let last = if block_lng == j1.div_euclid(side) {
+                            j1.rem_euclid(side) as usize
+                        } else {
+                            GRID_BLOCK_CELLS - 1
+                        };
+                        let starts = &cell_start[block * GRID_BLOCK_STARTS..];
+                        let base = blocks[block * 2 + 1] as usize;
+                        let at = row * GRID_BLOCK_CELLS;
+                        out.extend_from_slice(
+                            &entries[base + starts[at + first] as usize
+                                ..base + starts[at + last + 1] as usize],
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether format 3's lattice grid sections are consistent with
+/// `entry_count` entries: blocks sorted by key without repeats, bases from 0
+/// that each block's starts fill exactly, the last ending at the entry
+/// count.
+pub fn lattice_grid_ok(blocks: &[u64], cell_start: &[u32], entry_count: usize) -> bool {
+    if !blocks.len().is_multiple_of(2)
+        || Some(cell_start.len()) != (blocks.len() / 2).checked_mul(GRID_BLOCK_STARTS)
+    {
+        return false;
+    }
+    let mut next_base = 0u64;
+    for (block, starts) in blocks
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(cell_start.as_chunks::<GRID_BLOCK_STARTS>().0)
+    {
+        if block[1] != next_base || starts[0] != 0 || !ascending(starts) {
+            return false;
+        }
+        next_base = block[1] + u64::from(starts[GRID_BLOCK_STARTS - 1]);
+    }
+    next_base == entry_count as u64
+        && blocks
+            .as_chunks::<2>()
+            .0
+            .windows(2)
+            .all(|pair| pair[0][0] < pair[1][0])
 }
 
 /// The adjacency rule for opposing edges: the first edge out of `edge`'s
@@ -793,10 +924,13 @@ pub const PROFILES: [MobilityProfile; 6] = [
 #[derive(Default)]
 pub struct StringsAndClasses {
     pub classes: FxHashMap<ClassKey, u32>,
-    pub class_start: Vec<u32>,
+    /// Byte offsets into `class_bytes` (u64: format 3 stores them so; a
+    /// format-2 build refuses pools past 4 GiB when it writes them).
+    pub class_start: Vec<u64>,
     pub class_bytes: Vec<u8>,
     pub strings: FxHashMap<Arc<str>, u32>,
-    pub string_start: Vec<u32>,
+    /// Byte offsets into `string_bytes`, likewise.
+    pub string_start: Vec<u64>,
     pub string_bytes: Vec<u8>,
 }
 
@@ -810,7 +944,7 @@ impl StringsAndClasses {
         }
         let id = (self.string_start.len() - 1) as u32;
         self.string_bytes.extend_from_slice(value.as_bytes());
-        self.string_start.push(self.string_bytes.len() as u32);
+        self.string_start.push(self.string_bytes.len() as u64);
         self.strings.insert(Arc::from(value), id);
         id
     }
@@ -859,10 +993,7 @@ impl StringsAndClasses {
                 )
             })?;
         self.class_bytes.extend_from_slice(&leg);
-        self.class_start
-            .push(u32::try_from(self.class_bytes.len()).map_err(|_| {
-                RoutingPackageError::Unsupported("attribute classes exceed 4 GiB".into())
-            })?);
+        self.class_start.push(self.class_bytes.len() as u64);
         self.classes.insert(key, id);
         Ok(id)
     }
@@ -896,21 +1027,20 @@ impl CorrelationEdge {
 /// Borrowed request sections.
 pub struct RequestView<'g> {
     graph: Sections<'g>,
-    grid: Grid,
+    grid: RequestGrid<'g>,
     node_base: i64,
     shared_base: u64,
     /// Node `i` has id `i` (format 3): no node id sections.
     node_ids_implied: bool,
     default_component: u32,
     component_sizes: &'g [u32],
-    cell_start: &'g [u32],
     entries: &'g [u32],
     node_id_delta: &'g [u32],
     node_id_wide: &'g [i64],
     component_exceptions: &'g [u32],
     shared_id_gaps: &'g [u64],
     shared_attr_class: &'g [u32],
-    class_start: &'g [u32],
+    class_start: ByteOffsets<'g>,
     class_bytes: &'g [u8],
     opposing_edge: &'g [u32],
     opposing_value: &'g [u32],
@@ -959,25 +1089,41 @@ impl PackageFile {
         Some((meta[1] as i64, meta[2]))
     }
 
+    /// The request grid: format 2's dense grid, format 3's lattice blocks.
+    /// `None` when format 2's grid geometry is invalid or format 3 has no
+    /// grid spacing.
+    pub fn request_grid(&self) -> Option<RequestGrid<'_>> {
+        if self.format_version >= 3 {
+            return Some(RequestGrid::Lattice {
+                spacing: self.params.request_grid_spacing?,
+                blocks: self.slice::<[u64; 2]>(Section::GridBlocks).as_flattened(),
+                cell_start: self.slice(Section::GridBlockCellStart),
+            });
+        }
+        Some(RequestGrid::Dense {
+            grid: Grid::from_section(self.slice::<f64>(Section::RequestGrid))?,
+            cell_start: self.slice(Section::GridCellStart),
+        })
+    }
+
     /// The request sections.
     pub fn request_view(&self) -> Option<RequestView<'_>> {
         let (node_base, shared_base) = self.id_bases()?;
         Some(RequestView {
             graph: self.view(),
-            grid: Grid::from_section(self.slice::<f64>(Section::RequestGrid))?,
+            grid: self.request_grid()?,
             node_base,
             shared_base,
             node_ids_implied: self.format_version >= 3,
             default_component: self.params.default_component,
             component_sizes: self.slice(Section::ComponentSizes),
-            cell_start: self.slice(Section::GridCellStart),
             entries: self.slice(Section::GridEntries),
             node_id_delta: self.slice(Section::NodeIdDelta),
             node_id_wide: self.slice(Section::NodeIdWide),
             component_exceptions: self.slice(Section::ComponentExceptions),
             shared_id_gaps: self.slice(Section::SharedInfoIdGaps),
             shared_attr_class: self.slice(Section::SharedAttrClass),
-            class_start: self.slice(Section::AttrClassStart),
+            class_start: self.byte_offsets(Section::AttrClassStart, Section::AttrClassStart64),
             class_bytes: self.slice(Section::AttrClassBytes),
             opposing_edge: self.slice(Section::OpposingExceptionEdge),
             opposing_value: self.slice(Section::OpposingExceptionValue),
@@ -997,18 +1143,28 @@ impl PackageFile {
             return invalid("request metadata is missing or of another layout");
         }
         let c = self.counts;
-        let Some(grid) = Grid::from_section(self.slice::<f64>(Section::RequestGrid)) else {
+        let Some(grid) = self.request_grid() else {
             return invalid("request grid is invalid");
         };
-        let cell_start = self.slice::<u32>(Section::GridCellStart);
         let entries = self.slice::<u32>(Section::GridEntries);
-        let class_start = self.slice::<u32>(Section::AttrClassStart);
-        let string_start = self.slice::<u32>(Section::StringStart);
-        let offsets_ok = |starts: &[u32], len: usize| {
-            starts.first() == Some(&0)
-                && ascending(starts)
-                && starts.last().is_some_and(|last| *last as usize == len)
+        let grid_ok = match grid {
+            RequestGrid::Dense { grid, cell_start } => {
+                grid.rows
+                    .checked_mul(grid.cols)
+                    .and_then(|cells| cells.checked_add(1))
+                    == Some(cell_start.len())
+                    && cell_start.first() == Some(&0)
+                    && ascending(cell_start)
+                    && cell_start
+                        .last()
+                        .is_some_and(|last| *last as usize == entries.len())
+            }
+            RequestGrid::Lattice {
+                blocks, cell_start, ..
+            } => lattice_grid_ok(blocks, cell_start, entries.len()),
         };
+        let class_start = self.byte_offsets(Section::AttrClassStart, Section::AttrClassStart64);
+        let string_start = self.byte_offsets(Section::StringStart, Section::StringStart64);
         let class_count = class_start.len().saturating_sub(1) as u32;
         let string_count = string_start.len().saturating_sub(1) as u32;
         let opposing_edge = self.slice::<u32>(Section::OpposingExceptionEdge);
@@ -1038,12 +1194,7 @@ impl PackageFile {
             == stored_node_ids;
         if !shared_ids_ok
             || !node_ids_ok
-            || grid
-                .rows
-                .checked_mul(grid.cols)
-                .and_then(|cells| cells.checked_add(1))
-                != Some(cell_start.len())
-            || !offsets_ok(cell_start, entries.len())
+            || !grid_ok
             || !all_of(entries, |edge| *edge < e)
             || !exceptions.len().is_multiple_of(2)
             || exceptions
@@ -1061,8 +1212,8 @@ impl PackageFile {
             || !all_of(self.slice::<u32>(Section::SharedAttrClass), |class| {
                 *class < class_count
             })
-            || !offsets_ok(class_start, self.slice::<u8>(Section::AttrClassBytes).len())
-            || !offsets_ok(string_start, self.slice::<u8>(Section::StringBytes).len())
+            || !class_start.bound(self.slice::<u8>(Section::AttrClassBytes).len(), false)
+            || !string_start.bound(self.slice::<u8>(Section::StringBytes).len(), false)
             || !all_of(self.slice::<u32>(Section::ConditionalPool), |id| {
                 *id < string_count
             })
@@ -1144,11 +1295,7 @@ impl RequestView<'_> {
     /// leg part.
     pub fn class_parts(&self, shared: usize) -> Option<(&[u8], &[u8])> {
         let class = *self.shared_attr_class.get(shared)? as usize;
-        let (start, end) = (
-            *self.class_start.get(class)? as usize,
-            *self.class_start.get(class + 1)? as usize,
-        );
-        let bytes = self.class_bytes.get(start..end)?;
+        let bytes = self.class_bytes.get(self.class_start.range(class)?)?;
         let mut at = 0;
         let correlation_len = usize::try_from(get_varint(bytes, &mut at)?).ok()?;
         let split = at.checked_add(correlation_len)?;
@@ -1315,16 +1462,15 @@ impl RequestView<'_> {
     ) -> Vec<CorrelationEdge> {
         let g = &self.graph;
         let envelope = Envelope::new(min_lat, min_lng, max_lat, max_lng);
-        let (rows, cols) = self.grid.cells(min_lat, min_lng, max_lat, max_lng);
         let mut entries = Vec::new();
-        for row in rows {
-            let first = row * self.grid.cols;
-            let (start, end) = (
-                self.cell_start[first + cols.start()] as usize,
-                self.cell_start[first + cols.end() + 1] as usize,
-            );
-            entries.extend_from_slice(&self.entries[start..end]);
-        }
+        self.grid.entries_in(
+            min_lat,
+            min_lng,
+            max_lat,
+            max_lng,
+            self.entries,
+            &mut entries,
+        );
         entries.sort_unstable();
         entries.dedup();
         // Every directed edge over each entry's shared info, tested on the
@@ -1822,7 +1968,119 @@ fn edge_accessible(
 
 #[cfg(test)]
 mod tests {
-    use super::sorted_pairs_ok;
+    use super::{RequestGrid, lattice_grid_ok, sorted_pairs_ok};
+    use crate::format::{GRID_BLOCK_CELLS, GRID_BLOCK_STARTS, grid_block_key, lattice_cell};
+
+    /// A lattice grid with entry `n` in the `n`th of `cells` (lattice
+    /// (row, col)), built as the compiler builds it.
+    fn lattice(cells: &[(i32, i32)]) -> (Vec<u64>, Vec<u32>, Vec<u32>) {
+        let side = GRID_BLOCK_CELLS as i32;
+        let mut pairs = cells
+            .iter()
+            .enumerate()
+            .map(|(entry, (i, j))| {
+                (
+                    grid_block_key(i.div_euclid(side), j.div_euclid(side)),
+                    (i.rem_euclid(side) * side + j.rem_euclid(side)) as usize,
+                    entry as u32,
+                )
+            })
+            .collect::<Vec<_>>();
+        pairs.sort_unstable();
+        let (mut blocks, mut starts) = (Vec::new(), Vec::new());
+        let mut at = 0;
+        while at < pairs.len() {
+            let (key, base) = (pairs[at].0, at);
+            let mut counts = [0u32; GRID_BLOCK_STARTS];
+            while at < pairs.len() && pairs[at].0 == key {
+                counts[pairs[at].1 + 1] += 1;
+                at += 1;
+            }
+            for cell in 0..GRID_BLOCK_STARTS - 1 {
+                counts[cell + 1] += counts[cell];
+            }
+            blocks.extend([key, base as u64]);
+            starts.extend_from_slice(&counts);
+        }
+        let entries = pairs.into_iter().map(|pair| pair.2).collect();
+        (blocks, starts, entries)
+    }
+
+    #[test]
+    fn the_lattice_grid_finds_the_cells_of_a_box_across_blocks_and_signs() {
+        let spacing = 1_440; // 300 cells a degree
+        // Cells around the corner of four blocks at (-1°, -1°) and around
+        // the equator and the antimeridian's neighbour, two entries in one.
+        let cells = [
+            (-301, -301),
+            (-300, -300),
+            (-300, -301),
+            (-301, -300),
+            (-1, 0),
+            (0, -1),
+            (0, 0),
+            (0, 0),
+            (63, 63),
+            (64, 64),
+            (-54_000, 53_999),
+        ];
+        let (blocks, starts, entries) = lattice(&cells);
+        assert!(lattice_grid_ok(&blocks, &starts, entries.len()));
+        let grid = RequestGrid::Lattice {
+            spacing: [spacing; 2],
+            blocks: &blocks,
+            cell_start: &starts,
+        };
+        let found = |lat: (f64, f64), lng: (f64, f64)| {
+            let mut out = Vec::new();
+            grid.entries_in(lat.0, lng.0, lat.1, lng.1, &entries, &mut out);
+            out.sort_unstable();
+            let mut expected = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, (i, j))| {
+                    (lattice_cell(lat.0, spacing)..=lattice_cell(lat.1, spacing)).contains(i)
+                        && (lattice_cell(lng.0, spacing)..=lattice_cell(lng.1, spacing)).contains(j)
+                })
+                .map(|(entry, _)| entry as u32)
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
+            assert_eq!(out, expected, "{lat:?} {lng:?}");
+            out.len()
+        };
+        assert_eq!(found((-1.001, -0.999), (-1.001, -0.999)), 4);
+        assert_eq!(found((-1.001, -1.0005), (-1.001, -0.999)), 2);
+        assert_eq!(found((-0.001, 0.001), (-0.001, 0.001)), 4);
+        assert_eq!(found((0.0, 0.0), (0.0, 0.0)), 2);
+        assert_eq!(found((0.2, 0.22), (0.2, 0.22)), 2);
+        assert_eq!(found((-180.0, 180.0), (-180.0, 180.0)), cells.len());
+        assert_eq!(found((10.0, 11.0), (10.0, 11.0)), 0);
+        assert_eq!(found((-180.0, -179.99), (179.99, 180.0)), 1);
+    }
+
+    #[test]
+    fn the_lattice_grid_check_refuses_broken_blocks() {
+        let (blocks, starts, entries) = lattice(&[(0, 0), (64, 0), (0, 64)]);
+        assert_eq!(blocks.len(), 6);
+        assert!(lattice_grid_ok(&blocks, &starts, entries.len()));
+        assert!(lattice_grid_ok(&[], &[], 0));
+        assert!(!lattice_grid_ok(&[], &[], 1));
+        let mut swapped = blocks.clone();
+        swapped.swap(0, 2);
+        assert!(!lattice_grid_ok(&swapped, &starts, entries.len()));
+        let mut repeated = blocks.clone();
+        repeated[2] = repeated[0];
+        assert!(!lattice_grid_ok(&repeated, &starts, entries.len()));
+        let mut gap = blocks.clone();
+        gap[3] += 1;
+        assert!(!lattice_grid_ok(&gap, &starts, entries.len()));
+        assert!(!lattice_grid_ok(&blocks[..5], &starts, entries.len()));
+        assert!(!lattice_grid_ok(&blocks, &starts[1..], entries.len()));
+        assert!(!lattice_grid_ok(&blocks, &starts, entries.len() + 1));
+        let mut falling = starts.clone();
+        falling[5] = 9;
+        assert!(!lattice_grid_ok(&blocks, &falling, entries.len()));
+    }
 
     #[test]
     fn sorted_pairs_ok_accepts_every_key_without_a_bound() {

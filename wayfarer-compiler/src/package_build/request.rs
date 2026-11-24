@@ -8,7 +8,9 @@ use wayfarer_package::request::*;
 use wayfarer_road_graph::{RoadNetwork, SharedEdgeInfos};
 
 use wayfarer_package::format::{
-    PackageWriter, RoutingPackageError, Section, format_2_profile_bit as profile_bit,
+    GRID_BLOCK_CELLS, GRID_BLOCK_STARTS, PackageWriter, REQUEST_GRID_SPACING_TICKS,
+    RoutingPackageError, Section, format_2_profile_bit as profile_bit, grid_block_key,
+    lattice_cell,
 };
 
 /// Inputs from the package build, in compact order.
@@ -44,19 +46,25 @@ pub(crate) struct RequestBuildInput<'a> {
 #[derive(Default)]
 pub(crate) struct RequestSections {
     default_component: u32,
+    /// Format 3: offsets are written as u64.
+    format_3: bool,
     meta: Vec<u64>,
+    /// Format 2's dense grid.
     grid: Vec<f64>,
     cell_start: Vec<u32>,
+    /// Format 3's lattice grid.
+    grid_blocks: Vec<u64>,
+    block_cell_start: Vec<u32>,
     entries: Vec<u32>,
+    class_start: Vec<u64>,
+    string_start: Vec<u64>,
     node_id_delta: Vec<u32>,
     node_id_wide: Vec<i64>,
     component_exceptions: Vec<u32>,
     component_sizes: Vec<u32>,
     shared_id_gaps: Vec<u64>,
     shared_attr_class: Vec<u32>,
-    class_start: Vec<u32>,
     class_bytes: Vec<u8>,
-    string_start: Vec<u32>,
     string_bytes: Vec<u8>,
     opposing_edge: Vec<u32>,
     opposing_value: Vec<u32>,
@@ -73,17 +81,22 @@ pub(crate) struct RequestSections {
 
 impl RequestSections {
     pub(crate) fn byte_len(&self) -> usize {
-        (self.meta.len() + self.grid.len() + self.node_id_wide.len() + self.shared_id_gaps.len())
+        let offset_bytes = if self.format_3 { 8 } else { 4 };
+        (self.meta.len()
+            + self.grid.len()
+            + self.grid_blocks.len()
+            + self.node_id_wide.len()
+            + self.shared_id_gaps.len())
             * 8
+            + (self.class_start.len() + self.string_start.len()) * offset_bytes
             + self.reach_saturated.len()
             + (self.cell_start.len()
+                + self.block_cell_start.len()
                 + self.entries.len()
                 + self.node_id_delta.len()
                 + self.component_exceptions.len()
                 + self.component_sizes.len()
                 + self.shared_attr_class.len()
-                + self.class_start.len()
-                + self.string_start.len()
                 + self.opposing_edge.len()
                 + self.opposing_value.len()
                 + self.leg_opposing_edge.len()
@@ -125,10 +138,12 @@ impl RequestSections {
         self.tier_exceptions.len() / 2
     }
 
-    pub(crate) fn put(self, writer: &mut PackageWriter) {
+    pub(crate) fn put(self, writer: &mut PackageWriter) -> Result<(), RoutingPackageError> {
         writer.put(Section::RequestMeta, self.meta);
         writer.put(Section::RequestGrid, self.grid);
         writer.put(Section::GridCellStart, self.cell_start);
+        writer.put(Section::GridBlocks, self.grid_blocks);
+        writer.put(Section::GridBlockCellStart, self.block_cell_start);
         writer.put(Section::GridEntries, self.entries);
         writer.put(Section::NodeIdDelta, self.node_id_delta);
         writer.put(Section::NodeIdWide, self.node_id_wide);
@@ -141,9 +156,17 @@ impl RequestSections {
         );
         writer.put(Section::SharedInfoIdGaps, self.shared_id_gaps);
         writer.put(Section::SharedAttrClass, self.shared_attr_class);
-        writer.put(Section::AttrClassStart, self.class_start);
+        writer.put_byte_offsets(
+            Section::AttrClassStart,
+            Section::AttrClassStart64,
+            self.class_start,
+        )?;
         writer.put(Section::AttrClassBytes, self.class_bytes);
-        writer.put(Section::StringStart, self.string_start);
+        writer.put_byte_offsets(
+            Section::StringStart,
+            Section::StringStart64,
+            self.string_start,
+        )?;
         writer.put(Section::StringBytes, self.string_bytes);
         writer.put(Section::OpposingExceptionEdge, self.opposing_edge);
         writer.put(Section::OpposingExceptionValue, self.opposing_value);
@@ -155,6 +178,161 @@ impl RequestSections {
         writer.put(Section::ConditionalShared, self.conditional_shared);
         writer.put(Section::ConditionalStart, self.conditional_start);
         writer.put(Section::ConditionalPool, self.conditional_pool);
+        Ok(())
+    }
+}
+
+/// The request grid of a build: format 2's dense grid (geometry and cell
+/// starts) or format 3's lattice blocks and block-relative starts, with
+/// the entries.
+struct BuiltGrid {
+    dense: Option<(Grid, Vec<u32>)>,
+    blocks: Vec<u64>,
+    block_cell_start: Vec<u32>,
+    entries: Vec<u32>,
+}
+
+/// The cells of the box `a`–`b` on a grid, as (row range, col range).
+type CellsOf<'a> = dyn Fn((f64, f64), (f64, f64)) -> (std::ops::RangeInclusive<i64>, std::ops::RangeInclusive<i64>)
+    + Sync
+    + 'a;
+
+/// (cell, edge) for every cell each entry edge's shape segments meet,
+/// sorted, with cells numbered by `cell_key` from `cells_of`'s (row, col).
+fn grid_pairs<'s, K: Ord + Send + Copy>(
+    entry_edges: &[(u32, u32)],
+    shared_info: &(dyn Fn(usize) -> wayfarer_road_graph::SharedInfoRef<'s> + Sync),
+    cells_of: &CellsOf<'_>,
+    cell_key: &(dyn Fn(i64, i64) -> K + Sync),
+) -> Vec<(K, u32)> {
+    let mut pairs = entry_edges
+        .par_iter()
+        .flat_map_iter(|(edge, shared)| {
+            let mut cells = Vec::new();
+            let points = shared_info(*shared as usize).geometry;
+            for index in 1..points.len() {
+                let (a, b) = (points.get(index - 1), points.get(index));
+                let (rows, cols) =
+                    cells_of((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)));
+                for row in rows {
+                    for col in cols.clone() {
+                        cells.push(cell_key(row, col));
+                    }
+                }
+            }
+            cells.sort_unstable();
+            cells.dedup();
+            cells.into_iter().map(move |cell| (cell, *edge))
+        })
+        .collect::<Vec<_>>();
+    pairs.par_sort_unstable();
+    pairs
+}
+
+/// Format 2's grid: 0.003° cells over the shapes' extent.
+fn dense_grid<'s>(
+    entry_edges: &[(u32, u32)],
+    shared_info: &(dyn Fn(usize) -> wayfarer_road_graph::SharedInfoRef<'s> + Sync),
+    shared_count: usize,
+) -> BuiltGrid {
+    let (mut min_lat, mut min_lng, mut max_lat, mut max_lng) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for shared in 0..shared_count {
+        for (lat, lng) in shared_info(shared).geometry.iter() {
+            min_lat = min_lat.min(lat);
+            max_lat = max_lat.max(lat);
+            min_lng = min_lng.min(lng);
+            max_lng = max_lng.max(lng);
+        }
+    }
+    if min_lat > max_lat {
+        (min_lat, min_lng, max_lat, max_lng) = (0.0, 0.0, 0.0, 0.0);
+    }
+    let grid = Grid {
+        min_lat,
+        min_lng,
+        cell: GRID_CELL_DEG,
+        rows: (((max_lat - min_lat) / GRID_CELL_DEG).floor() as usize + 1).max(1),
+        cols: (((max_lng - min_lng) / GRID_CELL_DEG).floor() as usize + 1).max(1),
+    };
+    let pairs = grid_pairs(
+        entry_edges,
+        shared_info,
+        &|low, high| {
+            let (rows, cols) = grid.cells(low.0, low.1, high.0, high.1);
+            (
+                *rows.start() as i64..=*rows.end() as i64,
+                *cols.start() as i64..=*cols.end() as i64,
+            )
+        },
+        &|row, col| (row as usize * grid.cols + col as usize) as u32,
+    );
+    let cell_count = grid.rows * grid.cols;
+    let mut cell_start = vec![0u32; cell_count + 1];
+    for (cell, _) in &pairs {
+        cell_start[*cell as usize + 1] += 1;
+    }
+    for cell in 0..cell_count {
+        cell_start[cell + 1] += cell_start[cell];
+    }
+    BuiltGrid {
+        dense: Some((grid, cell_start)),
+        blocks: Vec::new(),
+        block_cell_start: Vec::new(),
+        entries: pairs.into_iter().map(|(_, edge)| edge).collect(),
+    }
+}
+
+/// Format 3's grid: 12″ cells of the global lattice in blocks of
+/// `GRID_BLOCK_CELLS`², only the blocks some shape meets.
+fn lattice_grid<'s>(
+    entry_edges: &[(u32, u32)],
+    shared_info: &(dyn Fn(usize) -> wayfarer_road_graph::SharedInfoRef<'s> + Sync),
+) -> BuiltGrid {
+    let spacing = REQUEST_GRID_SPACING_TICKS;
+    let side = GRID_BLOCK_CELLS as i64;
+    let pairs = grid_pairs(
+        entry_edges,
+        shared_info,
+        &|low, high| {
+            (
+                i64::from(lattice_cell(low.0, spacing))..=i64::from(lattice_cell(high.0, spacing)),
+                i64::from(lattice_cell(low.1, spacing))..=i64::from(lattice_cell(high.1, spacing)),
+            )
+        },
+        &|i, j| {
+            (
+                grid_block_key(i.div_euclid(side) as i32, j.div_euclid(side) as i32),
+                (i.rem_euclid(side) * side + j.rem_euclid(side)) as u16,
+            )
+        },
+    );
+    let mut blocks = Vec::new();
+    let mut block_cell_start = Vec::new();
+    let mut at = 0;
+    while at < pairs.len() {
+        let key = pairs[at].0.0;
+        let base = at;
+        let mut counts = [0u32; GRID_BLOCK_STARTS];
+        while at < pairs.len() && pairs[at].0.0 == key {
+            counts[usize::from(pairs[at].0.1) + 1] += 1;
+            at += 1;
+        }
+        for cell in 0..GRID_BLOCK_STARTS - 1 {
+            counts[cell + 1] += counts[cell];
+        }
+        blocks.extend([key, base as u64]);
+        block_cell_start.extend_from_slice(&counts);
+    }
+    BuiltGrid {
+        dense: None,
+        blocks,
+        block_cell_start,
+        entries: pairs.into_iter().map(|(_, edge)| edge).collect(),
     }
 }
 
@@ -338,62 +516,33 @@ pub(crate) fn build_request_sections(
     }
     drop(representative);
 
-    // Grid over the shapes' extent.
-    let (mut min_lat, mut min_lng, mut max_lat, mut max_lng) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for shared in 0..shared_count {
-        for (lat, lng) in shared_info(shared).geometry.iter() {
-            min_lat = min_lat.min(lat);
-            max_lat = max_lat.max(lat);
-            min_lng = min_lng.min(lng);
-            max_lng = max_lng.max(lng);
-        }
-    }
-    if min_lat > max_lat {
-        (min_lat, min_lng, max_lat, max_lng) = (0.0, 0.0, 0.0, 0.0);
-    }
-    let grid = Grid {
-        min_lat,
-        min_lng,
-        cell: GRID_CELL_DEG,
-        rows: (((max_lat - min_lat) / GRID_CELL_DEG).floor() as usize + 1).max(1),
-        cols: (((max_lng - min_lng) / GRID_CELL_DEG).floor() as usize + 1).max(1),
+    // Format 2: a dense grid over the shapes' extent. Format 3: the covered
+    // blocks of the global lattice (`docs/design/format-3.md`, section 9.3).
+    let grid = if input.implied_ids {
+        lattice_grid(&entry_edges, &shared_info)
+    } else {
+        dense_grid(&entry_edges, &shared_info, shared_count)
     };
-    let mut pairs = entry_edges
-        .par_iter()
-        .flat_map_iter(|(edge, shared)| {
-            let mut cells = Vec::new();
-            let points = shared_info(*shared as usize).geometry;
-            for index in 1..points.len() {
-                let (a, b) = (points.get(index - 1), points.get(index));
-                let (rows, cols) =
-                    grid.cells(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
-                for row in rows {
-                    for col in cols.clone() {
-                        cells.push((row * grid.cols + col) as u32);
-                    }
-                }
-            }
-            cells.sort_unstable();
-            cells.dedup();
-            cells.into_iter().map(move |cell| (cell, *edge))
-        })
-        .collect::<Vec<_>>();
     drop(entry_edges);
-    pairs.par_sort_unstable();
-    let cell_count = grid.rows * grid.cols;
-    let mut cell_start = vec![0u32; cell_count + 1];
-    for (cell, _) in &pairs {
-        cell_start[*cell as usize + 1] += 1;
-    }
-    for cell in 0..cell_count {
-        cell_start[cell + 1] += cell_start[cell];
-    }
-    let entries = pairs.into_iter().map(|(_, edge)| edge).collect::<Vec<_>>();
+    let BuiltGrid {
+        dense,
+        blocks: grid_blocks,
+        block_cell_start,
+        entries,
+    } = grid;
+    let (grid, cell_start) = match dense {
+        Some((grid, cell_start)) => (
+            vec![
+                grid.min_lat,
+                grid.min_lng,
+                grid.cell,
+                grid.rows as f64,
+                grid.cols as f64,
+            ],
+            cell_start,
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
 
     // Opposing edges. Correlation pairs edges as the road graph does, by
     // (shared info, segment, direction) (the last edge of a key wins); legs
@@ -465,22 +614,25 @@ pub(crate) fn build_request_sections(
     let reach_saturated = reach_saturated(input, SATURATION_CAP);
 
     let string_start = if table.string_start.is_empty() {
-        vec![0]
+        vec![0u64]
     } else {
         table.string_start
     };
     let class_start = if table.class_start.is_empty() {
-        vec![0]
+        vec![0u64]
     } else {
         table.class_start
     };
     if super::trace() {
         eprintln!(
-            "request sections: grid {}x{} cells, {} entries; {} classes ({} B); {} strings ({} B); \
+            "request sections: grid {}, {} entries; {} classes ({} B); {} strings ({} B); \
              {} component exceptions; {} shared-id gaps; {} leg opposing exceptions, \
              {} roundabout nodes, {} mode-mask and {} tier exceptions",
-            grid.rows,
-            grid.cols,
+            if grid.is_empty() {
+                format!("{} lattice blocks", grid_blocks.len() / 2)
+            } else {
+                format!("{}x{} cells", grid[3], grid[4])
+            },
             entries.len(),
             class_start.len() - 1,
             table.class_bytes.len(),
@@ -510,14 +662,11 @@ pub(crate) fn build_request_sections(
                 SATURATION_CAP as u64,
             ]
         },
-        grid: vec![
-            grid.min_lat,
-            grid.min_lng,
-            grid.cell,
-            grid.rows as f64,
-            grid.cols as f64,
-        ],
+        format_3: input.implied_ids,
+        grid,
         cell_start,
+        grid_blocks,
+        block_cell_start,
         entries,
         node_id_delta,
         node_id_wide,

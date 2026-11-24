@@ -1,8 +1,9 @@
 //! Format 3's section table and profile slots (`docs/design/format-3.md`,
 //! sections 2 to 5 and 7): a format-3 compile routes as format 2 does, the
 //! identity and content hashes, the slot table and u16 masks, versioned
-//! attribute-class records, the region info and OSM node ids, and the
-//! checks against hostile packages.
+//! attribute-class records, the region info and OSM node ids, rank
+//! numbering and the cell tree, the wide offsets and the lattice request
+//! grid, and the checks against hostile packages.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -409,7 +410,24 @@ fn format_3_drops_stored_ids_and_reserved_sections_and_states_its_params() {
     let (v2, v3) = (open(v2).unwrap(), open(v3).unwrap());
     assert_eq!((v2.format_version(), v3.format_version()), (2, 3));
     assert_eq!(v2.counts(), v3.counts());
-    assert!(v3.byte_len() < v2.byte_len());
+    // Smaller but for the request grid: a lattice block is 16 KiB of starts,
+    // more than Monaco's whole dense grid.
+    let grid_bytes = |file: &PackageFile| {
+        file.section_sizes()
+            .into_iter()
+            .filter(|(name, _)| {
+                [
+                    "RequestGrid",
+                    "GridCellStart",
+                    "GridBlocks",
+                    "GridBlockCellStart",
+                ]
+                .contains(name)
+            })
+            .map(|(_, len)| len)
+            .sum::<usize>()
+    };
+    assert!(v3.byte_len() - grid_bytes(&v3) < v2.byte_len() - grid_bytes(&v2));
     let names = v3
         .section_sizes()
         .into_iter()
@@ -494,6 +512,7 @@ fn format_3_drops_stored_ids_and_reserved_sections_and_states_its_params() {
         PackageParams {
             draft_revision: None,
             default_component: pa.default_component,
+            request_grid_spacing: None,
             ..*pb
         },
         *pa
@@ -1167,20 +1186,20 @@ fn attribute_class_records_carry_their_revision() {
 
     // A newer revision: three more bytes after each record's leg part.
     let before = leg_infos(&monaco().1);
-    let starts_at = raw.position(Section::AttrClassStart.id()).unwrap();
-    let starts: Vec<u32> = raw.sections[starts_at]
+    let starts_at = raw.position(Section::AttrClassStart64.id()).unwrap();
+    let starts: Vec<u64> = raw.sections[starts_at]
         .bytes
-        .as_chunks::<4>()
+        .as_chunks::<8>()
         .0
         .iter()
-        .map(|bytes| u32::from_le_bytes(*bytes))
+        .map(|bytes| u64::from_le_bytes(*bytes))
         .collect();
     let old_bytes = &raw.sections[at].bytes;
-    let (mut new_starts, mut new_bytes) = (vec![0u32], Vec::new());
+    let (mut new_starts, mut new_bytes) = (vec![0u64], Vec::new());
     for pair in starts.windows(2) {
         new_bytes.extend_from_slice(&old_bytes[pair[0] as usize..pair[1] as usize]);
         new_bytes.extend_from_slice(&[1, 9, 0]);
-        new_starts.push(new_bytes.len() as u32);
+        new_starts.push(new_bytes.len() as u64);
     }
     let mut newer = raw.clone();
     newer.sections[starts_at].bytes = new_starts.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -1459,4 +1478,203 @@ fn the_rank_layout_and_the_cell_tree_come_together() {
         },
     );
     assert!(open_error(&raw).contains("retired"), "{}", open_error(&raw));
+}
+
+/// The u64 words of section `id`.
+fn words(raw: &RawPackage, section: Section) -> Vec<u64> {
+    let at = raw.position(section.id()).unwrap();
+    raw.sections[at]
+        .bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|bytes| u64::from_le_bytes(*bytes))
+        .collect()
+}
+
+fn with_words(section: Section, edit: impl FnOnce(&mut Vec<u64>)) -> RawPackage {
+    let mut raw = format_3();
+    let mut values = words(&raw, section);
+    edit(&mut values);
+    let at = raw.position(section.id()).unwrap();
+    raw.sections[at].bytes = values.into_iter().flat_map(u64::to_le_bytes).collect();
+    raw
+}
+
+fn with_u32s(section: Section, edit: impl FnOnce(&mut Vec<u32>)) -> RawPackage {
+    let mut raw = format_3();
+    let at = raw.position(section.id()).unwrap();
+    let mut values = raw.sections[at]
+        .bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
+        .collect::<Vec<_>>();
+    edit(&mut values);
+    raw.sections[at].bytes = values.into_iter().flat_map(u32::to_le_bytes).collect();
+    raw
+}
+
+#[test]
+fn format_3_widens_offsets_and_cost_tuples_and_puts_the_grid_on_the_lattice() {
+    let (v2, v3) = (open(&monaco().0).unwrap(), open(&monaco().1).unwrap());
+    let names = |file: &PackageFile| {
+        file.section_sizes()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+    };
+    let (names_2, names_3) = (names(&v2), names(&v3));
+    for (narrow, wide) in [
+        ("ShapeStart", "ShapeStart64"),
+        ("AttrClassStart", "AttrClassStart64"),
+        ("StringStart", "StringStart64"),
+        ("SharedInfoCostTuple", "SharedInfoCostTuple32"),
+        ("RequestGrid", "GridBlocks"),
+        ("GridCellStart", "GridBlockCellStart"),
+    ] {
+        assert!(
+            names_2.contains(&narrow) && !names_2.contains(&wide),
+            "{narrow}"
+        );
+        assert!(
+            names_3.contains(&wide) && !names_3.contains(&narrow),
+            "{wide}"
+        );
+    }
+    assert_eq!(v3.params().request_grid_spacing, Some([1_440, 1_440]));
+
+    // Shapes and cost tuples read the same through the correspondence.
+    let map = monaco_correspondence();
+    let (a, b) = (v2.view(), v3.view());
+    let (mut shape_2, mut shape_3) = (Vec::new(), Vec::new());
+    for edge in 0..b.edge_count {
+        shape_2.clear();
+        shape_3.clear();
+        a.edge_shape(map.edge[edge], &mut shape_2);
+        b.edge_shape(edge as u32, &mut shape_3);
+        assert_eq!(shape_2, shape_3, "edge {edge}");
+    }
+    let mut tuple_in_2 = std::collections::HashMap::new();
+    for shared in 0..v3.counts().shared_info_count {
+        let tuple = b.cost_tuple(shared);
+        let twin = a.cost_tuple(map.shared[shared] as usize);
+        assert_eq!(*tuple_in_2.entry(tuple).or_insert(twin), twin, "{shared}");
+        assert_eq!(b.si_cost_flags[tuple], a.si_cost_flags[twin], "{shared}");
+        assert_eq!(
+            b.si_cost_classes[tuple], a.si_cost_classes[twin],
+            "{shared}"
+        );
+    }
+
+    // Monaco fits one lattice block; every edge with a shape is an entry.
+    let blocks = words(&format_3(), Section::GridBlocks);
+    assert!(!blocks.is_empty() && blocks.len() <= 8, "{blocks:?}");
+    assert_eq!(blocks[1], 0);
+}
+
+#[test]
+fn wide_offsets_are_checked() {
+    let refused = |raw: RawPackage| assert!(open(&raw.encode()).is_err());
+    open(&with_words(Section::ShapeStart64, |_| {}).encode()).unwrap();
+    for section in [
+        Section::ShapeStart64,
+        Section::AttrClassStart64,
+        Section::StringStart64,
+    ] {
+        // Past the end, past 4 GiB, out of order, or not from 0.
+        refused(with_words(section, |starts| {
+            *starts.last_mut().unwrap() += 1
+        }));
+        refused(with_words(section, |starts| {
+            *starts.last_mut().unwrap() = 1 << 32
+        }));
+        refused(with_words(section, |starts| starts[1] = u64::MAX));
+        refused(with_words(section, |starts| starts[0] = 1));
+    }
+    assert!(
+        open_error(&with_words(Section::ShapeStart64, |starts| {
+            *starts.last_mut().unwrap() += 1
+        }))
+        .contains("shape offsets")
+    );
+    // A cost tuple row past the tuples.
+    let error = open_error(&with_u32s(Section::SharedInfoCostTuple32, |rows| {
+        rows[0] = 1 << 20
+    }));
+    assert!(error.contains("costing tuples"), "{error}");
+}
+
+#[test]
+fn the_lattice_grid_is_checked() {
+    let inconsistent = |raw: RawPackage| {
+        let error = open_error(&raw);
+        assert!(error.contains("request sections"), "{error}");
+    };
+    let blocks = words(&format_3(), Section::GridBlocks);
+    let entries = with_u32s(Section::GridEntries, |_| {});
+    let entry_count = entries.sections[entries.position(Section::GridEntries.id()).unwrap()]
+        .bytes
+        .len() as u64
+        / 4;
+    // An empty block after the last, with its starts, opens.
+    let with_block = |key: u64, base: u64| {
+        let mut raw = with_words(Section::GridBlocks, |blocks| blocks.extend([key, base]));
+        let at = raw.position(Section::GridBlockCellStart.id()).unwrap();
+        raw.sections[at].bytes.extend(vec![0u8; 4097 * 4]);
+        raw
+    };
+    let last_key = blocks[blocks.len() - 2];
+    open(&with_block(last_key + 1, entry_count).encode()).unwrap();
+    // The same block twice, or out of key order.
+    inconsistent(with_block(last_key, entry_count));
+    inconsistent(with_block(blocks[0] - 1, entry_count));
+    // A base that leaves a gap or overlaps.
+    inconsistent(with_block(last_key + 1, entry_count + 1));
+    inconsistent(with_words(Section::GridBlocks, |blocks| blocks[1] = 1));
+    // Starts that don't end at the entry count, fall back, or don't come
+    // 4,097 to a block.
+    inconsistent(with_u32s(Section::GridBlockCellStart, |starts| {
+        *starts.last_mut().unwrap() += 1
+    }));
+    inconsistent(with_u32s(Section::GridBlockCellStart, |starts| {
+        starts[1] = u32::MAX
+    }));
+    inconsistent(with_u32s(Section::GridBlockCellStart, |starts| {
+        starts[0] = 1
+    }));
+    inconsistent(with_u32s(Section::GridBlockCellStart, |starts| {
+        starts.pop();
+    }));
+    // A half block entry is refused by its element size.
+    let mut raw = format_3();
+    let at = raw.position(Section::GridBlocks.id()).unwrap();
+    let len = raw.sections[at].bytes.len();
+    raw.sections[at].bytes.truncate(len - 8);
+    assert!(open(&raw.encode()).is_err());
+
+    // The spacing must be stated and divide a degree.
+    let set_spacing = |value: Option<u64>| {
+        with_params(|entries| {
+            entries.retain(|entry| entry.0 != param_key::REQUEST_GRID_SPACING);
+            if let Some(value) = value {
+                let at = entries.partition_point(|entry| entry.0 < param_key::REQUEST_GRID_SPACING);
+                entries.insert(
+                    at,
+                    (
+                        param_key::REQUEST_GRID_SPACING,
+                        PARAM_MUST_UNDERSTAND,
+                        value,
+                    ),
+                );
+            }
+        })
+    };
+    open(&set_spacing(Some(1_440 | 1_440 << 32)).encode()).unwrap();
+    assert!(open_error(&set_spacing(None)).contains("missing"));
+    for bad in [0, 1_440, 1_440 << 32, 7 | 1_440 << 32] {
+        let error = open_error(&set_spacing(Some(bad)));
+        assert!(error.contains("spacing"), "{bad}: {error}");
+    }
 }

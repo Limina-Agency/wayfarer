@@ -55,12 +55,13 @@ use wayfarer_package::cch_order::CellTreeEntry;
 use wayfarer_package::format::{
     EDGE_FLAG_BARRIER_AT_TARGET, EDGE_FLAG_COMPLEX_RESTRICTION_FIRST,
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
-    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES,
+    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES, MAX_COST_TUPLES_3,
     MAX_SOURCE_NODE_ID, NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts,
-    PackageFile, PackageFormat, PackageLayout, PackageParams, PackageWriter, RegionInfo,
-    RoutingPackageError, RoutingPackageMetadata, SHAPE_START_STRIDE, Section, WAY_ID_WIDE,
-    e7_from_fixed_xyz, edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7, profile_slot,
-    reverse_heading, split_source_node_id, to_e7, unit_xyz, xyz_from_fixed,
+    PackageFile, PackageFormat, PackageLayout, PackageParams, PackageWriter,
+    REQUEST_GRID_SPACING_TICKS, RegionInfo, RoutingPackageError, RoutingPackageMetadata,
+    SHAPE_START_STRIDE, Section, WAY_ID_WIDE, e7_from_fixed_xyz, edge_id_span_limit, encode_shape,
+    fixed_xyz, is_exact_e7, profile_slot, reverse_heading, split_source_node_id, to_e7, unit_xyz,
+    xyz_from_fixed,
 };
 use wayfarer_package::format::{junction, road_type_rank};
 use wayfarer_package::request::derived_opposing;
@@ -874,7 +875,12 @@ fn build_package_from(
             )
         })
         .collect::<Vec<_>>();
-    let mut tuple_rows = FxHashMap::<(u8, u32, [u32; 3]), u16>::default();
+    // Format 2 indexes the tuples with a u16, format 3 with a u32.
+    let max_tuples = match options.package_format {
+        PackageFormat::V2 => MAX_COST_TUPLES,
+        PackageFormat::V3 => MAX_COST_TUPLES_3,
+    };
+    let mut tuple_rows = FxHashMap::<(u8, u32, [u32; 3]), u32>::default();
     let (mut si_cost_flags, mut si_cost_classes, mut si_speeds) =
         (Vec::new(), Vec::new(), Vec::new());
     let mut si_cost_tuple = Vec::with_capacity(shared_count);
@@ -884,16 +890,16 @@ fn build_package_from(
         let row = match tuple_rows.get(&key) {
             Some(row) => *row,
             None => {
-                if next >= MAX_COST_TUPLES {
+                if next >= max_tuples {
                     return Err(RoutingPackageError::Unsupported(format!(
-                        "more than {MAX_COST_TUPLES} distinct costing tuples"
+                        "more than {max_tuples} distinct costing tuples"
                     )));
                 }
                 si_cost_flags.push(*flags);
                 si_cost_classes.push(*classes);
                 si_speeds.extend_from_slice(speeds);
-                tuple_rows.insert(key, next as u16);
-                next as u16
+                tuple_rows.insert(key, next as u32);
+                next as u32
             }
         };
         si_cost_tuple.push(row);
@@ -904,7 +910,7 @@ fn build_package_from(
     writer.put(Section::SharedInfoCostFlags, si_cost_flags);
     writer.put(Section::SharedInfoCostClasses, si_cost_classes);
     writer.put(Section::SharedInfoSpeeds, si_speeds);
-    writer.put(Section::SharedInfoCostTuple, si_cost_tuple);
+    writer.put_cost_tuples(si_cost_tuple)?;
     writer.put(
         Section::ConditionalEdges,
         (0..edge_count as u32)
@@ -1182,7 +1188,7 @@ fn build_package_from(
     let mut exact_shape_shared = Vec::new();
     let mut exact_shape_start = vec![0u32];
     let mut exact_shape_points = Vec::<f64>::new();
-    shape_start.push(0u32);
+    shape_start.push(0u64);
     for shared in 0..shared_count {
         let info = info_of(shared as u32);
         let (from, to) = si_nodes[shared];
@@ -1214,16 +1220,20 @@ fn build_package_from(
         {
             report.shape_explicit_count += 1;
         }
-        let end = u32::try_from(shape_bytes.len())
-            .map_err(|_| RoutingPackageError::Unsupported("shape section exceeds 4 GiB".into()))?;
+        let end = shape_bytes.len() as u64;
         // The offset of every SHAPE_START_STRIDEth shape, then the end.
         if (shared + 1).is_multiple_of(SHAPE_START_STRIDE) || shared + 1 == shared_count {
             shape_start.push(end);
         }
     }
-    report.shape_byte_len = shape_bytes.len() + shape_start.len() * 4;
+    report.shape_byte_len = shape_bytes.len()
+        + shape_start.len()
+            * match options.package_format {
+                PackageFormat::V2 => 4,
+                PackageFormat::V3 => 8,
+            };
     drop(si_consistent);
-    writer.put(Section::ShapeStart, shape_start);
+    writer.put_byte_offsets(Section::ShapeStart, Section::ShapeStart64, shape_start)?;
     writer.put(Section::ShapeBytes, shape_bytes);
     writer.put(Section::ExactShapeShared, exact_shape_shared);
     writer.put(Section::ExactShapeStart, exact_shape_start);
@@ -1511,10 +1521,11 @@ fn build_package_from(
             default_component: request_sections.default_component(),
             reach_cap: wayfarer_package::request::SATURATION_CAP as u64,
             draft_revision: Some(FORMAT_3_DRAFT_REVISION),
+            request_grid_spacing: Some([REQUEST_GRID_SPACING_TICKS; 2]),
         }
         .to_section(),
     );
-    request_sections.put(&mut writer);
+    request_sections.put(&mut writer)?;
     clock.lap("request sections")?;
 
     drop(shared_infos);

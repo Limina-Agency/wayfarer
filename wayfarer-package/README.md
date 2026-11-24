@@ -56,12 +56,12 @@ compactly or derived from others, so read them through the accessors:
 | Data | Accessor | Layout |
 |---|---|---|
 | Exact node positions | `Sections::node_lat_lng` | Only the nodes that are not their E7 position (`NodeLatLngNodes`, sorted); the others read their E7 position. |
-| Costing inputs | `si_cost_flags[cost_tuple(shared)]` (likewise classes, speeds) | A table of distinct (flags, classes, speeds) tuples and a `u16` tuple per shared info (`SharedInfoCostTuple`). |
+| Costing inputs | `si_cost_flags[cost_tuple(shared)]` (likewise classes, speeds) | A table of distinct (flags, classes, speeds) tuples and a tuple row per shared info (`CostTuples`): `u16` in format 2 (`SharedInfoCostTuple`), `u32` in format 3 (`SharedInfoCostTuple32`). |
 | Way ids | `si_way.get(shared)`, `si_way.same_way(a, b)` | `u32`, with `WAY_ID_WIDE` marking ids kept apart (`SharedInfoWayWide*`): synthetic negative ids. |
 | Edge id → edge | `Sections::edge_for_id` | Not stored: built from `EdgeId` on first use and kept by the `PackageFile`. |
 | Name and ref tokens | `si_name[shared]`, `si_ref[shared]` (`ClassTokens`) | One token per attribute class (`SharedAttrClass`): the class key holds the name and ref. |
 | Route refs | `si_route_refs.get(shared)` | Offsets per attribute class into `SharedInfoRouteRefPool`. |
-| Shapes | `Sections::shared_shape`, `Sections::edge_shape` | `ShapeStart` holds every `SHAPE_START_STRIDE`th (16th) offset; the shapes between are skipped (`skip_shape`). |
+| Shapes | `Sections::shared_shape`, `Sections::edge_shape` | `ShapeStart` (`u32`, format 2) or `ShapeStart64` (`u64`, format 3) holds every `SHAPE_START_STRIDE`th (16th) offset (`ByteOffsets`); the shapes between are skipped (`skip_shape`). |
 | Node unit vectors | `Sections::xyz` | Fixed point (`NodeXyzFixed`), within `FIXED_XYZ_MARGIN_M` of the exact vector. |
 | In-edges, edge sources, end headings | `Sections::in_edges`, `Sections::edge_source`, `Sections::heading_end` | Derived from each edge's twin (`EdgeTwin`, the reverse edge of the same shared info) and the edges without one (`LoneInEdge`, `LoneHeadingEnd`). |
 
