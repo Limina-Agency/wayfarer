@@ -2236,9 +2236,9 @@ impl PackageFile {
         }
         if RESERVED_ZERO_SECTIONS.iter().any(|section| {
             let (offset, len) = self.sections[*section as usize];
-            self.storage.bytes()[offset..offset + len]
-                .iter()
-                .any(|byte| *byte != 0)
+            !all_of(&self.storage.bytes()[offset..offset + len], |byte| {
+                *byte == 0
+            })
         }) {
             return invalid("reserved section is not zero");
         }
@@ -2254,10 +2254,9 @@ impl PackageFile {
         let tuples = cost_rows;
         if tuples > MAX_COST_TUPLES
             || (c.shared_info_count > 0 && tuples == 0)
-            || self
-                .slice::<u16>(Section::SharedInfoCostTuple)
-                .iter()
-                .any(|tuple| usize::from(*tuple) >= tuples)
+            || !all_of(self.slice::<u16>(Section::SharedInfoCostTuple), |tuple| {
+                usize::from(*tuple) < tuples
+            })
         {
             return invalid("costing tuples are invalid");
         }
@@ -2273,11 +2272,9 @@ impl PackageFile {
         if !self.metadata.sar.is_valid() {
             return invalid("sar minimum factors are invalid");
         }
-        if self
-            .slice::<u8>(Section::SharedInfoLegalReason)
-            .iter()
-            .any(|reason| !crate::sar::LegalReason(*reason).is_valid())
-        {
+        if !all_of(self.slice::<u8>(Section::SharedInfoLegalReason), |reason| {
+            crate::sar::LegalReason(*reason).is_valid()
+        }) {
             return invalid("legal reasons are invalid");
         }
         let barrier_nodes = self.slice::<u32>(Section::BarrierNode);
@@ -2307,23 +2304,17 @@ impl PackageFile {
         {
             return invalid("node source ids are invalid");
         }
-        if self.slice::<u8>(Section::EdgeJunction).iter().any(|byte| {
-            byte & !(junction::CONTROL_MASK | junction::MINOR_APPROACH) != 0
-                || byte & junction::CONTROL_MASK > TrafficControl::MAX_CODE
+        if !all_of(self.slice::<u8>(Section::EdgeJunction), |byte| {
+            byte & !(junction::CONTROL_MASK | junction::MINOR_APPROACH) == 0
+                && byte & junction::CONTROL_MASK <= TrafficControl::MAX_CODE
         }) {
             return invalid("edge junction section is malformed");
         }
         // Headings are whole degrees below 360 (costing folds their
         // differences into 0..=180 and would overflow past it), or none.
         let heading_ok = |heading: &u16| *heading < 360 || *heading == NO_HEADING;
-        if !self
-            .slice::<u16>(Section::EdgeHeadingStart)
-            .iter()
-            .all(heading_ok)
-            || !self
-                .slice::<u16>(Section::LoneHeadingEnd)
-                .iter()
-                .all(heading_ok)
+        if !all_of(self.slice::<u16>(Section::EdgeHeadingStart), heading_ok)
+            || !all_of(self.slice::<u16>(Section::LoneHeadingEnd), heading_ok)
         {
             return invalid("edge headings out of range");
         }
@@ -2340,33 +2331,24 @@ impl PackageFile {
         let first_out = self.slice::<u32>(Section::NodeFirstOut);
         if first_out.first() != Some(&0)
             || first_out.last().map(|last| *last as usize) != Some(c.edge_count)
-            || first_out.windows(2).any(|pair| pair[0] > pair[1])
+            || !ascending(first_out)
         {
             return invalid("node adjacency offsets are not monotonic");
         }
         let n = c.node_count as u32;
         let e = c.edge_count as u32;
         let s = c.shared_info_count as u32;
-        if self
-            .slice::<u32>(Section::EdgeTarget)
-            .iter()
-            .any(|v| *v >= n)
-            || self
-                .slice::<u32>(Section::EdgeSharedInfo)
-                .iter()
-                .any(|v| *v >= s)
+        if !all_of(self.slice::<u32>(Section::EdgeTarget), |v| *v < n)
+            || !all_of(self.slice::<u32>(Section::EdgeSharedInfo), |v| *v < s)
         {
             return invalid("edge reference out of range");
         }
         // The searches need non-negative arc costs: a negative or NaN one
         // breaks the label order (a path's predecessors can then form a
         // cycle). Infinity marks an edge a column can't use.
-        let non_negative = |section: Section| self.slice::<f32>(section).iter().all(|v| *v >= 0.0);
-        let finite = |section: Section| {
-            self.slice::<f32>(section)
-                .iter()
-                .all(|v| v.is_finite() && *v >= 0.0)
-        };
+        let non_negative = |section: Section| all_of(self.slice::<f32>(section), |v| *v >= 0.0);
+        let finite =
+            |section: Section| all_of(self.slice::<f32>(section), |v| v.is_finite() && *v >= 0.0);
         if !non_negative(Section::EdgeCost)
             || !non_negative(Section::EdgeDuration)
             || !finite(Section::EdgeLength)
@@ -2386,13 +2368,8 @@ impl PackageFile {
         {
             return invalid("edge id base overflows");
         }
-        let mut seen = vec![0u64; span_limit.div_ceil(64)];
-        for slot in self.slice::<u32>(Section::EdgeId) {
-            let slot = *slot as usize;
-            if slot >= span_limit || seen[slot / 64] & (1 << (slot % 64)) != 0 {
-                return invalid("edge ids are not distinct or span too many values");
-            }
-            seen[slot / 64] |= 1 << (slot % 64);
+        if !distinct_below(self.slice::<u32>(Section::EdgeId), span_limit) {
+            return invalid("edge ids are not distinct or span too many values");
         }
         self.check_twins()?;
         let pool_len = self.slice::<u32>(Section::SharedInfoRouteRefPool).len();
@@ -2437,11 +2414,9 @@ impl PackageFile {
         {
             return invalid("complex restrictions are invalid");
         }
-        if self
-            .slice::<u8>(Section::EdgeRoadRank)
-            .iter()
-            .any(|rank| road_type_from_rank(*rank).is_none())
-        {
+        if !all_of(self.slice::<u8>(Section::EdgeRoadRank), |rank| {
+            road_type_from_rank(*rank).is_some()
+        }) {
             return invalid("edge road rank out of range");
         }
         let conditional = self.slice::<u32>(Section::ConditionalEdges);
@@ -2538,35 +2513,45 @@ impl PackageFile {
     /// bits in `LoneInPresent`. Then the twins of a node's out-edges and its
     /// lone in-edges are exactly the edges into it.
     fn check_twins(&self) -> Result<(), RoutingPackageError> {
+        use rayon::prelude::*;
         let c = self.counts;
         let invalid = || RoutingPackageError::Invalid("edge twins are invalid".into());
         let first_out = self.slice::<u32>(Section::NodeFirstOut);
         let targets = self.slice::<u32>(Section::EdgeTarget);
         let shared = self.slice::<u32>(Section::EdgeSharedInfo);
         let twins = self.slice::<u32>(Section::EdgeTwin);
-        let mut lone = 0;
-        for node in 0..c.node_count {
-            for edge in first_out[node]..first_out[node + 1] {
-                let twin = twins[edge as usize];
-                if twin == NO_TWIN {
-                    lone += 1;
-                    continue;
-                }
-                let at = twin as usize;
-                if at >= c.edge_count
-                    || twin == edge
-                    || twins[at] != edge
-                    || targets[at] as usize != node
-                    || shared[at] != shared[edge as usize]
-                {
-                    return Err(invalid());
-                }
-            }
-        }
+        // By blocks of nodes in parallel: the edges without a twin, or
+        // `None` at a bad twin.
+        let lone = (0..c.node_count)
+            .into_par_iter()
+            .with_min_len(CHECK_NODES)
+            .try_fold(
+                || 0usize,
+                |mut lone, node| {
+                    for edge in first_out[node]..first_out[node + 1] {
+                        let twin = twins[edge as usize];
+                        if twin == NO_TWIN {
+                            lone += 1;
+                            continue;
+                        }
+                        let at = twin as usize;
+                        if at >= c.edge_count
+                            || twin == edge
+                            || twins[at] != edge
+                            || targets[at] as usize != node
+                            || shared[at] != shared[edge as usize]
+                        {
+                            return None;
+                        }
+                    }
+                    Some(lone)
+                },
+            )
+            .try_reduce(|| 0, |a, b| Some(a + b))
+            .ok_or_else(invalid)?;
         let rank = self.slice::<u32>(Section::CchRank);
-        if !rank.is_empty()
-            && (rank.len() != c.node_count || !crate::cch_order::is_permutation(rank))
-        {
+        // n distinct ranks below n: a permutation.
+        if !rank.is_empty() && (rank.len() != c.node_count || !distinct_below(rank, c.node_count)) {
             return Err(invalid());
         }
         if self.layout.nodes_by_rank
@@ -3702,6 +3687,48 @@ impl WayIds<'_> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Elements per task in the open checks' parallel scans: large enough that
+/// a small section is one task, run where it is called.
+pub(crate) const CHECK_CHUNK: usize = 1 << 16;
+
+/// Nodes per task where an open check walks each node's edges.
+const CHECK_NODES: usize = 1 << 13;
+
+/// Whether `ok` holds for every value; checked in parallel by chunks, as
+/// any section the size of the graph faults its pages in.
+pub(crate) fn all_of<T: Sync>(values: &[T], ok: impl Fn(&T) -> bool + Sync) -> bool {
+    use rayon::prelude::*;
+    values
+        .par_chunks(CHECK_CHUNK)
+        .all(|chunk| chunk.iter().all(&ok))
+}
+
+/// Whether `values` never decrease, checked in parallel.
+pub(crate) fn ascending(values: &[u32]) -> bool {
+    use rayon::prelude::*;
+    values
+        .par_windows(2)
+        .with_min_len(CHECK_CHUNK)
+        .all(|pair| pair[0] <= pair[1])
+}
+
+/// Whether `values` are distinct and below `limit`, checked in parallel
+/// against a bitset of the values seen.
+fn distinct_below(values: &[u32], limit: usize) -> bool {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let seen: Vec<AtomicU64> = (0..limit.div_ceil(64))
+        .into_par_iter()
+        .with_min_len(CHECK_CHUNK)
+        .map(|_| AtomicU64::new(0))
+        .collect();
+    all_of(values, |value| {
+        let value = *value as usize;
+        let bit = 1 << (value % 64);
+        value < limit && seen[value / 64].fetch_or(bit, Relaxed) & bit == 0
+    })
 }
 
 /// The largest span of edge ids (largest id - smallest + 1) a package may
@@ -5163,5 +5190,46 @@ mod identity_tests {
             RegionInfo::stand_alone([1, 2, 3, 4]).to_bytes()[..32],
             [0; 32]
         );
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+
+    /// The parallel scans find a bad value in any chunk, on any number of
+    /// threads, as the serial scans did.
+    #[test]
+    fn parallel_checks_find_a_bad_value_in_any_chunk() {
+        let n = CHECK_CHUNK * 3 + 17;
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let values = (0..n as u32).collect::<Vec<_>>();
+                assert!(all_of(&values, |v| (*v as usize) < n));
+                assert!(ascending(&values));
+                assert!(distinct_below(&values, n));
+                assert!(all_of::<u32>(&[], |_| false));
+                assert!(ascending(&[]));
+                assert!(distinct_below(&[], 0));
+                for at in [0, CHECK_CHUNK - 1, CHECK_CHUNK, 2 * CHECK_CHUNK + 5, n - 1] {
+                    assert!(!all_of(&values, |v| *v as usize != at), "{at}");
+                    let mut bad = values.clone();
+                    // A step down, at a chunk's edge too.
+                    bad[at] = if at == 0 { 2 } else { bad[at - 1] - 1 };
+                    if at + 1 < n {
+                        assert!(!ascending(&bad[..]), "{threads} threads, at {at}");
+                    }
+                    // A repeat far from its first, and a value past the limit.
+                    let mut repeat = values.clone();
+                    repeat[at] = values[(at + n / 2) % n];
+                    assert!(!distinct_below(&repeat, n), "{threads} threads, at {at}");
+                    assert!(!distinct_below(&values, n - 1));
+                }
+            });
+        }
     }
 }
