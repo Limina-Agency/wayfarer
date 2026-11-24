@@ -103,6 +103,33 @@ pub(crate) fn within_node_edge_key(
     )
 }
 
+/// Whether `graph`'s ids are those of a package order: node `i` has id `i`,
+/// edge `i` id `PACKAGE_EDGE_ID_BASE + i` and shared info `i` id `i + 1`,
+/// edges are grouped by source and every node has an edge. A graph
+/// [`renumber_in_package_order`] has renumbered is; the package build
+/// renumbers any other graph it writes in format 3. It reads every id once.
+pub fn has_package_order_ids(graph: &RoadGraph) -> bool {
+    let network = &graph.graph;
+    let sources = network.sources();
+    let mut used = vec![false; network.node_count()];
+    for node in sources.iter().chain(network.targets()) {
+        if let Some(slot) = used.get_mut(*node as usize) {
+            *slot = true;
+        }
+    }
+    sources.is_sorted()
+        && !used.contains(&false)
+        && (0..network.node_count()).all(|node| network.node_id(node) == node as i64)
+        && (0..network.edge_count())
+            .all(|edge| network.edge_id(edge) == PACKAGE_EDGE_ID_BASE + edge as u64)
+        && graph
+            .shared_edge_infos
+            .edges()
+            .iter()
+            .enumerate()
+            .all(|(index, info)| info.shared_edge_info_id == index as u64 + 1)
+}
+
 /// Gives `graph` the ids its package should have, and stores its nodes,
 /// edges and shared infos in that order: node, edge and shared-info ids
 /// become positions in the package's order (nodes and shared infos no edge

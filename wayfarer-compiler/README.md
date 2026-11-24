@@ -135,8 +135,9 @@ Apple-silicon Mac with 10 cores, 2026-11-17):
 
 The packages in the table are format 1, as 0.1.0 wrote them. Format 2 (0.2.0)
 stores a CCH node order instead of landmark distances: Monaco's package is
-`2c86fe9f…`, 665,408 B (`fixtures/monaco-info.json`) and Małopolskie's
-176 MiB.
+`2c86fe9f…`, 665,408 B and Małopolskie's 176 MiB. Format 3 (0.5) numbers
+nodes by that order and implies the ids: Monaco's package is 680,704 B
+(`fixtures/monaco-info.json`) and Małopolskie's 170 MiB.
 
 At Monaco's size both profiles keep the node store in RAM and the peak is
 mostly the binary, its threads and buffers; the profiles differ in batch and

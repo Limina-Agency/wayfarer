@@ -1433,7 +1433,6 @@ fn point_at_distance(points: &[GeoPoint], distance_m: f64) -> GeoPoint {
 mod tests {
     use super::*;
     use crate::graph_view::PackageGraphView;
-    use crate::test_support::PackageBuildOptions;
     use crate::types::{CorrelatedLocation, CorrelationSide, RouteDiagnostics};
     use std::sync::Arc;
     use wayfarer_package::{DirectionalAccess, RoadType};
@@ -1535,7 +1534,7 @@ mod tests {
         }
         let graph = builder.finish();
         let (package, _) =
-            crate::test_support::package(&graph, &PackageBuildOptions::default()).unwrap();
+            crate::test_support::package(&graph, &crate::test_support::test_options()).unwrap();
         let view = PackageGraphView::new(Arc::new(package));
         let edge_ids = graph
             .graph
@@ -1607,7 +1606,7 @@ mod tests {
         }
         let graph = builder.finish();
         let (package, _) =
-            crate::test_support::package(&graph, &PackageBuildOptions::default()).unwrap();
+            crate::test_support::package(&graph, &crate::test_support::test_options()).unwrap();
         let view = PackageGraphView::new(Arc::new(package));
         let records = graph
             .graph
@@ -1655,7 +1654,7 @@ mod tests {
         builder.push_way(graph_step_way());
         let graph = builder.finish();
         let (package, _) =
-            crate::test_support::package(&graph, &PackageBuildOptions::default()).unwrap();
+            crate::test_support::package(&graph, &crate::test_support::test_options()).unwrap();
         let view = PackageGraphView::new(Arc::new(package));
         let edge_ids = graph
             .graph

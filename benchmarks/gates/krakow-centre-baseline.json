@@ -1,4 +1,4 @@
-{"corpus": "krakow-centre-corpus.json", "corpusSha256": "89be6920769e77614e1041b5a2278ca7f32a7e83d7748b2fc0c1e5988357800b", "datasetHash": "572648914f1d818754e43121eba64af7cf902c2bc8edbe4e9a707ad5c4b44674", "randomPairs": 60, "cases": {
+{"corpus": "krakow-centre-corpus.json", "corpusSha256": "89be6920769e77614e1041b5a2278ca7f32a7e83d7748b2fc0c1e5988357800b", "datasetHash": "86f7a58058d29182d08bb97d1ff57851af1f5180a36ab143cfe2f653d25017c1", "randomPairs": 60, "cases": {
 "krakow-local-core": {"cost": 388.2182109062491, "status": "ok", "visited": 220},
 "krakow-kazimierz-podgorze-local": {"cost": 301.2011035102157, "status": "ok", "visited": 224},
 "krakow-rynek-wawel": {"cost": 358.92772544384, "status": "ok", "visited": 164},
@@ -14,7 +14,7 @@
 "krakow-kazimierz-podgorze-local_hinted_alt": {"cost": 348.7979840550427, "status": "ok", "visited": 248},
 "krakow-rynek-wawel_hinted_alt": {"cost": 241.36108897686006, "status": "ok", "visited": 135},
 "krakow-kazimierz-rynek_hinted_alt": {"cost": 690.6773928427698, "status": "ok", "visited": 566},
-"krakow-centre-west-east_hinted_alt": {"cost": 535.9715931451382, "status": "ok", "visited": 1641},
+"krakow-centre-west-east_hinted_alt": {"cost": 535.9715931451382, "status": "ok", "visited": 1636},
 "krakow-centre-north-south_hinted_alt": {"cost": 543.1044594698286, "status": "ok", "visited": 410},
 "krakow-podgorze-kleparz_hinted_alt": {"cost": 654.8182966697052, "status": "ok", "visited": 704},
 "krakow-local-core-on-foot_hinted_alt": {"cost": 640.492197075631, "status": "ok", "visited": 257},
@@ -64,9 +64,9 @@
 "random_040": {"cost": 84.42732611894607, "status": "ok", "visited": 77},
 "random_041": {"cost": 643.2460549176369, "status": "ok", "visited": 739},
 "random_042": {"cost": 286.1165414959878, "status": "ok", "visited": 285},
-"random_043": {"cost": 1677.7971461831298, "status": "ok", "visited": 1771},
-"random_044": {"cost": 159.0988528523825, "status": "ok", "visited": 255},
-"random_045": {"cost": 286.18192396242193, "status": "ok", "visited": 313},
+"random_043": {"cost": 1677.7971461831298, "status": "ok", "visited": 1757},
+"random_044": {"cost": 159.0988528523825, "status": "ok", "visited": 260},
+"random_045": {"cost": 286.18192396242193, "status": "ok", "visited": 317},
 "random_046": {"cost": 388.0094131437707, "status": "ok", "visited": 407},
 "random_047": {"cost": 1875.0057495448036, "status": "ok", "visited": 960},
 "random_048": {"cost": 374.1094179964977, "status": "ok", "visited": 217},

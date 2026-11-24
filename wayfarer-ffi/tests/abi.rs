@@ -29,7 +29,7 @@ fn open() -> *mut WayfarerPackage {
     let status = unsafe { wayfarer_open(path.as_ptr(), ptr::null(), &mut package, &mut out) };
     let info = take(out);
     assert_eq!(status, WAYFARER_OK, "{info}");
-    assert_eq!(info["formatVersion"], 2);
+    assert_eq!(info["formatVersion"], 3);
     assert_eq!(info["costingModelVersion"], 1);
     package
 }
@@ -51,7 +51,7 @@ fn versions_describe_the_library() {
     let versions = take(wayfarer_versions());
     assert_eq!(versions["abi"], 1);
     // [min, max].
-    assert_eq!(versions["readableFormats"], serde_json::json!([2, 2]));
+    assert_eq!(versions["readableFormats"], serde_json::json!([2, 3]));
     assert_eq!(versions["costingModel"], 1);
 }
 
@@ -217,8 +217,9 @@ fn packages_open_from_non_ascii_paths() {
     let status = unsafe { wayfarer_verify(utf8.as_ptr(), &mut out) };
     let verified = take(out);
     assert_eq!(status, WAYFARER_OK, "{verified}");
-    // Format 2: both hashes are the root checksum.
-    assert_eq!(info["contentHash"], info["datasetHash"]);
+    // Format 3: the dataset hash is the identity hash, apart from the
+    // content hash (the root checksum).
+    assert_ne!(info["contentHash"], info["datasetHash"]);
     assert_eq!(verified["datasetHash"], info["datasetHash"]);
     assert_eq!(verified["contentHash"], info["contentHash"]);
 

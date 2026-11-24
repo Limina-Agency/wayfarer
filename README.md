@@ -158,8 +158,9 @@ which strings and handles the caller frees.
 ## Compatibility
 
 - **Package format.** An engine opens formats
-  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2 today:
-  0.2.0 dropped format 1, so recompile older packages). A layout change bumps
+  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=3 since
+  0.5, which writes format 3; 0.2.0 dropped format 1, so recompile older
+  packages). Engines before 0.5 don't open format 3. A layout change bumps
   the format and keeps reading the previous one for at least a release;
   every readable format has a frozen package under
   `fixtures/routing/format-<N>/` that the tests open and route.

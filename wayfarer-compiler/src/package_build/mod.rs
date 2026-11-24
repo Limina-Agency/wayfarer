@@ -55,13 +55,12 @@ use wayfarer_package::cch_order::CellTreeEntry;
 use wayfarer_package::format::{
     EDGE_FLAG_BARRIER_AT_TARGET, EDGE_FLAG_COMPLEX_RESTRICTION_FIRST,
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
-    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES, MAX_COST_TUPLES_3,
-    MAX_SOURCE_NODE_ID, NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts,
-    PackageFile, PackageFormat, PackageLayout, PackageParams, PackageWriter,
-    REQUEST_GRID_SPACING_TICKS, RegionInfo, RoutingPackageError, RoutingPackageMetadata,
-    SHAPE_START_STRIDE, Section, WAY_ID_WIDE, e7_from_fixed_xyz, edge_id_span_limit, encode_shape,
-    fixed_xyz, is_exact_e7, profile_slot, reverse_heading, split_source_node_id, to_e7, unit_xyz,
-    xyz_from_fixed,
+    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, MAX_COST_TUPLES, MAX_COST_TUPLES_3, MAX_SOURCE_NODE_ID,
+    NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts, PackageFile,
+    PackageFormat, PackageLayout, PackageParams, PackageWriter, REQUEST_GRID_SPACING_TICKS,
+    RegionInfo, RoutingPackageError, RoutingPackageMetadata, SHAPE_START_STRIDE, Section,
+    WAY_ID_WIDE, e7_from_fixed_xyz, edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7,
+    profile_slot, reverse_heading, split_source_node_id, to_e7, unit_xyz, xyz_from_fixed,
 };
 use wayfarer_package::format::{junction, road_type_rank};
 use wayfarer_package::request::derived_opposing;
@@ -85,10 +84,8 @@ pub struct PackageBuildOptions {
     /// engine builds its potentials (the default). Without it searches
     /// bound with the straight line alone (tests and benchmarks).
     pub cch_order: bool,
-    /// The package format to write: format 2 (the default), or format 3's
-    /// current draft, which only a build of the same draft revision opens
-    /// (`docs/design/format-3.md`). Format 3 stays behind this switch until
-    /// its release.
+    /// The package format to write: format 3 (the default,
+    /// `docs/design/format-3.md`), or format 2 for engines older than 0.5.
     pub package_format: PackageFormat,
 }
 
@@ -97,7 +94,7 @@ impl Default for PackageBuildOptions {
         Self {
             profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
             cch_order: true,
-            package_format: PackageFormat::V2,
+            package_format: PackageFormat::V3,
         }
     }
 }
@@ -475,14 +472,21 @@ fn build_package_from(
     let mut clock = PhaseClock::new(job);
     let mut report = PackageBuildReport::default();
 
+    // Format 3 implies the ids from the package order, so a graph that a
+    // compile hasn't renumbered (`renumber_in_package_order`) is renumbered
+    // here: its node, edge and shared-info ids change.
+    if implied_ids && !order::has_package_order_ids(&graph) {
+        order::renumber_in_package_order(&mut graph)?;
+    }
     // Format 3 numbers nodes by CCH rank (`docs/design/format-3.md`, section
     // 8): the cell-major order of the graph in package order, then the graph
     // renumbered by it, so that every dissection cell is one range of node
-    // ids, edges, shared infos and shapes.
+    // ids, edges, shared infos and shapes. It runs first, so it reports as
+    // the start of the build; the CCH order stage then has nothing left.
     let nodes_by_rank = implied_ids && options.cch_order;
     let cell_tree = if nodes_by_rank {
         job.report(
-            CompileStage::CchOrder,
+            CompileStage::BuildPackage,
             Some(0.0),
             0,
             "Ordering nodes for CCH potentials",
@@ -492,8 +496,8 @@ fn build_package_from(
         order::renumber_by_rank(&mut graph, &order)?;
         report.cch_order_ms = order_started.elapsed().as_millis();
         job.report(
-            CompileStage::CchOrder,
-            Some(1.0),
+            CompileStage::BuildPackage,
+            Some(0.0),
             0,
             "Ordered nodes for CCH potentials",
         );
@@ -1520,7 +1524,6 @@ fn build_package_from(
             mode_mask_union: metadata.mode_mask_union,
             default_component: request_sections.default_component(),
             reach_cap: wayfarer_package::request::SATURATION_CAP as u64,
-            draft_revision: Some(FORMAT_3_DRAFT_REVISION),
             request_grid_spacing: Some([REQUEST_GRID_SPACING_TICKS; 2]),
         }
         .to_section(),
@@ -1552,6 +1555,18 @@ fn build_package_from(
         clock.lap("cch order")?;
         cch_rank
     } else {
+        if nodes_by_rank {
+            // Ordered at the start of the build.
+            for fraction in [0.0, 1.0] {
+                job.report(
+                    CompileStage::CchOrder,
+                    Some(fraction),
+                    0,
+                    "Ordered nodes for CCH potentials",
+                );
+            }
+            job.check().map_err(|_| cancelled_error())?;
+        }
         Vec::new()
     };
     let counts = PackageCounts {
@@ -1914,7 +1929,7 @@ mod tests {
 
     /// The package of `graph`, opened by the engine.
     fn in_memory(graph: &RoadGraph) -> (wayfarer::RoutingPackage, PackageBuildReport) {
-        let (bytes, report) = package_bytes(graph, &PackageBuildOptions::default()).unwrap();
+        let (bytes, report) = package_bytes(graph, &format_2_options()).unwrap();
         (
             wayfarer::RoutingPackage::from_bytes(&bytes).unwrap(),
             report,
@@ -2138,8 +2153,7 @@ mod tests {
 
     #[test]
     fn open_rejects_duplicate_edge_ids() {
-        let (mut bytes, _) =
-            package_bytes(&compact_layout_graph(), &PackageBuildOptions::default()).unwrap();
+        let (mut bytes, _) = package_bytes(&compact_layout_graph(), &format_2_options()).unwrap();
         let (offset, len) = PackageFile::from_bytes(&bytes)
             .unwrap()
             .section_range(Section::EdgeId);
@@ -2174,6 +2188,14 @@ mod tests {
         wayfarer_road_graph::enhance_road_graph(&mut graph);
         order::renumber_in_package_order(&mut graph).unwrap();
         graph
+    }
+
+    /// Format 2, which keeps the road graph's ids that the tests compare.
+    fn format_2_options() -> PackageBuildOptions {
+        PackageBuildOptions {
+            package_format: PackageFormat::V2,
+            ..PackageBuildOptions::default()
+        }
     }
 
     fn format_3_options() -> PackageBuildOptions {
@@ -2227,7 +2249,7 @@ mod tests {
         );
         assert_eq!(extent, [500_000_000, 199_000_000, 500_030_000, 199_040_000]);
 
-        let (bytes, _) = package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+        let (bytes, _) = package_bytes(&graph, &format_2_options()).unwrap();
         let package = PackageFile::from_bytes(&bytes).unwrap();
         let view = package.view();
         assert!(!package.has_osm_node_ids());
@@ -2253,7 +2275,7 @@ mod tests {
                 package_bytes(&graph, &format_3_options()),
                 Err(RoutingPackageError::Unsupported(message)) if message.contains(&id.to_string())
             ));
-            package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+            package_bytes(&graph, &format_2_options()).unwrap();
         }
     }
 }

@@ -18,9 +18,16 @@ pub(crate) fn package(
 }
 
 /// The unit tests' package options: the compiler's default (with the CCH
-/// order, so searches bound with the potentials).
+/// order, so searches bound with the potentials), in format 2, which keeps
+/// the road graph's node, edge and shared-info ids. The reference oracle
+/// and the tests' fixtures name elements by those ids; format 3 renumbers
+/// them by CCH rank (`wayfarer/tests/package_format_3.rs` checks that it
+/// routes as format 2 does).
 pub(crate) fn test_options() -> PackageBuildOptions {
-    PackageBuildOptions::default()
+    PackageBuildOptions {
+        package_format: wayfarer_package::format::PackageFormat::V2,
+        ..PackageBuildOptions::default()
+    }
 }
 
 /// An engine over the package of `graph`, built with [`test_options`].
