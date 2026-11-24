@@ -1264,6 +1264,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfarer-sar"
+version = "0.4.0"
+dependencies = [
+ "libm",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wayfarer",
+ "wayfarer-compiler",
+ "wayfarer-costing",
+ "wayfarer-package",
+ "wayfarer-road-graph",
+]
+
+[[package]]
 name = "wayfarer-service"
 version = "0.4.0"
 dependencies = [
