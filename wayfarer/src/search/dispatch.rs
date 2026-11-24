@@ -231,6 +231,7 @@ impl Search<'_> {
             bidirectional,
             restriction_penalty,
             pieces,
+            request_metric: None,
         };
         let mut counters = SearchCounters::default();
         let mut state = graph.take_state();

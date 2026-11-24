@@ -27,7 +27,7 @@ use std::collections::BinaryHeap;
 use super::{HeapEntry, NO_LABEL, SEED_TRAVERSED_FRACTION_EPSILON, SearchState, tie_window};
 use crate::costing::{CostingPolicy, EdgeCostDecision};
 use crate::package::SearchGraph;
-use crate::package::cch::{GatedPotential, PotentialScratch};
+use crate::package::cch::{EXACT_GATE_NODES, GatedPotential, OwnMetric, PotentialScratch};
 use crate::package::columns::CostColumn;
 use crate::package::restrictions::{ComplexAutomata, ROOT};
 use crate::package::search::gates::{DiscountGate, discount_gates, gate_limit};
@@ -138,6 +138,8 @@ pub(crate) struct AnalysisQuery<'c> {
     /// The SAR `turn_restrictions` penalty per violated restriction (`None`:
     /// restrictions ban; see `SearchQuery::restriction_penalty`).
     pub restriction_penalty: Option<f64>,
+    /// The query's own costs customized (`SearchQuery::request_metric`).
+    pub request_metric: Option<std::sync::Arc<OwnMetric>>,
 }
 
 impl AnalysisQuery<'_> {
@@ -379,7 +381,34 @@ impl OverrideBounds {
     pub(crate) fn fell_back(&self) -> bool {
         self.fallback
     }
+
+    /// Whether `searches` searches (a matrix's cells) under these bounds
+    /// should bound with the request's own costs customized
+    /// ([`super::request_metric`]) instead: when the gates have more nodes
+    /// on a side than the potentials take exactly
+    /// ([`EXACT_GATE_NODES`]) or fell back, the bounds get weak and each
+    /// search floods, so one customization (0.1-0.3 s on a region) pays for
+    /// itself over [`REQUEST_METRIC_MIN_SEARCHES`] searches.
+    pub(crate) fn wants_request_metric(&self, searches: usize) -> bool {
+        if searches < REQUEST_METRIC_MIN_SEARCHES {
+            return false;
+        }
+        if self.fallback {
+            return true;
+        }
+        let side = |node: fn(&DiscountGate) -> u32| {
+            let mut nodes = self.gates.iter().map(node).collect::<Vec<_>>();
+            nodes.sort_unstable();
+            nodes.dedup();
+            nodes.len()
+        };
+        side(|gate| gate.source) > EXACT_GATE_NODES || side(|gate| gate.target) > EXACT_GATE_NODES
+    }
 }
+
+/// The least number of searches that customize a request metric (see
+/// [`OverrideBounds::wants_request_metric`]).
+pub(crate) const REQUEST_METRIC_MIN_SEARCHES: usize = 100;
 
 /// Goal-direction bounds that stay admissible and consistent under
 /// `overrides` and a patch's split fragment costs (`split_cost`).
@@ -971,6 +1000,7 @@ pub(crate) fn matrix_cell(
         bidirectional: true,
         restriction_penalty: query.restriction_penalty,
         pieces: None,
+        request_metric: query.request_metric.as_ref(),
     };
     let mut counters = super::SearchCounters::default();
     let outcome = super::run(graph, state, &route_query, &mut counters);
@@ -1151,12 +1181,15 @@ fn matrix_row_with(
         nodes
     };
     let mut open = searched;
-    let plan = super::potential_plan(
-        graph,
-        &query.column,
-        &query.cost_overrides,
-        !query.gates.is_empty(),
-    );
+    let plan = match &query.request_metric {
+        Some(metric) => super::request_plan(graph, metric),
+        None => super::potential_plan(
+            graph,
+            &query.column,
+            &query.cost_overrides,
+            !query.gates.is_empty(),
+        ),
+    };
     let potential_for = |open: &[bool]| match &plan {
         Some(plan) => {
             let targets = open_target_nodes(open);

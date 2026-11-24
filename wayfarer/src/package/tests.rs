@@ -1772,8 +1772,22 @@ fn matrix_cells_cross_no_pocket_of_another_point() {
             );
             request.options.max_correlation_distance_m = 15;
             test_mode::set(Some(mode));
-            let result = engine.matrix(request);
+            let result = engine.matrix(request.clone());
+            // Without edge ids the pocket check still sees the paths (the
+            // reference engine always returns them).
+            request.include_edge_ids = false;
+            let bare = engine.matrix(request);
             test_mode::set(None);
+            for (bare, full) in bare.cells.iter().zip(&result.cells) {
+                if name == "reference" {
+                    break;
+                }
+                let full = crate::RouteMatrixCell {
+                    edge_ids: Vec::new(),
+                    ..full.clone()
+                };
+                assert_eq!(*bare, full, "{context}");
+            }
             let [across, into] = &result.cells[..] else {
                 panic!("{context}: {result:?}");
             };
@@ -9192,6 +9206,89 @@ fn matrices_bounded_by_cch_potentials_equal_matrices_bounded_by_the_straight_lin
             }
         }
     }
+    assert!(cells > 1_000, "only {cells} cells");
+}
+
+/// Matrices bounded by the request's own costs customized (M4) find the
+/// cells the straight line does: discounts (per-edge options, and a random
+/// discount on many edges), past the gate limit too, pairwise and in rows.
+#[test]
+fn matrices_bounded_by_the_request_metric_equal_matrices_bounded_by_the_straight_line() {
+    use crate::matrix::{MatrixMode, test_mode};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("costing.mrt");
+    let graph = costing_grid_graph();
+    let fixture = persist(&graph, &path);
+    let (straight, potentials) = straight_line_and_potential_engines(&fixture, &path);
+    let sources = grid_points();
+    let targets = many_grid_targets()
+        .into_iter()
+        .step_by(4)
+        .collect::<Vec<_>>();
+    let mut per_edge = crate::RouteOptions::default();
+    apply_per_edge_options(&graph, &mut per_edge);
+    // Every other edge discounted at random, on top of the per-edge options.
+    let mut discounted = per_edge.clone();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for edge in graph.graph.edge_references() {
+        let edge_id = edge.weight().edge_id;
+        if next() < 0.5 && !discounted.edge_cost_multipliers.contains_key(&edge_id) {
+            discounted
+                .edge_cost_multipliers
+                .insert(edge_id, 0.2 + 0.7 * next());
+        }
+    }
+    let mut cells = 0usize;
+    for (name, costing) in costing_option_sets() {
+        for (variant, options) in [("per-edge", &per_edge), ("discounted", &discounted)] {
+            for fallback in [false, true] {
+                search::gates::force_gate_limit(fallback.then_some(0));
+                for profile in ALL_TEST_PROFILES {
+                    for mode in [MatrixMode::Pairwise, MatrixMode::Rows] {
+                        let request = || {
+                            let mut request = crate::RouteMatrixRequest::new(
+                                sources.clone(),
+                                targets.clone(),
+                                profile,
+                            );
+                            request.options = options.clone();
+                            request.options.max_correlation_distance_m = 60;
+                            request.options.costing = costing;
+                            request
+                        };
+                        test_mode::set(Some(mode));
+                        let expected = straight.matrix(request());
+                        test_mode::set_request_metric(Some(true));
+                        let actual = potentials.matrix(request());
+                        test_mode::set_request_metric(None);
+                        test_mode::set(None);
+                        let context = format!("{name} {variant} {fallback} {profile:?} {mode:?}");
+                        assert_eq!(expected.cells.len(), actual.cells.len(), "{context}");
+                        for (expected, actual) in expected.cells.iter().zip(&actual.cells) {
+                            let cell = format!(
+                                "{context} cell {} -> {}",
+                                expected.source_index, expected.target_index
+                            );
+                            assert_eq!(expected.status, actual.status, "{cell}");
+                            assert_eq!(expected.failure_reason, actual.failure_reason, "{cell}");
+                            if let (Some(a), Some(b)) = (expected.cost, actual.cost) {
+                                assert!((a - b).abs() <= 1e-9 * a.max(1.0), "{cell}: {a} vs {b}");
+                                cells += 1;
+                            }
+                            assert_eq!(expected.edge_ids, actual.edge_ids, "{cell}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    search::gates::force_gate_limit(None);
     assert!(cells > 1_000, "only {cells} cells");
 }
 
