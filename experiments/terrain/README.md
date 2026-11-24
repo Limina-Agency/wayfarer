@@ -39,3 +39,17 @@ Spacing is in ticks of 1/120 arc-second (120 = 1", 360 = 3", 60 = 1/2").
 - `terrexp lc` also writes `posts_purity.u8` (majority count and valid pixels per post).
 - `scripts/e3/`: BDOT10k onto the lattice (reference), the independent OSM check, the evaluation
   against BDOT10k and the fused-layer sizes. Results: `off-road-sar/exp/E3/README.md`.
+
+## E5 (incident cost surface)
+
+    target/release/terrexp lines   <pbf> <blocks.txt> <spacing-ticks> <out-dir>
+    target/release/terrexp surface <prep-dir> <spacing-ticks> <E4 pace_table_50.csv> <out-dir> [--queries N] [--threads N]
+
+- `src/lines.rs`: OSM linear features (way kinds by highway/`sac_scale`, rivers, streams, railways, fences, cliffs)
+  as a u16 bitmask per post; exact supercover, 4-connected.
+- `src/surface.rs`: per-profile friction (u16 time per metre, from a class distribution over E3's codes plus
+  steepness-max and barrier multipliers), palette-run block coding, 16-connected integer Dijkstra and A* with the
+  E4 pace-by-grade table applied per edge.
+- `terrexp dem --steep` also writes `posts_steep.u8` (raw steepness-max, 0xFF = none).
+- `scripts/e5/`: stage-1 prep (GEM-15 onto the lattice, E3 fusion), the timing and identity matrix, the independent
+  Python check and the pictures. Results: `off-road-sar/exp/E5/README.md`.
