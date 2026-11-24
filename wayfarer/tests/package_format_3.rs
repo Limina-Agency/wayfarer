@@ -11,12 +11,13 @@ use wayfarer::{
     GeoPoint, MobilityProfile, RouteMatrixRequest, RouteRequest, RoutingEngine, RoutingPackage,
 };
 use wayfarer_compiler::{CancelToken, CompileRequest, compile};
+use wayfarer_package::cch_order::{CELL_TREE_ENTRY_BYTES, CellTreeEntry, NO_PARENT};
 use wayfarer_package::format::{
-    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, LEG_ATTRS_REVISION, NO_SLOT_COLUMN,
-    NO_SOURCE_NODE_HIGH, NODE_OWNER_SECTION_ID, PARAM_MUST_UNDERSTAND, PROFILE_SLOT_BYTES,
-    PackageFile, PackageFormat, PackageParams, ProfileSlot, REGION_HAS_NODE_OWNER,
-    REGION_INFO_BYTES, RegionInfo, RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED,
-    Section, param_key, profile_code,
+    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, LAYOUT_NODES_BY_RANK, LEG_ATTRS_REVISION,
+    NO_SLOT_COLUMN, NO_SOURCE_NODE_HIGH, NODE_OWNER_SECTION_ID, PARAM_MUST_UNDERSTAND,
+    PROFILE_SLOT_BYTES, PackageFile, PackageFormat, PackageParams, ProfileSlot,
+    REGION_HAS_NODE_OWNER, REGION_INFO_BYTES, RegionInfo, RoutingPackageError, SECTION_IDENTITY,
+    SECTION_REQUIRED, Section, param_key, profile_code,
 };
 use wayfarer_package::raw::{RawPackage, RawSection, resign};
 
@@ -85,48 +86,321 @@ fn without_timings(text: String) -> String {
     out
 }
 
+/// Format 3 numbers nodes by CCH rank, so its nodes, edges and shared infos
+/// are format 2's in another order: each format-3 element's format-2
+/// counterpart, found by position (nodes) and by ends, length and way
+/// (edges).
+struct Correspondence {
+    node: Vec<u32>,
+    edge: Vec<u32>,
+    shared: Vec<u32>,
+}
+
+impl Correspondence {
+    fn of(v2: &PackageFile, v3: &PackageFile) -> Self {
+        let (a, b) = (v2.view(), v3.view());
+        let position = |view: &wayfarer_package::format::Sections<'_>, node: u32| {
+            let (lat, lng) = view.node_lat_lng(node);
+            (lat.to_bits(), lng.to_bits())
+        };
+        let by_position: std::collections::HashMap<_, u32> = (0..a.node_count as u32)
+            .map(|node| (position(&a, node), node))
+            .collect();
+        assert_eq!(by_position.len(), a.node_count, "node positions repeat");
+        let node = (0..b.node_count as u32)
+            .map(|node| by_position[&position(&b, node)])
+            .collect::<Vec<_>>();
+        let source = |view: &wayfarer_package::format::Sections<'_>| {
+            let mut source = vec![0u32; view.edge_count];
+            for n in 0..view.node_count {
+                for edge in view.first_out[n]..view.first_out[n + 1] {
+                    source[edge as usize] = n as u32;
+                }
+            }
+            source
+        };
+        let (source_a, source_b) = (source(&a), source(&b));
+        let key = |view: &wayfarer_package::format::Sections<'_>, source: u32, edge: usize| {
+            (
+                source,
+                view.edge_target[edge],
+                view.edge_length[edge].to_bits(),
+                view.si_way.get(view.edge_shared_info[edge] as usize),
+            )
+        };
+        // Parallel edges of one way with one length (a way that doubles
+        // back) share a key: they are taken in order, as both formats keep
+        // a node's edges in one order.
+        let mut by_key: std::collections::HashMap<_, std::collections::VecDeque<u32>> =
+            std::collections::HashMap::new();
+        for (edge, source) in source_a.iter().enumerate() {
+            by_key
+                .entry(key(&a, *source, edge))
+                .or_default()
+                .push_back(edge as u32);
+        }
+        let edge = (0..b.edge_count)
+            .map(|edge| {
+                let (from, to, length, way) = key(&b, source_b[edge], edge);
+                by_key
+                    .get_mut(&(node[from as usize], node[to as usize], length, way))
+                    .and_then(|edges| edges.pop_front())
+                    .unwrap_or_else(|| panic!("edge {edge} has no format-2 counterpart"))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            by_key.values().all(|edges| edges.is_empty()),
+            "format 2 has more edges"
+        );
+        let mut shared = vec![u32::MAX; v3.counts().shared_info_count];
+        for (at, edge) in edge.iter().enumerate() {
+            let mapped = a.edge_shared_info[*edge as usize];
+            let slot = &mut shared[b.edge_shared_info[at] as usize];
+            assert!(
+                *slot == u32::MAX || *slot == mapped,
+                "edge {at}'s shared info"
+            );
+            *slot = mapped;
+        }
+        Self { node, edge, shared }
+    }
+
+    /// Format 3's edge id of format 2's `edge_id`.
+    fn edge_id_in_3(&self, v2: &PackageFile, v3: &PackageFile, edge_id: u64) -> u64 {
+        let edge = v2.view().edge_for_id(edge_id).unwrap();
+        let at = self.edge.iter().position(|e| *e == edge).unwrap();
+        v3.view().edge_id(at)
+    }
+
+    /// `value` (a format-3 result as JSON) with its ids made format 2's.
+    fn to_format_2(&self, v2: &PackageFile, v3: &PackageFile, value: &mut serde_json::Value) {
+        let (a, b) = (v2.view(), v3.view());
+        let edge_id = |id: u64| {
+            b.edge_for_id(id)
+                .map_or(id, |edge| a.edge_id(self.edge[edge as usize] as usize))
+        };
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, item) in map.iter_mut() {
+                    let map_number = |item: &mut serde_json::Value, f: &dyn Fn(u64) -> u64| {
+                        if let Some(id) = item.as_u64() {
+                            *item = f(id).into();
+                        }
+                    };
+                    match key.as_str() {
+                        "edgeId" | "opposingEdgeId" | "sourceEdgeId" | "targetEdgeId" => {
+                            map_number(item, &edge_id)
+                        }
+                        "edgeIds" => {
+                            for id in item.as_array_mut().into_iter().flatten() {
+                                map_number(id, &edge_id);
+                            }
+                        }
+                        "sharedEdgeInfoId" => {
+                            map_number(item, &|id| u64::from(self.shared[(id - 1) as usize]) + 1)
+                        }
+                        "sourceNodeId" | "targetNodeId" => map_number(item, &|id| {
+                            let (ra, rb) = (v2.request_view().unwrap(), v3.request_view().unwrap());
+                            let node = (id as i64 - rb.node_id(0)) as usize;
+                            ra.node_id(self.node[node]) as u64
+                        }),
+                        _ => self.to_format_2(v2, v3, item),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    self.to_format_2(v2, v3, item);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn monaco_correspondence() -> &'static Correspondence {
+    static MAP: OnceLock<Correspondence> = OnceLock::new();
+    MAP.get_or_init(|| Correspondence::of(&open(&monaco().0).unwrap(), &open(&monaco().1).unwrap()))
+}
+
+/// `value` with the lists whose order follows node or edge ids sorted:
+/// joining edges come in their source nodes' order, rejected candidates in
+/// edge id order. Guidance reads the angles as a set.
+fn sort_id_ordered(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                sort_id_ordered(item);
+                let Some(items) = item.as_array_mut() else {
+                    continue;
+                };
+                if key == "junctionJoiningAnglesDeg" {
+                    items.sort_by_key(|item| item.as_i64());
+                } else if key.ends_with("RejectedCandidates") {
+                    items.sort_by_key(|item| item["edgeId"].as_u64());
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_id_ordered),
+        _ => {}
+    }
+}
+
+/// `value` with every key ending in `Ns`, `Ms` or `_ns`/`_ms` (timings)
+/// zeroed.
+fn zero_timings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if ["Ns", "Ms", "_ns", "_ms"]
+                    .iter()
+                    .any(|end| key.ends_with(end))
+                    && item.is_number()
+                {
+                    *item = 0.into();
+                } else {
+                    zero_timings(item);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(zero_timings),
+        _ => {}
+    }
+}
+
 /// Every route, and a matrix, give the same answer on both formats: the
-/// same graph, ids and costs, read through the other table.
+/// same graph and costs, read through the other table and numbered by rank,
+/// so the same paths under format 3's ids.
 #[test]
 fn a_format_3_package_routes_as_format_2_does() {
     let (v2, v3) = monaco();
+    let files = [open(v2).unwrap(), open(v3).unwrap()];
+    let map = monaco_correspondence();
     let engines = [v2, v3].map(|bytes| {
         RoutingEngine::from_package(Arc::new(RoutingPackage::from_bytes(bytes).unwrap()))
     });
     let points = points();
     // Blocked edges are named by id: the engine maps them to edges through
     // the stored ids (format 2) or the implied ones (format 3).
-    let base = open(v2).unwrap().view().edge_id_base;
+    let base = files[0].view().edge_id_base;
     let blocked: std::collections::BTreeSet<u64> =
         (0..4_000).step_by(7).map(|slot| base + slot).collect();
+    let blocked_3: std::collections::BTreeSet<u64> = blocked
+        .iter()
+        .map(|id| map.edge_id_in_3(&files[0], &files[1], *id))
+        .collect();
+    let as_json = |result: &dyn erased::Json, format_3: bool| {
+        let mut value = result.json();
+        zero_timings(&mut value);
+        if format_3 {
+            map.to_format_2(&files[0], &files[1], &mut value);
+        }
+        sort_id_ordered(&mut value);
+        value
+    };
     // Every profile: format 3 numbers their slots differently.
     for profile in ALL_PROFILES {
         for from in &points {
             for to in &points {
+                // A route from a point to itself ties between an edge and
+                // its twin, and ties go to the lower edge id.
+                if from == to {
+                    continue;
+                }
                 for block in [false, true] {
-                    let [a, b] = engines.each_ref().map(|engine| {
+                    let [a, b] = [0, 1].map(|at| {
                         let mut request = RouteRequest::new(*from, *to, profile);
                         if block {
                             request.options.blocked_edge_ids =
-                                std::collections::BTreeSet::clone(&blocked);
+                                std::collections::BTreeSet::clone(if at == 0 {
+                                    &blocked
+                                } else {
+                                    &blocked_3
+                                });
                         }
-                        without_timings(format!("{:?}", engine.route(request)))
+                        let route = engines[at].route(request);
+                        match route {
+                            Ok(route) => as_json(&route, at == 1),
+                            Err(failure) => {
+                                let mut value = as_json(&*failure.diagnostics, at == 1);
+                                value["error"] = format!("{:?}", failure.error).into();
+                                value["segmentIndex"] = failure.segment_index.into();
+                                value
+                            }
+                        }
                     });
-                    assert_eq!(a, b, "{profile:?} {from:?} -> {to:?} blocked {block}");
+                    assert_same(
+                        &a,
+                        &b,
+                        &format!("{profile:?} {from:?} -> {to:?} blocked {block}"),
+                    );
                 }
             }
         }
     }
-    let matrix = |engine: &RoutingEngine| {
+    let matrix = |at: usize| {
         let request: RouteMatrixRequest = serde_json::from_value(serde_json::json!({
             "sources": points.iter().map(|p| serde_json::json!({"lat": p.lat, "lng": p.lng})).collect::<Vec<_>>(),
             "targets": points.iter().map(|p| serde_json::json!({"lat": p.lat, "lng": p.lng})).collect::<Vec<_>>(),
             "profile": "wheeled",
         }))
         .unwrap();
-        without_timings(format!("{:?}", engine.matrix(request)))
+        as_json(&engines[at].matrix(request), at == 1)
     };
-    assert_eq!(matrix(&engines[0]), matrix(&engines[1]));
+    // The diagonal ties as a route from a point to itself does.
+    let off_diagonal = |mut value: serde_json::Value| {
+        let cells = value["cells"].as_array_mut().unwrap();
+        for at in 0..points.len() {
+            cells[at * points.len() + at]["edgeIds"] = serde_json::Value::Null;
+        }
+        value
+    };
+    assert_same(
+        &off_diagonal(matrix(0)),
+        &off_diagonal(matrix(1)),
+        "the matrix",
+    );
+}
+
+/// Panics naming the first few paths where `a` and `b` differ.
+fn assert_same(a: &serde_json::Value, b: &serde_json::Value, what: &str) {
+    fn walk(a: &serde_json::Value, b: &serde_json::Value, path: String, out: &mut Vec<String>) {
+        use serde_json::Value::{Array, Object};
+        if out.len() >= 8 || a == b {
+            return;
+        }
+        match (a, b) {
+            (Object(x), Object(y)) if x.len() == y.len() => {
+                for (key, item) in x {
+                    match y.get(key) {
+                        Some(other) => walk(item, other, format!("{path}.{key}"), out),
+                        None => out.push(format!("{path}.{key}: missing")),
+                    }
+                }
+            }
+            (Array(x), Array(y)) if x.len() == y.len() => {
+                for (at, (item, other)) in x.iter().zip(y).enumerate() {
+                    walk(item, other, format!("{path}[{at}]"), out);
+                }
+            }
+            _ => out.push(format!("{path}: {a} vs {b}")),
+        }
+    }
+    let mut out = Vec::new();
+    walk(a, b, String::new(), &mut out);
+    assert!(out.is_empty(), "{what}:\n{}", out.join("\n"));
+}
+
+/// Results as JSON, whatever their type.
+mod erased {
+    pub trait Json {
+        fn json(&self) -> serde_json::Value;
+    }
+    impl<T: serde::Serialize> Json for T {
+        fn json(&self) -> serde_json::Value {
+            serde_json::to_value(self).unwrap()
+        }
+    }
 }
 
 #[test]
@@ -154,25 +428,72 @@ fn format_3_drops_stored_ids_and_reserved_sections_and_states_its_params() {
     assert!(names.contains(&"PackageParams"));
     // Positions are derived from the fixed-point vectors here.
     assert!(!names.contains(&"NodeLatE7"));
+    // Ids are implied by position: edges from the base, nodes in rank
+    // order, shared infos from 1. Format 2 stores its own.
     let (a, b) = (v2.view(), v3.view());
-    for edge in 0..a.edge_count {
-        assert_eq!(a.edge_id(edge), b.edge_id(edge));
-        assert_eq!(b.edge_for_id(a.edge_id(edge)), Some(edge as u32));
+    let map = monaco_correspondence();
+    assert_eq!(a.edge_id_base, b.edge_id_base);
+    for edge in 0..b.edge_count {
+        assert_eq!(b.edge_id(edge), b.edge_id_base + edge as u64);
+        assert_eq!(b.edge_for_id(b.edge_id(edge)), Some(edge as u32));
+        let twin = map.edge[edge] as usize;
+        assert_eq!(a.edge_for_id(a.edge_id(twin)), Some(twin as u32));
     }
     assert_eq!(b.edge_for_id(b.edge_id_base + b.edge_count as u64), None);
-    let (ra, rb) = (v2.request_view().unwrap(), v3.request_view().unwrap());
-    for node in 0..a.node_count as u32 {
-        assert_eq!(ra.node_id(node), rb.node_id(node));
-        assert_eq!(ra.component_id(node), rb.component_id(node));
+    // A node's edges keep their order (by way, direction, target position,
+    // segment and length), and shared infos are numbered by first edge.
+    for node in 0..b.node_count {
+        let twin = map.node[node] as usize;
+        assert_eq!(
+            (b.first_out[node]..b.first_out[node + 1])
+                .map(|edge| map.edge[edge as usize])
+                .collect::<Vec<_>>(),
+            (a.first_out[twin]..a.first_out[twin + 1]).collect::<Vec<_>>(),
+            "node {node}"
+        );
     }
-    for shared in 0..v2.counts().shared_info_count {
-        assert_eq!(ra.shared_info_id(shared), rb.shared_info_id(shared));
+    let mut next_shared = 0;
+    for edge in 0..b.edge_count {
+        let shared = b.edge_shared_info[edge];
+        assert!(shared <= next_shared, "edge {edge}");
+        next_shared = next_shared.max(shared + 1);
+    }
+    let (ra, rb) = (v2.request_view().unwrap(), v3.request_view().unwrap());
+    let mut components = std::collections::HashMap::new();
+    let mut back = std::collections::HashMap::new();
+    for node in 0..b.node_count as u32 {
+        assert_eq!(rb.node_id(node), rb.node_id(0) + i64::from(node));
+        let (in_2, in_3) = (
+            ra.component_id(map.node[node as usize]),
+            rb.component_id(node),
+        );
+        assert_eq!(*components.entry(in_3).or_insert(in_2), in_2, "node {node}");
+        assert_eq!(*back.entry(in_2).or_insert(in_3), in_3, "node {node}");
+        assert_eq!(
+            ra.component_size(map.node[node as usize]),
+            rb.component_size(node)
+        );
+    }
+    let mut seen = vec![false; v2.counts().shared_info_count];
+    for shared in 0..v3.counts().shared_info_count {
+        assert_eq!(rb.shared_info_id(shared), shared as u64 + 1);
+        assert!(!std::mem::replace(
+            &mut seen[map.shared[shared] as usize],
+            true
+        ));
     }
     let (pa, pb) = (v2.params(), v3.params());
     assert_eq!(pb.draft_revision, Some(FORMAT_3_DRAFT_REVISION));
+    // Components are numbered in node order, so the default one is the
+    // same component under another id.
+    assert_eq!(
+        back[&Some(pa.default_component)],
+        Some(pb.default_component)
+    );
     assert_eq!(
         PackageParams {
             draft_revision: None,
+            default_component: pa.default_component,
             ..*pb
         },
         *pa
@@ -584,62 +905,99 @@ fn format_3_numbers_its_profile_slots_and_widens_the_masks() {
     // The header no longer holds profile columns or heuristic costs.
     let header = &monaco().1[..256];
     assert!(header[88..224].iter().all(|byte| *byte == 0));
+    // Format 3 numbers nodes and edges by rank: each element is compared
+    // with its format-2 counterpart, and restriction rows as multisets.
     let (a, b) = (v2.view(), v3.view());
-    let same = |what: &str, count: usize, mask: &dyn Fn(bool, usize) -> u16| {
-        for index in 0..count {
-            for profile in ALL_PROFILES {
-                assert_eq!(
-                    mask(false, index) & v2.profile_bit(profile) != 0,
-                    mask(true, index) & v3.profile_bit(profile) != 0,
-                    "{what} {index} {profile:?}"
-                );
-            }
-        }
+    let map = monaco_correspondence();
+    let profiles = |package: &PackageFile, mask: u16| {
+        ALL_PROFILES.map(|profile| mask & package.profile_bit(profile) != 0)
     };
-    same("edge", a.edge_count, &|wide, edge| {
-        if wide {
-            b.edge_access.profiles(edge)
-        } else {
-            a.edge_access.profiles(edge)
-        }
-    });
-    for edge in 0..a.edge_count {
+    for edge in 0..b.edge_count {
+        let twin = map.edge[edge] as usize;
         assert_eq!(
-            a.edge_access.sar(edge),
+            profiles(&v2, a.edge_access.profiles(twin)),
+            profiles(&v3, b.edge_access.profiles(edge)),
+            "edge {edge}"
+        );
+        assert_eq!(
+            a.edge_access.sar(twin),
             b.edge_access.sar(edge),
             "edge {edge}"
         );
     }
-    same("simple restriction", a.simple_mask.len(), &|wide, row| {
-        if wide {
-            b.simple_mask.get(row)
-        } else {
-            a.simple_mask.get(row)
-        }
-    });
-    same("complex restriction", a.complex_mask.len(), &|wide, row| {
-        if wide {
-            b.complex_mask.get(row)
-        } else {
-            a.complex_mask.get(row)
-        }
-    });
+    let simple =
+        |package: &PackageFile, view: &wayfarer_package::format::Sections<'_>, mapped: bool| {
+            let edge = |e: u32| if mapped { map.edge[e as usize] } else { e };
+            let mut rows = (0..view.simple_from.len())
+                .map(|row| {
+                    (
+                        edge(view.simple_from[row]),
+                        edge(view.simple_to[row]),
+                        profiles(package, view.simple_mask.get(row)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+    assert_eq!(simple(&v2, &a, false), simple(&v3, &b, true));
+    let complex =
+        |package: &PackageFile, view: &wayfarer_package::format::Sections<'_>, mapped: bool| {
+            let edge = |e: u32| if mapped { map.edge[e as usize] } else { e };
+            let mut rows = (0..view.complex_to.len())
+                .map(|row| {
+                    let prefix = &view.complex_prefix_pool[view.complex_prefix_start[row] as usize
+                        ..view.complex_prefix_start[row + 1] as usize];
+                    (
+                        prefix.iter().map(|e| edge(*e)).collect::<Vec<_>>(),
+                        edge(view.complex_to[row]),
+                        profiles(package, view.complex_mask.get(row)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+    assert_eq!(complex(&v2, &a, false), complex(&v3, &b, true));
     let saturated = [&v2, &v3].map(|package| {
         package.profile_masks(Section::NodeReachSaturated, Section::NodeReachSaturated16)
     });
-    same("node", a.node_count, &|wide, node| {
-        saturated[usize::from(wide)].get(node)
-    });
-    assert_eq!(a.barrier_access.len(), b.barrier_access.len());
-    for at in 0..a.barrier_access.len() {
-        for profile in ALL_PROFILES {
-            assert_eq!(
-                a.barrier_access.get(at).effect(v2.profile_bit(profile)),
-                b.barrier_access.get(at).effect(v3.profile_bit(profile)),
-                "barrier {at} {profile:?}"
-            );
-        }
+    for node in 0..b.node_count {
+        let twin = map.node[node] as usize;
+        assert_eq!(
+            profiles(&v2, saturated[0].get(twin)),
+            profiles(&v3, saturated[1].get(node)),
+            "node {node}"
+        );
     }
+    assert_eq!(a.barrier_node.len(), b.barrier_node.len());
+    let barriers =
+        |package: &PackageFile, view: &wayfarer_package::format::Sections<'_>, mapped: bool| {
+            let mut rows = (0..view.barrier_node.len())
+                .map(|at| {
+                    let node = view.barrier_node[at];
+                    (
+                        if mapped {
+                            map.node[node as usize]
+                        } else {
+                            node
+                        },
+                        view.barrier_class[at],
+                        ALL_PROFILES.map(|profile| {
+                            format!(
+                                "{:?}",
+                                view.barrier_access
+                                    .get(at)
+                                    .effect(package.profile_bit(profile))
+                            )
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+    assert_eq!(barriers(&v2, &a, false), barriers(&v3, &b, true));
 }
 
 /// The format-3 package with its slots replaced by `edit`'s.
@@ -967,4 +1325,138 @@ fn osm_node_ids_are_checked() {
         raw.sections[at].bytes.truncate(len - element);
         assert!(open_error(&raw).contains("header counts"), "{section:?}");
     }
+}
+
+/// Format 3 numbers nodes by CCH rank (`docs/design/format-3.md`, section
+/// 8): the layout says so, the ranks are implied, and the cell tree states
+/// each dissection cell's range of ranks.
+#[test]
+fn format_3_numbers_nodes_by_rank_and_states_the_cell_tree() {
+    let (v2, v3) = monaco();
+    let (v2, v3) = (open(v2).unwrap(), open(v3).unwrap());
+    assert!(v3.layout().nodes_by_rank);
+    assert!(!v2.layout().nodes_by_rank);
+    let flags = u64::from_le_bytes(
+        monaco().1[HEADER_V3_LAYOUT_FLAGS..HEADER_V3_LAYOUT_FLAGS + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert_ne!(flags & u64::from(LAYOUT_NODES_BY_RANK), 0);
+    let names = v3
+        .section_sizes()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert!(!names.contains(&"CchRank"));
+    assert!(names.contains(&"CchCellTree"));
+    let view = v3.view();
+    let ranks = view.cch_ranks().unwrap();
+    assert!(
+        ranks
+            .iter()
+            .enumerate()
+            .all(|(node, rank)| node as u32 == *rank)
+    );
+    // The tree: post-order, every cell one range, the root ending at the
+    // last rank, and the cells' ranges nested in their parents'.
+    let tree = v3.cell_tree();
+    assert!(tree.len() > 1, "{}", tree.len());
+    let root = tree.last().unwrap();
+    assert_eq!(root.parent, NO_PARENT);
+    assert_eq!(root.end_rank as usize, view.node_count);
+    for entry in &tree[..tree.len() - 1] {
+        let parent = &tree[entry.parent as usize];
+        assert!(parent.chains_end <= entry.first_rank && entry.end_rank <= parent.separator_start);
+    }
+    // Format 2 keeps its stored ranks.
+    assert!(v2.cell_tree().is_empty());
+    assert_eq!(v2.view().cch_ranks().unwrap().len(), v2.view().node_count);
+}
+
+fn with_cell_tree(edit: impl FnOnce(&mut Vec<CellTreeEntry>)) -> RawPackage {
+    let mut raw = format_3();
+    let at = raw.position(Section::CchCellTree.id()).unwrap();
+    let mut tree = raw.sections[at]
+        .bytes
+        .as_chunks::<CELL_TREE_ENTRY_BYTES>()
+        .0
+        .iter()
+        .map(CellTreeEntry::from_bytes)
+        .collect::<Vec<_>>();
+    edit(&mut tree);
+    raw.sections[at].bytes = tree.into_iter().flat_map(CellTreeEntry::to_bytes).collect();
+    raw
+}
+
+#[test]
+fn the_cell_tree_is_checked() {
+    let invalid = |raw: &RawPackage| {
+        let error = open_error(raw);
+        assert!(error.contains("cell tree is invalid"), "{error}");
+    };
+    // The unchanged tree opens.
+    open(&with_cell_tree(|_| {}).encode()).unwrap();
+    // A root that stops short of the last rank.
+    invalid(&with_cell_tree(|tree| {
+        tree.last_mut().unwrap().end_rank -= 1
+    }));
+    // A root with a parent.
+    invalid(&with_cell_tree(|tree| tree.last_mut().unwrap().parent = 0));
+    // A child that names itself, or a cell after it, or none, as parent.
+    invalid(&with_cell_tree(|tree| tree[0].parent = 0));
+    invalid(&with_cell_tree(|tree| tree[0].parent = NO_PARENT));
+    invalid(&with_cell_tree(|tree| {
+        let past = tree.len() as u32;
+        tree[0].parent = past;
+    }));
+    // Ranges out of order, or leaving a gap between siblings.
+    invalid(&with_cell_tree(|tree| {
+        let entry = &mut tree[0];
+        entry.chains_end = entry.separator_start + 1;
+    }));
+    invalid(&with_cell_tree(|tree| tree[0].end_rank += 1));
+    invalid(&with_cell_tree(|tree| tree[0].first_rank += 1));
+    // Children out of post-order.
+    invalid(&with_cell_tree(|tree| tree.swap(0, 1)));
+    // A ragged section is refused by its element size.
+    let mut raw = format_3();
+    let at = raw.position(Section::CchCellTree.id()).unwrap();
+    raw.sections[at].bytes.pop();
+    assert!(open(&raw.encode()).is_err());
+}
+
+#[test]
+fn the_rank_layout_and_the_cell_tree_come_together() {
+    // The layout without its tree.
+    let mut raw = format_3();
+    let at = raw.position(Section::CchCellTree.id()).unwrap();
+    raw.sections.remove(at);
+    assert!(open_error(&raw).contains("missing"), "{}", open_error(&raw));
+    // The tree without the layout.
+    let mut raw = format_3();
+    raw.header[HEADER_V3_LAYOUT_FLAGS] &= !(LAYOUT_NODES_BY_RANK as u8);
+    assert!(
+        open_error(&raw).contains("against its rule"),
+        "{}",
+        open_error(&raw)
+    );
+    // A stored rank vector is retired in format 3.
+    let mut raw = format_3();
+    let at = raw
+        .sections
+        .iter()
+        .position(|section| section.id > Section::CchRank.id())
+        .unwrap();
+    let node_count = open(&monaco().1).unwrap().view().node_count;
+    raw.sections.insert(
+        at,
+        RawSection {
+            id: Section::CchRank.id(),
+            param: 0,
+            flags: SECTION_IDENTITY,
+            element_bytes: 4,
+            bytes: (0..node_count as u32).flat_map(u32::to_le_bytes).collect(),
+        },
+    );
+    assert!(open_error(&raw).contains("retired"), "{}", open_error(&raw));
 }
