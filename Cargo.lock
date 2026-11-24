@@ -1194,8 +1194,11 @@ name = "wayfarer-costing"
 version = "0.4.0"
 dependencies = [
  "chrono",
+ "libm",
  "schemars",
  "serde",
+ "serde_json",
+ "thiserror",
  "wayfarer-package",
 ]
 

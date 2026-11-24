@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 
 mod compile;
+mod pace;
 mod package;
 mod protocol;
 mod query;
@@ -53,6 +54,7 @@ enum Command {
     #[command(name = "match")]
     Match(query::MatchArgs),
     Snap(query::SnapArgs),
+    Pace(pace::PaceArgs),
 }
 
 /// How a command failed: the message for stderr and the exit status.
@@ -96,6 +98,7 @@ fn main() {
         Command::Isochrone(args) => query::isochrone(args),
         Command::Match(args) => query::map_match(args),
         Command::Snap(args) => query::snap(args),
+        Command::Pace(args) => pace::run(args),
     };
     if let Err(failure) = result {
         if !failure.message.is_empty() {
