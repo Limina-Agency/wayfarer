@@ -2,11 +2,11 @@
 
 Status: being built behind an off-by-default compiler switch (decision F1
 of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: steps 1 to 4 of section 12 (the tagged
+--package-format 3`, hidden). Done: steps 1 to 5 of section 12 (the tagged
 table, both hashes, `PackageParams`, retired reserved sections, implied ids;
 `ProfileSlots` and the u16 masks; versioned attribute-class records;
-`RegionInfo`, `NodeSourceId` and `contentHash` on the wire), draft
-revision 4. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
+`RegionInfo`, `NodeSourceId` and `contentHash` on the wire; node id = CCH
+rank with chains per cell and `CchCellTree`), draft revision 5. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -530,8 +530,8 @@ by any 1.x engine.
   (−7.9 %, *measured*). The edge id lookup the engine builds on first use
   (`edge_id_lookup`, 4 B per id slot) is no longer needed.
 - `Reserved1` to `Reserved12` (28–31, 70, 71, 80–85) are retired: −1.2 MB.
-- `CchRank` (93) is retired if nodes are numbered by rank (section 8): −4.3 MB
-  (−2.3 %).
+- `CchRank` (93) is retired, since nodes are numbered by rank (section 8):
+  −4.3 MB (−2.3 %).
 
 ### 5.8 Widths (section 10)
 
@@ -565,7 +565,7 @@ road-covered land, so it changes little there; it matters for continents).
 | Ids | What | Presence |
 |---|---|---|
 | 0–93 | Format 2's slot numbers, for the sections that survive unchanged: `Metadata` 0, the graph, costs, restrictions, shapes, costing tuples, request sections, attribute classes, strings, junctions, barriers, `NodeXyzFixed`, piece bits, twins, lone in-edges | as today's checks |
-| retired | 6, 22, 24, 27, 28–31, 34, 47–49, 51, 52, 56, 58, 66, 70, 71, 79–85, and 93 if numbering by rank | never reused |
+| retired | 6, 22, 24, 27, 28–31, 34, 47–49, 51, 52, 56, 58, 66, 70, 71, 79–85, 93 | never reused |
 | 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridCellStart` (block-relative u32), 140/141 `NodeSourceId` | mandatory |
 | 256–319 | Regions: 256 `RegionInfo` (mandatory); reserved: 257 `RegionNeighbours`, 258 `NodeOwner`, 259 `PortalEdge`, 260 `PortalRef`, 261 `PortalClique` (param = column), 262 `PortalBound` (param = column), 263 `ComponentPortal` | optional |
 | 320–383 | Cells and stored potentials: 320 `CchCellTree` (written from format 3 on); reserved: 321 `CellDirectory`, 322 `CchFirstUp`, 323 `CchUpHead`, 324 `CchMetric` (param = column), 325 `InEdgeIndex` (SC-4) | optional |
@@ -658,7 +658,7 @@ arise, and the potentials are unchanged value for value. 6,216 chain
 nodes (small isolated components) have no core neighbour; they belong to no
 cell and should be ranked by position (Hilbert) at the front, where they
 don't affect anything else. The prototype should still be repeated on Poland
-in G5, as a check.
+in G5, as a check (done: section 8.4, as built).
 
 ### 8.3 Node id = rank
 
@@ -678,7 +678,8 @@ ids apart): Hilbert today 93.9 % and 99.68 %; either cell-major numbering
 90.3 % and 99.83 %. The near-neighbour share drops a little and the
 long-range share improves (fewer edges need an exception table if 16-bit
 target deltas, OM-10, ever come). Warm query speed should be checked on the
-Małopolskie gate in G5 before the choice is final.
+Małopolskie gate in G5 before the choice is final (done: unchanged on
+Małopolskie, a little faster on Poland; section 8.4, as built).
 
 In both, every level of the tree is contiguous at once, so the format
 doesn't fix a cell size: a 1.x `CellDirectory` chooses its levels (the
@@ -704,6 +705,76 @@ still holds (the order is a function of the Hilbert-numbered graph). What is
 lost is that a node's id no longer depends on its position alone, but on
 the whole package's dissection. Nothing depends on that: stable references
 use OSM ids, overlay sets bind to the identity hash.
+
+*As built (draft revision 5).* A format-3 compile numbers nodes by rank
+(option 1 of section 8.3) whenever it computes a CCH order, and says so with
+header layout flag bit 1 (`LAYOUT_NODES_BY_RANK`). Right after
+`renumber_in_package_order`, `cch_order::cell_major_order_until` dissects
+the Hilbert-numbered graph as `elimination_order_until` does and places the
+chain nodes by the rule of section 8.2; `renumber_by_rank` then renumbers
+the road graph by that order. Unlike the first renumbering it keeps each
+node's out-edges in their order (by way, direction, Hilbert target, segment
+and length) instead of sorting them again by the targets' new ids, so a
+node's edges are format 2's in format 2's order. Nodes no edge uses come
+after the ranked ones, as before. The package build skips its own CCH order
+and writes `CchCellTree` (id 320, conditional on the flag) instead of
+`CchRank`, which format 3 retires: the engine's ranks are the identity
+(`Sections::cch_ranks`). Format-2 compiles are unchanged.
+
+`CchCellTree`'s root starts after the chain nodes no cell owns (ranked
+first) and ends at the last rank, which is the last node edges
+use. Open refuses the flag without the section, the section without the
+flag, and a tree that is not a dissection tree of the ranks: entries out of
+post-order (every subtree one run of entries, its children right before
+it), a range out of order, a child outside its parent's gap between chain
+nodes and separator, siblings out of rank order or leaving a gap, a root
+with a parent or not ending at the node count. An empty tree (no core) is
+valid.
+
+*Measured* on Małopolskie (the extract of section 5.6), format 2 against
+format 3 of the same build:
+
+| | Format 2 | Format 3 |
+|---|---|---|
+| CCH arcs (as node pairs, nodes matched by position) | 3,694,694 | 3,694,694, **identical set** |
+| Elimination tree | height 524 | **identical parent of every node** |
+| `CchRank` / `CchCellTree` | 4,277,308 B | 314,960 B: 15,748 cells, 8,277 leaves, depth 21 |
+| Chain nodes before the root (no core) | | 6,216 |
+| Package | 184,954,688 B | 175,324,992 B |
+| Edges whose ends are < 2^7 / < 2^15 ids apart | 93.9 % / 99.68 % | 90.3 % / 99.83 % |
+| Warm request, median (3 alternating runs, 324 cases) | 4.80–5.28 ms | 4.88–5.05 ms |
+| First request incl. potentials (`krakow-tarnow-long-regional`) | 297–319 ms | 257–269 ms |
+| CCH order in the compile | 1.4 s | 1.8 s (cell-major order and second renumbering) |
+
+Warm speed is unchanged within noise; the first request, which builds the
+potentials, is about 15 % faster (not profiled; the rank lookups are gone).
+Routes are the same: the regional gate passes on both, and with
+ids stripped the Kraków dump is identical and the Małopolskie one differs
+only in the alternatives of 3 of 324 cases, where via candidates that tie on
+plateau and cost are taken in edge id order. Visited-edge counts move by a
+few edges at heap ties. Lists in a result that follow ids
+(`junctionJoiningAnglesDeg`, ordered by the joining edges' source nodes, and
+rejected correlation candidates, by edge id) come in another order, and a
+route from a point to itself can take an edge's twin instead.
+
+*Measured* on Poland (`poland-latest` of 24 November 2026 from
+download.openstreetmap.fr; 10,558,753 nodes, 27,284,271 edges), the check
+section 8.2 asked for:
+
+| | Format 2 | Format 3 |
+|---|---|---|
+| CCH arcs (as node pairs, nodes matched by position) | 47,822,666 | 47,822,666, **identical set** |
+| Elimination tree | height 1,125 | **identical parent of every node** |
+| `CchRank` / `CchCellTree` | 42,235,012 B | 4,424,100 B: 221,205 cells, 116,083 leaves, depth 26 |
+| Chain nodes before the root (no core) | | 52,835 |
+| Package | 1,971,179,648 B | 1,872,113,152 B |
+| Edges whose ends are < 2^7 / < 2^15 ids apart | 93.5 % / 99.68 % | 91.4 % / 99.79 % |
+| Warm request, median (Małopolskie corpus and 100 random pairs, 2 alternating runs) | 7.41–8.02 ms | 6.84–7.09 ms |
+| First request incl. potentials | 3.21–3.36 s | 2.95–3.25 s |
+| CCH order in the compile | 33.7 s | 40.1 s |
+
+With ids stripped the 224 routes are the same but for one case's
+alternatives.
 
 ### 8.5 Tiled compiles (1.x)
 

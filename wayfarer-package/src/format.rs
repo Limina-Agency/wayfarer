@@ -40,7 +40,7 @@ pub const MAX_READ_FORMAT_VERSION: u32 = 3;
 /// The draft revision of format 3 this build writes and reads
 /// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
 /// its release raises it; the release removes the key.
-pub const FORMAT_3_DRAFT_REVISION: u64 = 4;
+pub const FORMAT_3_DRAFT_REVISION: u64 = 5;
 /// The revision of the attribute-class records ([`Section::AttrClassBytes`])
 /// this build writes, as that section's table `param` in format 3. Each
 /// revision only appends fields to the one before (design section 5.3), so a
@@ -336,11 +336,16 @@ pub enum Section {
     /// Format 3 (id 256): one 96-byte [`RegionInfo`], the package's place in
     /// a bundle of regions (a stand-alone package is a bundle of one).
     RegionInfo,
+    /// Format 3 (id 320), when nodes are numbered by rank
+    /// ([`PackageLayout::nodes_by_rank`]): the dissection tree of the order,
+    /// one 20-byte [`crate::cch_order::CellTreeEntry`] per cell in
+    /// post-order. Every cell is one range of ranks, so of node ids.
+    CchCellTree,
 }
 
 /// Every section this build knows, of any format; the internal index of
 /// [`Section`] (not its format-3 id, see [`Section::id`]).
-pub const SECTION_COUNT: usize = Section::RegionInfo as usize + 1;
+pub const SECTION_COUNT: usize = Section::CchCellTree as usize + 1;
 /// The sections a format-2 table lists, in slot order: `Metadata` to
 /// `CchRank`.
 pub const FORMAT2_SECTION_COUNT: usize = Section::CchRank as usize + 1;
@@ -451,6 +456,7 @@ pub const SECTIONS: [Section; SECTION_COUNT] = [
     Section::NodeSourceIdLow,
     Section::NodeSourceIdHigh,
     Section::RegionInfo,
+    Section::CchCellTree,
 ];
 
 /// Whether a section is in format-3 packages.
@@ -486,6 +492,7 @@ impl Section {
             Self::NodeSourceIdLow => 140,
             Self::NodeSourceIdHigh => 141,
             Self::RegionInfo => 256,
+            Self::CchCellTree => 320,
             other => other as u32,
         }
     }
@@ -503,6 +510,7 @@ impl Section {
             140 => Some(Self::NodeSourceIdLow),
             141 => Some(Self::NodeSourceIdHigh),
             256 => Some(Self::RegionInfo),
+            320 => Some(Self::CchCellTree),
             id if (id as usize) < FORMAT2_SECTION_COUNT => Self::from_index(id as usize),
             _ => None,
         }
@@ -545,8 +553,9 @@ impl Section {
             | Self::SimpleMask
             | Self::ComplexMask
             | Self::BarrierAccess
-            | Self::NodeReachSaturated => Presence::Retired,
-            Self::NodeLatE7 | Self::NodeLngE7 => Presence::Conditional,
+            | Self::NodeReachSaturated
+            | Self::CchRank => Presence::Retired,
+            Self::NodeLatE7 | Self::NodeLngE7 | Self::CchCellTree => Presence::Conditional,
             _ => Presence::Mandatory,
         }
     }
@@ -561,11 +570,15 @@ impl Section {
     }
 
     /// The flags a format-3 entry of the section carries: every section a
-    /// format-3 package holds is REQUIRED; all but the JSON metadata (which
-    /// no query reads) are IDENTITY.
+    /// format-3 package holds is REQUIRED but the cell tree; all but the JSON
+    /// metadata (which no query reads) and the cell tree are IDENTITY. The
+    /// cell tree only says how the ranks group into cells: a query never
+    /// reads it, and the node order it describes is in the identity through
+    /// every per-node section.
     pub fn format_3_flags(self) -> u32 {
         match self {
             Self::Metadata => SECTION_REQUIRED,
+            Self::CchCellTree => 0,
             _ => SECTION_REQUIRED | SECTION_IDENTITY,
         }
     }
@@ -576,7 +589,10 @@ impl Section {
             PackageFormat::V2 => self.in_format_2(),
             PackageFormat::V3 => match self.format_3_presence() {
                 Presence::Mandatory => true,
-                Presence::Conditional => !layout.node_e7_derived,
+                Presence::Conditional => match self {
+                    Self::CchCellTree => layout.nodes_by_rank,
+                    _ => !layout.node_e7_derived,
+                },
                 Presence::Retired => false,
             },
         }
@@ -618,8 +634,8 @@ pub mod junction {
 }
 
 pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
-    1,                 // Metadata (JSON)
-    4,                 // NodeFirstOut
+    1,                                       // Metadata (JSON)
+    4,                                       // NodeFirstOut
     4,                 // NodeLatE7 (empty when derived from NodeXyzFixed, see `PackageLayout`)
     4,                 // NodeLngE7 (likewise)
     8,                 // NodeLatLng: (lat, lng) f64 pairs of the NodeLatLngNodes
@@ -722,6 +738,7 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     4, // NodeSourceIdLow: low 32 bits of each node's OSM id (format 3)
     2, // NodeSourceIdHigh: high 16 bits, NO_SOURCE_NODE_HIGH for none (format 3)
     REGION_INFO_BYTES, // RegionInfo: one RegionInfo (format 3)
+    crate::cch_order::CELL_TREE_ENTRY_BYTES, // CchCellTree: one CellTreeEntry per cell (format 3)
 ];
 
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
@@ -829,6 +846,7 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "NodeSourceIdLow",
     "NodeSourceIdHigh",
     "RegionInfo",
+    "CchCellTree",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1152,6 +1170,11 @@ pub struct PackageLayout {
     pub node_e7_derived: bool,
     /// The smallest edge id: `EdgeId` stores `id - base`.
     pub edge_id_base: u64,
+    /// Format 3: node `i` has rank `i` in the CCH elimination order, a
+    /// cell-major order ([`crate::cch_order::cell_major_order_until`])
+    /// whose dissection tree is [`Section::CchCellTree`]. Format 3 stores no
+    /// [`Section::CchRank`]; without this flag the package has no order.
+    pub nodes_by_rank: bool,
 }
 
 // Header layout (little endian).
@@ -1166,13 +1189,16 @@ pub const HEADER_PROFILE_COLUMNS: usize = 96; // 6 x u8
 pub const HEADER_HEURISTIC: usize = 104; // 6 x f64
 pub const HEADER_ROOT_CHECKSUM: usize = 152; // 32 bytes
 pub const LAYOUT_NODE_E7_DERIVED: u32 = 1 << 0;
+/// Format 3's header layout flag [`PackageLayout::nodes_by_rank`].
+pub const LAYOUT_NODES_BY_RANK: u32 = 1 << 1;
 
 // Format 3 header (little endian; `docs/design/format-3.md`, section 2.1).
 // The magic and version are where format 2 has them, and the table entry
 // count is where format 2 has its section count.
 pub const HEADER_V3_TABLE_OFFSET: usize = 16; // u64, 64-aligned
 pub const HEADER_V3_COUNTS: usize = 24; // 6 x u64 (see [`PackageCounts`])
-/// u64; bit 0 [`LAYOUT_NODE_E7_DERIVED`], every other bit must be zero.
+/// u64; bit 0 [`LAYOUT_NODE_E7_DERIVED`], bit 1 [`LAYOUT_NODES_BY_RANK`],
+/// every other bit must be zero.
 pub const HEADER_V3_LAYOUT_FLAGS: usize = 72;
 pub const HEADER_V3_EDGE_ID_BASE: usize = 80;
 pub const HEADER_V3_ROOT_CHECKSUM: usize = 224; // 32 bytes
@@ -2543,6 +2569,13 @@ impl PackageFile {
         {
             return Err(invalid());
         }
+        if self.layout.nodes_by_rank
+            && !crate::cch_order::is_cell_tree(&self.cell_tree(), c.node_count)
+        {
+            return Err(RoutingPackageError::Invalid(
+                "the CCH cell tree is invalid".into(),
+            ));
+        }
         let present = self.slice::<u64>(Section::LoneInPresent);
         let list = self.slice::<u32>(Section::LoneInEdge);
         if present.len() != c.node_count.div_ceil(64)
@@ -2628,6 +2661,19 @@ impl PackageFile {
     /// format 2.
     pub fn region_info(&self) -> Option<&RegionInfo> {
         self.region.as_ref()
+    }
+
+    /// The dissection tree of the node order ([`Section::CchCellTree`]),
+    /// in post-order; empty unless nodes are numbered by rank
+    /// ([`PackageLayout::nodes_by_rank`]).
+    pub fn cell_tree(&self) -> Vec<crate::cch_order::CellTreeEntry> {
+        let (offset, len) = self.sections[Section::CchCellTree as usize];
+        self.storage.bytes()[offset..offset + len]
+            .as_chunks::<{ crate::cch_order::CELL_TREE_ENTRY_BYTES }>()
+            .0
+            .iter()
+            .map(crate::cch_order::CellTreeEntry::from_bytes)
+            .collect()
     }
 
     /// Whether the package states every node's OSM node id (format 3).
@@ -2750,6 +2796,7 @@ impl PackageFile {
             heading_start: self.slice(Section::EdgeHeadingStart),
             lone_heading_end: self.slice(Section::LoneHeadingEnd),
             cch_rank: self.slice(Section::CchRank),
+            nodes_by_rank: self.layout.nodes_by_rank,
             edge_flags: self.slice(Section::EdgeFlags),
             road_rank: self.slice(Section::EdgeRoadRank),
             edge_junction: self.slice(Section::EdgeJunction),
@@ -2976,6 +3023,7 @@ fn parse_header_v2(
     let layout = PackageLayout {
         node_e7_derived: read_u32(header, HEADER_LAYOUT_FLAGS) & LAYOUT_NODE_E7_DERIVED != 0,
         edge_id_base: read_u64(header, HEADER_EDGE_ID_BASE),
+        nodes_by_rank: false,
     };
     let (profile_columns, heuristic_cost_per_m) =
         read_profiles(header, HEADER_PROFILE_COLUMNS, HEADER_HEURISTIC);
@@ -3061,7 +3109,7 @@ fn parse_header_v3(
     }
     let counts = read_counts(header, HEADER_V3_COUNTS)?;
     let flags = read_u64(header, HEADER_V3_LAYOUT_FLAGS);
-    let unknown_flags = flags & !u64::from(LAYOUT_NODE_E7_DERIVED);
+    let unknown_flags = flags & !u64::from(LAYOUT_NODE_E7_DERIVED | LAYOUT_NODES_BY_RANK);
     if unknown_flags != 0 {
         return Err(RoutingPackageError::TooNew(format!(
             "the package needs layout flags {unknown_flags:#x}, which this build doesn't read"
@@ -3070,6 +3118,7 @@ fn parse_header_v3(
     let layout = PackageLayout {
         node_e7_derived: flags & u64::from(LAYOUT_NODE_E7_DERIVED) != 0,
         edge_id_base: read_u64(header, HEADER_V3_EDGE_ID_BASE),
+        nodes_by_rank: flags & u64::from(LAYOUT_NODES_BY_RANK) != 0,
     };
     if header[HEADER_V3_ZERO].iter().any(|byte| *byte != 0) {
         return Err(invalid("reserved header bytes are not zero".into()));
@@ -3247,8 +3296,11 @@ fn parse_header_v3(
 pub struct Sections<'g> {
     pub first_out: &'g [u32],
     /// Per node, its rank in the CCH elimination order; empty without one
-    /// (format 1). Checked to be a permutation at open.
+    /// (format 1), or when the rank is the node id (`nodes_by_rank`).
+    /// Checked to be a permutation at open. Read through [`Self::cch_ranks`].
     pub cch_rank: &'g [u32],
+    /// Node `i` has rank `i` (format 3's rank numbering).
+    pub nodes_by_rank: bool,
     /// Per node its unit vector in fixed point ([`fixed_xyz`]); read through
     /// [`Self::xyz`].
     pub node_xyz_fixed: &'g [i32],
@@ -3858,6 +3910,20 @@ impl<'g> Sections<'g> {
             .filter(|edge| *edge != u32::MAX)
     }
 
+    /// Every node's CCH rank: the stored ranks, the node ids when nodes are
+    /// numbered by rank, `None` for a package without an order.
+    pub fn cch_ranks(&self) -> Option<std::borrow::Cow<'g, [u32]>> {
+        if self.nodes_by_rank {
+            Some(std::borrow::Cow::Owned(
+                (0..self.node_count as u32).collect(),
+            ))
+        } else if self.cch_rank.len() == self.node_count && self.node_count > 0 {
+            Some(std::borrow::Cow::Borrowed(self.cch_rank))
+        } else {
+            None
+        }
+    }
+
     /// The OSM node id of compact node `node`: `None` for a node with no OSM
     /// node, or in a format-2 package, which doesn't store them.
     #[inline]
@@ -4338,6 +4404,9 @@ pub struct PackageWriter {
     /// Whether node E7 positions are derived (from the header's layout):
     /// format 3 then leaves `NodeLatE7` and `NodeLngE7` out.
     node_e7_derived: bool,
+    /// Whether nodes are numbered by rank (format 3 then holds
+    /// `CchCellTree`).
+    nodes_by_rank: bool,
     sections: Vec<Option<SectionData>>,
     /// The spill file and its length so far.
     spill: Option<(File, u64)>,
@@ -4402,6 +4471,7 @@ impl PackageWriter {
             format: PackageFormat::V2,
             header: Vec::new(),
             node_e7_derived: false,
+            nodes_by_rank: false,
             sections: (0..SECTION_COUNT).map(|_| None).collect(),
             spill: spill.map(|file| (file, 0)),
             spill_error: None,
@@ -4451,11 +4521,20 @@ impl PackageWriter {
             let at = counts_at + index * 8;
             header[at..at + 8].copy_from_slice(&(*value as u64).to_le_bytes());
         }
-        let flags = if layout.node_e7_derived {
+        let mut flags = if layout.node_e7_derived {
             LAYOUT_NODE_E7_DERIVED
         } else {
             0
         };
+        // Format 2 has no rank numbering.
+        if layout.nodes_by_rank {
+            assert_eq!(
+                self.format,
+                PackageFormat::V3,
+                "only format 3 numbers nodes by rank"
+            );
+            flags |= LAYOUT_NODES_BY_RANK;
+        }
         header[flags_at..flags_at + 4].copy_from_slice(&flags.to_le_bytes());
         header[base_at..base_at + 8].copy_from_slice(&layout.edge_id_base.to_le_bytes());
         if self.format == PackageFormat::V2 {
@@ -4475,6 +4554,7 @@ impl PackageWriter {
             self.put(Section::ProfileSlots, slots);
         }
         self.node_e7_derived = layout.node_e7_derived;
+        self.nodes_by_rank = layout.nodes_by_rank;
         if self.format == PackageFormat::V2 {
             let words = counts.column_count * counts.node_count.div_ceil(64);
             for section in RESERVED_ZERO_SECTIONS {
@@ -4494,6 +4574,7 @@ impl PackageWriter {
             PackageLayout {
                 node_e7_derived: self.node_e7_derived,
                 edge_id_base: 0,
+                nodes_by_rank: self.nodes_by_rank,
             },
         )
     }
