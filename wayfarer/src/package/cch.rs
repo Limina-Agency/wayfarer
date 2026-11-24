@@ -395,11 +395,18 @@ impl CchTopology {
         // in post-order; the nodes above them follow in rank order. Every
         // list is a sorted set, whichever thread builds it, so the arrays
         // are the same on any number of threads.
-        let adjacency = RankAdjacency::build(g, &rank, &node)?;
-        let lists = eliminate(&adjacency)?;
-        drop(adjacency);
-        let (first_up, up_head) = lists.assemble()?;
-        let Lists { parent, .. } = lists;
+        // On one or two threads the tasks cost more than they save, so the
+        // elimination runs in rank order on one thread instead; the arrays
+        // are the same.
+        let (first_up, up_head, parent) = if rayon::current_num_threads() < PARALLEL_THREADS {
+            eliminate_in_rank_order(g, &rank)?
+        } else {
+            let adjacency = RankAdjacency::build(g, &rank, &node)?;
+            let lists = eliminate(&adjacency)?;
+            drop(adjacency);
+            let (first_up, up_head) = lists.assemble()?;
+            (first_up, up_head, lists.parent)
+        };
         stats.arc_count = up_head.len();
         let topology = Self {
             rank,
@@ -1070,6 +1077,87 @@ fn rank_chunks<'a, T>(mut data: &'a mut [T], first: &[u32]) -> Vec<(usize, &'a m
         data = rest;
     }
     chunks
+}
+
+/// Threads from which the topology build runs in parallel (on Małopolskie
+/// the parallel build is slower on two threads and faster on three).
+const PARALLEL_THREADS: usize = 3;
+
+/// The upward lists (`first_up`, `up_head`) and the elimination tree, on one
+/// thread: the node graph's upward neighbours by rank (lower → higher),
+/// grouped by a counting sort on the lower rank, then the elimination in
+/// rank order. A node's upward neighbours are its own and its children's
+/// but the child itself (each child's list starts with this node, its
+/// parent). Children have lower ranks, so their lists are final, and so is
+/// this node's once built: it goes to the arc array as it is. Repeats (an
+/// edge and its twin) are dropped by the elimination. `None` when the arcs
+/// outgrow the 31-bit arc ids.
+fn eliminate_in_rank_order(
+    g: &Sections<'_>,
+    rank: &[u32],
+) -> Option<(Vec<u32>, Vec<u32>, Vec<u32>)> {
+    let n = g.node_count;
+    let ends = |u: usize, e: u32| {
+        let v = g.edge_target[e as usize] as usize;
+        (v != u).then(|| {
+            let (ru, rv) = (rank[u], rank[v]);
+            if ru < rv { (ru, rv) } else { (rv, ru) }
+        })
+    };
+    let mut first_orig = vec![0u32; n + 1];
+    for u in 0..n {
+        for e in g.first_out[u]..g.first_out[u + 1] {
+            if let Some((lo, _)) = ends(u, e) {
+                first_orig[lo as usize + 1] += 1;
+            }
+        }
+    }
+    for x in 0..n {
+        first_orig[x + 1] += first_orig[x];
+    }
+    let mut fill = first_orig.clone();
+    let mut orig_head = vec![0u32; first_orig[n] as usize];
+    for u in 0..n {
+        for e in g.first_out[u]..g.first_out[u + 1] {
+            if let Some((lo, hi)) = ends(u, e) {
+                orig_head[fill[lo as usize] as usize] = hi;
+                fill[lo as usize] += 1;
+            }
+        }
+    }
+    drop(fill);
+    let mut first_up = Vec::with_capacity(n + 1);
+    first_up.push(0u32);
+    let mut up_head: Vec<u32> = Vec::with_capacity(orig_head.len());
+    let mut parent = vec![NO_NODE; n];
+    let mut first_child = vec![NO_NODE; n];
+    let mut next_sibling = vec![NO_NODE; n];
+    let mut list: Vec<u32> = Vec::new();
+    for x in 0..n {
+        list.clear();
+        list.extend_from_slice(&orig_head[first_orig[x] as usize..first_orig[x + 1] as usize]);
+        let mut child = first_child[x];
+        while child != NO_NODE {
+            let c = child as usize;
+            list.extend_from_slice(&up_head[first_up[c] as usize + 1..first_up[c + 1] as usize]);
+            child = next_sibling[c];
+        }
+        list.sort_unstable();
+        list.dedup();
+        if let Some(&p) = list.first() {
+            parent[x] = p;
+            next_sibling[x] = first_child[p as usize];
+            first_child[p as usize] = x as u32;
+        }
+        up_head.extend_from_slice(&list);
+        if up_head.len() as u64 >= u64::from(UP_BIT) {
+            return None;
+        }
+        first_up.push(up_head.len() as u32);
+    }
+    drop((orig_head, first_orig, first_child, next_sibling, list));
+    up_head.shrink_to_fit();
+    Some((first_up, up_head, parent))
 }
 
 /// The stored order (node → rank) and its inverse; `None` unless it is a
