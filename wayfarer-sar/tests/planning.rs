@@ -102,6 +102,7 @@ fn total(reach: &ReachResult) -> f64 {
         .sum::<f64>()
         + reach.probability.rest_of_world
         + reach.probability.off_network
+        + reach.probability.unlisted
 }
 
 /// Longitude of an edge's middle, in grid columns.
@@ -419,6 +420,71 @@ fn uncertainty_and_rings() {
 }
 
 #[test]
+fn trimmed_probability_keeps_the_most_probable_edges() {
+    let engine = engine();
+    let full = predict_reach(&engine, &reach_request(15.0)).unwrap();
+    assert_eq!(full.probability.unlisted, 0.0);
+    let mut ranked = full.probability.edges.clone();
+    ranked.sort_by(|a, b| {
+        b.probability
+            .total_cmp(&a.probability)
+            .then(a.edge_id.cmp(&b.edge_id))
+    });
+
+    let mut request = reach_request(15.0);
+    request.max_edges = Some(10);
+    let top = predict_reach(&engine, &request).unwrap();
+    assert_eq!(top.probability.edges.len(), 10);
+    assert!((total(&top) - 1.0).abs() < 1e-9, "{}", total(&top));
+    let mut expected = ranked[..10].iter().map(|e| e.edge_id).collect::<Vec<_>>();
+    expected.sort_unstable();
+    let listed = top
+        .probability
+        .edges
+        .iter()
+        .map(|e| e.edge_id)
+        .collect::<Vec<_>>();
+    assert_eq!(listed, expected, "kept in key order");
+    let dropped: f64 = ranked[10..].iter().map(|e| e.probability).sum();
+    assert!((top.probability.unlisted - dropped).abs() < 1e-12);
+    // Only the map is trimmed: the reach and the routes are the same.
+    assert_eq!(top.areas, full.areas);
+    assert_eq!(top.routes, full.routes);
+
+    let mut floor = reach_request(15.0);
+    floor.min_edge_probability = ranked[20].probability;
+    let floored = predict_reach(&engine, &floor).unwrap();
+    assert!(
+        floored
+            .probability
+            .edges
+            .iter()
+            .all(|edge| edge.probability >= ranked[20].probability)
+    );
+    assert!(floored.probability.edges.len() >= 21);
+    assert!((total(&floored) - 1.0).abs() < 1e-9);
+
+    // A trimmed map is a valid input to coverage, and its unlisted mass is
+    // rescaled with the rest.
+    let track = TeamTrack {
+        team_id: "alpha".into(),
+        samples: track_along_row(CENTRE as f64, (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0)),
+        profile: wayfarer::MobilityProfile::OnFoot,
+        pod: None,
+    };
+    let coverage =
+        apply_coverage(&engine, &CoverageRequest::new(vec![track], top.probability)).unwrap();
+    assert!(coverage.probability.unlisted > dropped);
+
+    let mut zero = reach_request(15.0);
+    zero.max_edges = Some(0);
+    assert!(predict_reach(&engine, &zero).is_err());
+    let mut one = reach_request(15.0);
+    one.min_edge_probability = 1.0;
+    assert!(predict_reach(&engine, &one).is_err());
+}
+
+#[test]
 fn elapsed_time_from_timestamps() {
     let engine = engine();
     let mut request = ReachRequest::new(centre());
@@ -597,7 +663,8 @@ fn coverage_lowers_searched_probability() {
         .map(|edge| edge.probability)
         .sum::<f64>()
         + updated.rest_of_world
-        + updated.off_network;
+        + updated.off_network
+        + updated.unlisted;
     assert!((sum - 1.0).abs() < 1e-9, "{sum}");
     assert!(updated.rest_of_world > reach.probability.rest_of_world);
     let middle = &coverage.segments[0];

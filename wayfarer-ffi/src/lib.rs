@@ -78,6 +78,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod compile;
 #[cfg(feature = "compiler")]
 pub use compile::*;
+#[cfg(feature = "sar")]
+mod sar;
+#[cfg(feature = "sar")]
+pub use sar::*;
 
 /// The version of this C ABI. It changes when `wayfarer.h` changes
 /// incompatibly.
@@ -383,6 +387,8 @@ pub extern "C" fn wayfarer_versions() -> *mut c_char {
         "costingModel": wayfarer_costing::COSTING_MODEL_VERSION,
         // Whether this build has the wayfarer_compile_* calls.
         "compiler": cfg!(feature = "compiler"),
+        // Whether this build has the wayfarer_sar_* calls.
+        "sar": cfg!(feature = "sar"),
     });
     CString::new(value.to_string())
         .expect("JSON has no NUL")

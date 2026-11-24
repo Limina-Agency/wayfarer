@@ -151,7 +151,7 @@ routes respect `no_go` and `avoid` zones (the complying run).
 | **1 (this branch)** | `wayfarer-sar` crate: reach prediction with P10/P50/P90 bands, LKP uncertainty, elapsed time, conditions, zones, distance rings, likely routes and corridors, segment POA, team arrival matrix and assignment, team territories, track coverage, POD and Bayes update, GeoJSON output | isochrones (A2, A10), matrices, projection, map matching: all on main | 0.5 / 0.6 |
 | 1b | Reach polygons per band (pass `polygons` through) | A1 (`feat/isochrone-polygons`, not merged yet) | after A1 |
 | 1c | Off-trail starts and ends priced (LKP off the network, segment centroids in forest) | X1 costed access legs (`feat/costed-access-legs`, in progress) | after X1 |
-| 1d | CLI `wayfarer sar reach|teams|coverage` and C ABI JSON entry points; schema files | this crate | next |
+| **1d (this branch)** | CLI `wayfarer sar reach|teams|coverage`; C ABI `wayfarer_sar_reach`, `wayfarer_sar_plan_teams`, `wayfarer_sar_coverage` (the library's `sar` build); `schema/sar-*.json`; `maxEdges` and `minEdgeProbability` trim the probability map | this crate | 0.5 / 0.6 |
 | 2 | Pace on slope: switch default factors to the E4 curve basis | T2 Tobler/E4 pace in OnFoot costing, T1 elevation | 0.8 |
 | 3 | Reach and probability per terrain cell (off-network spread, S9) | incident surface / X5a | 0.9 |
 | 3b | Hazard rasters and ML layers as zones (S10) | raster reader, layer contract | 0.9 |
@@ -175,8 +175,9 @@ isochrones from 9 origins, one of them the re-run with the measured ratio, a
 1 x 28 matrix, 20,776 edges with probability; 79 % of the probability lies
 within the slow person's contour, ROW 0.2 %). A team plan with 3 teams (one
 legged), 4 segments and 2 h territories takes 0.5 s; coverage of one 6.9 km
-track takes 0.2 s. The JSON result is about 4 MB, most of it the per-edge
-probabilities; a probability floor or a top-N option is the obvious trim.
+track takes 0.2 s. The JSON result is about 4.7 MB, most of it the per-edge
+probabilities; `maxEdges: 2000` cuts it to 1.6 MB (the 2,000 most probable
+edges hold 76 % of the mass, the rest is `unlisted`).
 
 Without heights the pace is flat: on mountain paths the model gives 1.29 to
 1.51 times the engine's 4.8-5.1 km/h, against the 1.42 E4 measured for today's

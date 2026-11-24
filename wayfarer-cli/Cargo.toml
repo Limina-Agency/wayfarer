@@ -43,4 +43,5 @@ serde_json = { workspace = true }
 wayfarer-compiler = { workspace = true }
 wayfarer = { workspace = true }
 wayfarer-package = { workspace = true }
+wayfarer-sar = { workspace = true }
 wayfarer-service = { workspace = true }

@@ -38,6 +38,7 @@ cargo fmt --all --check
 step "clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p wayfarer-ffi --features compiler --all-targets -- -D warnings
+cargo clippy -p wayfarer-ffi --features sar --all-targets -- -D warnings
 
 step "rustdoc"
 RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --all-features
@@ -46,6 +47,8 @@ step "tests"
 cargo test --workspace
 # The C library's compile calls (its `compiler` build).
 cargo test -p wayfarer-ffi --features compiler --test compile
+# Its search and rescue calls (its `sar` build).
+cargo test -p wayfarer-ffi --features sar --test sar
 
 step "release builds"
 cargo build --release -p wayfarer-cli -p wayfarer-ffi

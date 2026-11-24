@@ -1,0 +1,782 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReachResult",
+  "type": "object",
+  "properties": {
+    "areas": {
+      "description": "What a fast, a typical and a slow person could have reached, crossing\n`avoid` zones if they must (blocked only by `no_go`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReachArea"
+      }
+    },
+    "budgetS": {
+      "description": "The model-time budget: `moving_s * speed_factor`.",
+      "type": "number",
+      "format": "double"
+    },
+    "complyingAreas": {
+      "description": "With `avoid` zones: the same keeping out of them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReachArea"
+      }
+    },
+    "corridors": {
+      "description": "Edges on two or more reachable routes, most shared first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteCorridorEdge"
+      }
+    },
+    "elapsedS": {
+      "type": "number",
+      "format": "double"
+    },
+    "lastKnown": {
+      "description": "The request's last known position.",
+      "$ref": "#/$defs/GeoPoint"
+    },
+    "movingS": {
+      "description": "`elapsed_s * moving_fraction`.",
+      "type": "number",
+      "format": "double"
+    },
+    "origins": {
+      "description": "Where each origin snapped: the LKP first, then the uncertainty points\nthat snapped.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CorrelatedLocation"
+      }
+    },
+    "pace": {
+      "$ref": "#/$defs/ReachPace"
+    },
+    "probability": {
+      "$ref": "#/$defs/ProbabilityMap"
+    },
+    "routes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LikelyRoute"
+      }
+    },
+    "truncated": {
+      "description": "An isochrone hit its expansion budget: the reach is incomplete.",
+      "type": "boolean",
+      "default": false
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "lastKnown",
+    "elapsedS",
+    "movingS",
+    "budgetS",
+    "pace",
+    "origins",
+    "areas",
+    "probability",
+    "routes",
+    "corridors",
+    "truncated"
+  ],
+  "$defs": {
+    "CandidateAccess": {
+      "description": "The costed access stretch of one correlation candidate: from the\nrequested `point` in a straight line to the candidate's snap point, its\nlength the candidate's `distance_m`.",
+      "type": "object",
+      "properties": {
+        "costFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "paceMps": {
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "The requested point the stretch runs from (an origin) or to (a\ndestination).",
+          "$ref": "#/$defs/GeoPoint"
+        }
+      },
+      "required": [
+        "point",
+        "paceMps",
+        "costFactor"
+      ]
+    },
+    "CorrelatedLocation": {
+      "type": "object",
+      "properties": {
+        "access": {
+          "description": "The costed access stretch from the requested point, when the request\nhas `offNetwork` (see [`crate::access`]): searches then charge it in\nfull instead of a relative approach penalty, and results include it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "componentSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fractionAlongEdge": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headingDeltaDeg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "inboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "layer": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int16",
+          "default": null,
+          "maximum": 32767,
+          "minimum": -32768
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "opposingEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "outboundReachEdgeCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "roadGroupKey": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sameRoadCandidateCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "score": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "scoreBreakdown": {
+          "$ref": "#/$defs/CorrelationScoreBreakdown",
+          "default": {
+            "accessScore": 0.0,
+            "candidateTypeScore": 0.0,
+            "componentScore": 0.0,
+            "distanceScore": 0.0,
+            "headingScore": 0.0,
+            "layerScore": 0.0,
+            "levelScore": 0.0,
+            "reachScore": 0.0,
+            "roadClassScore": 0.0,
+            "sideScore": 0.0,
+            "totalScore": 0.0
+          }
+        },
+        "sharedEdgeInfoId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "side": {
+          "$ref": "#/$defs/CorrelationSide",
+          "default": "unknown"
+        },
+        "snappedPoint": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "sourceNodeId": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "targetNodeId": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "edgeId",
+        "sharedEdgeInfoId",
+        "opposingEdgeId",
+        "roadGroupKey",
+        "sameRoadCandidateCount",
+        "sourceNodeId",
+        "targetNodeId",
+        "snappedPoint",
+        "distanceM",
+        "fractionAlongEdge",
+        "headingDeg",
+        "headingDeltaDeg",
+        "side",
+        "componentSize",
+        "outboundReachEdgeCount",
+        "inboundReachEdgeCount",
+        "layer",
+        "level",
+        "score",
+        "scoreBreakdown",
+        "confidence"
+      ]
+    },
+    "CorrelationScoreBreakdown": {
+      "type": "object",
+      "properties": {
+        "accessScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "candidateTypeScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "componentScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "headingScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "layerScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "levelScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "reachScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "roadClassScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "sideScore": {
+          "type": "number",
+          "format": "double"
+        },
+        "totalScore": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "distanceScore",
+        "headingScore",
+        "roadClassScore",
+        "accessScore",
+        "componentScore",
+        "reachScore",
+        "sideScore",
+        "layerScore",
+        "levelScore",
+        "candidateTypeScore",
+        "totalScore"
+      ]
+    },
+    "CorrelationSide": {
+      "type": "string",
+      "enum": [
+        "left",
+        "right",
+        "on_edge",
+        "unknown"
+      ]
+    },
+    "EdgeProbability": {
+      "description": "One edge's probability of holding the person.",
+      "type": "object",
+      "properties": {
+        "avoidOnly": {
+          "description": "Reached only by crossing an `avoid` zone (or inside one).",
+          "type": "boolean"
+        },
+        "edgeId": {
+          "description": "The undirected key (the smaller directed id of the edge's two).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "probability": {
+          "type": "number",
+          "format": "double"
+        },
+        "timeS": {
+          "description": "The model time at which the edge is first entered (the complying\nsearch's when it reaches the edge).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "probability",
+        "lengthM"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "LikelyRoute": {
+      "description": "A route the person may have taken from the LKP.",
+      "type": "object",
+      "properties": {
+        "arrivalElapsedS": {
+          "description": "Elapsed seconds after last seen at which a fast, typical and slow\nperson arrives (with the request's moving fraction and conditions).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "distanceM": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "durationS": {
+          "description": "Model seconds along the route (the profile's pace).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "edgeIds": {
+          "description": "Directed edge ids in travel order.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "reachProbability": {
+          "description": "The share of people who could have got there by now.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "reachable": {
+          "type": "boolean"
+        },
+        "target": {
+          "$ref": "#/$defs/RouteTarget"
+        }
+      },
+      "required": [
+        "target",
+        "reachable",
+        "reachProbability"
+      ]
+    },
+    "PaceSource": {
+      "description": "Where a model's numbers come from.",
+      "oneOf": [
+        {
+          "description": "The built-in E4 calibration.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "default"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Calibrated from a team's GPS tracks.",
+          "type": "object",
+          "properties": {
+            "curveRefitted": {
+              "description": "Whether the slope curve was refitted (or only scaled).",
+              "type": "boolean"
+            },
+            "distanceM": {
+              "description": "Moving distance used, metres.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "team"
+            },
+            "label": {
+              "description": "A label the caller gave (team name, date).",
+              "type": "string"
+            },
+            "movingS": {
+              "description": "Moving time used, seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "tracks": {
+              "description": "Track pieces used.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "label",
+            "tracks",
+            "distanceM",
+            "movingS",
+            "curveRefitted"
+          ]
+        }
+      ]
+    },
+    "PersonFactors": {
+      "description": "A person's travel time over the engine's model time, as three percentiles\nof a log-normal distribution: `p10` for a fast person (10 % are faster),\n`p50` typical, `p90` slow. The reach of a person with factor `F` is the\nisochrone at `budget / F`.",
+      "type": "object",
+      "properties": {
+        "p10": {
+          "type": "number",
+          "format": "double"
+        },
+        "p50": {
+          "type": "number",
+          "format": "double"
+        },
+        "p90": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "p10",
+        "p50",
+        "p90"
+      ]
+    },
+    "PersonPercentile": {
+      "description": "Which person of [`PersonFactors`] a reach area or arrival is for.",
+      "oneOf": [
+        {
+          "description": "`p10`: 10 % of people are faster. The outer reach.",
+          "type": "string",
+          "const": "fast"
+        },
+        {
+          "description": "`p50`.",
+          "type": "string",
+          "const": "typical"
+        },
+        {
+          "description": "`p90`: 10 % of people are slower.",
+          "type": "string",
+          "const": "slow"
+        }
+      ]
+    },
+    "ProbabilityMap": {
+      "description": "Probability of area on the network: per edge, plus what lies beyond.\nEdges, `unlisted`, `rest_of_world` and `off_network` add up to 1.",
+      "type": "object",
+      "properties": {
+        "edges": {
+          "description": "Sorted by edge key; only edges above 0.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EdgeProbability"
+          }
+        },
+        "offNetwork": {
+          "description": "Mass of bands or rings with no reachable path in them (the network\nended: the person went off the network or stopped at its end).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "restOfWorld": {
+          "description": "Beyond the outermost band (faster than nearly everyone, or outside the\ndistance rings).",
+          "type": "number",
+          "format": "double"
+        },
+        "unlisted": {
+          "description": "Mass of reached edges left out of `edges` by the request's `maxEdges`\nor `minEdgeProbability`: on the network, but not on any listed edge.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "edges",
+        "restOfWorld",
+        "offNetwork"
+      ]
+    },
+    "ReachArea": {
+      "description": "The network a person of one percentile could have reached.",
+      "type": "object",
+      "properties": {
+        "contourS": {
+          "description": "The contour in model seconds (budget over the person's factor).",
+          "type": "number",
+          "format": "double"
+        },
+        "edgeCount": {
+          "description": "Edges reached (both directions count once).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "edgeIds": {
+          "description": "Undirected edge keys (the smaller directed id of each edge), sorted.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "maxRadiusM": {
+          "description": "The farthest reached point's straight-line distance from the LKP:\nthe search radius for this person.",
+          "type": "number",
+          "format": "double"
+        },
+        "networkLengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "person": {
+          "$ref": "#/$defs/PersonPercentile"
+        }
+      },
+      "required": [
+        "person",
+        "contourS",
+        "edgeCount",
+        "networkLengthM",
+        "maxRadiusM"
+      ]
+    },
+    "ReachPace": {
+      "description": "The pace a reach used.",
+      "type": "object",
+      "properties": {
+        "networkRatio": {
+          "description": "The pace model's expected time over the engine's, as applied: measured\non the network a typical person reaches (kept at the first guess, an\nunclassified footpath, when that is within 2 %).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "personFactors": {
+          "description": "The person factors applied, as engine-time multipliers.",
+          "$ref": "#/$defs/PersonFactors"
+        },
+        "slopeApplied": {
+          "description": "Whether slope entered the pace (false until packages carry heights).",
+          "type": "boolean"
+        },
+        "source": {
+          "description": "The pace model's source (`default` or a team calibration); none when\nthe request's person factors or a profile other than on foot decided.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaceSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "personFactors",
+        "slopeApplied"
+      ]
+    },
+    "RouteCorridorEdge": {
+      "description": "An edge many likely routes share.",
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "description": "The undirected key.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "routeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "share": {
+          "description": "`route_count` over the reachable routes.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "routeCount",
+        "share"
+      ]
+    },
+    "RouteTarget": {
+      "description": "Where a likely route goes.",
+      "oneOf": [
+        {
+          "description": "One of the request's destinations.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "destination"
+            },
+            "point": {
+              "$ref": "#/$defs/GeoPoint"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "point"
+          ]
+        },
+        {
+          "description": "The farthest point a fast person reaches in one bearing sector.",
+          "type": "object",
+          "properties": {
+            "bearing_deg": {
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "frontier"
+            },
+            "point": {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            "sector": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "sector",
+            "bearing_deg",
+            "point"
+          ]
+        }
+      ]
+    }
+  }
+}

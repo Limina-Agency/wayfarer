@@ -82,6 +82,12 @@ feature, `wayfarer_compile_start` makes mimalloc return freed pages to the
 system at once, as the `wayfarer` binary does, so a compile's phases don't
 stack their peaks.
 
+**Search and rescue planning.** A build with the `sar` feature adds
+`wayfarer_sar_reach`, `wayfarer_sar_plan_teams` and `wayfarer_sar_coverage`
+(the `wayfarer-sar` crate: reach prediction, team plans, track coverage), JSON
+in and out like the other requests (`schema/sar-*.json`); `wayfarer_versions`
+reports `"sar": true` there.
+
 **Paths are UTF-8, also on Windows.** A Windows C program gets `argv` and
 the Win32 "A" functions' strings in the ANSI code page, which can't spell
 every path, and `wayfarer_open` then fails with "path is not UTF-8". Take

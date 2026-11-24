@@ -128,6 +128,14 @@ pub struct ReachRequest {
     /// `false` leaves out the areas' `edgeIds` and the routes' `edgeIds`.
     #[serde(default = "yes")]
     pub include_edge_ids: bool,
+    /// List at most this many edges in `probability`, the most probable
+    /// first (default: all). The rest is `probability.unlisted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_edges: Option<usize>,
+    /// Leave edges below this probability out of `probability`, in
+    /// [0, 1) (default 0: none). Their mass is `probability.unlisted`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min_edge_probability: f64,
 }
 
 impl ReachRequest {
@@ -156,6 +164,8 @@ impl ReachRequest {
             overlays: Vec::new(),
             max_expansion_edge_count: None,
             include_edge_ids: true,
+            max_edges: None,
+            min_edge_probability: 0.0,
         }
     }
 
@@ -211,6 +221,12 @@ impl ReachRequest {
         }
         if self.route_sectors > MAX_ROUTE_SECTORS {
             return Err(SarError::invalid("routeSectors must be at most 64"));
+        }
+        if self.max_edges == Some(0) {
+            return Err(SarError::invalid("maxEdges must be at least 1"));
+        }
+        if !(0.0..1.0).contains(&self.min_edge_probability) {
+            return Err(SarError::invalid("minEdgeProbability must be in [0, 1)"));
         }
         if !finite_positive(self.outer_share) || self.outer_share > 0.1 {
             return Err(SarError::invalid("outerShare must be in (0, 0.1]"));
@@ -282,6 +298,10 @@ fn on_foot() -> MobilityProfile {
 fn one() -> f64 {
     1.0
 }
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
 fn yes() -> bool {
     true
 }
@@ -355,7 +375,7 @@ pub struct EdgeProbability {
 }
 
 /// Probability of area on the network: per edge, plus what lies beyond.
-/// Edges, `rest_of_world` and `off_network` add up to 1.
+/// Edges, `unlisted`, `rest_of_world` and `off_network` add up to 1.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -369,6 +389,10 @@ pub struct ProbabilityMap {
     /// ended: the person went off the network or stopped at its end).
     #[serde(default)]
     pub off_network: f64,
+    /// Mass of reached edges left out of `edges` by the request's `maxEdges`
+    /// or `minEdgeProbability`: on the network, but not on any listed edge.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unlisted: f64,
 }
 
 impl ProbabilityMap {
@@ -380,11 +404,11 @@ impl ProbabilityMap {
     }
 
     pub(crate) fn validate(&self) -> Result<(), SarError> {
-        let values = self
-            .edges
-            .iter()
-            .map(|edge| edge.probability)
-            .chain([self.rest_of_world, self.off_network]);
+        let values = self.edges.iter().map(|edge| edge.probability).chain([
+            self.rest_of_world,
+            self.off_network,
+            self.unlisted,
+        ]);
         let mut total = 0.0;
         for value in values {
             if !unit_interval(value) {
@@ -770,7 +794,7 @@ pub fn predict_reach(
         time = mix(&rings, request.ring_weight.unwrap_or(0.5), &time);
     }
 
-    let probability = ProbabilityMap {
+    let mut probability = ProbabilityMap {
         edges: time
             .edges
             .iter()
@@ -792,7 +816,9 @@ pub fn predict_reach(
             .collect(),
         rest_of_world: time.rest_of_world,
         off_network: time.off_network,
+        unlisted: 0.0,
     };
+    trim(&mut probability, request);
 
     let areas = reach_areas(&free, &persons, request, &mut edges);
     let complying_areas = complying
@@ -890,6 +916,39 @@ struct Distribution {
 }
 
 /// `share * a + (1 - share) * b`.
+/// Leaves the request's least probable edges out of the map, their mass
+/// moved to `unlisted`; the listed edges stay in key order.
+fn trim(probability: &mut ProbabilityMap, request: &ReachRequest) {
+    let floor = request.min_edge_probability;
+    let limit = request.max_edges.unwrap_or(usize::MAX);
+    if floor <= 0.0 && probability.edges.len() <= limit {
+        return;
+    }
+    let mut order = (0..probability.edges.len())
+        .filter(|index| probability.edges[*index].probability >= floor)
+        .collect::<Vec<_>>();
+    // Most probable first, ties by key, so the cut is deterministic.
+    order.sort_by(|a, b| {
+        let (a, b) = (&probability.edges[*a], &probability.edges[*b]);
+        b.probability
+            .total_cmp(&a.probability)
+            .then(a.edge_id.cmp(&b.edge_id))
+    });
+    order.truncate(limit);
+    let mut keep = vec![false; probability.edges.len()];
+    for index in order {
+        keep[index] = true;
+    }
+    let edges = std::mem::take(&mut probability.edges);
+    for (edge, keep) in edges.into_iter().zip(keep) {
+        if keep {
+            probability.edges.push(edge);
+        } else {
+            probability.unlisted += edge.probability;
+        }
+    }
+}
+
 fn mix(a: &Distribution, share: f64, b: &Distribution) -> Distribution {
     let mut edges = BTreeMap::new();
     for (key, value) in &a.edges {

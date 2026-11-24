@@ -1165,6 +1165,7 @@ dependencies = [
  "wayfarer",
  "wayfarer-compiler",
  "wayfarer-package",
+ "wayfarer-sar",
  "wayfarer-service",
 ]
 
@@ -1216,6 +1217,7 @@ dependencies = [
  "wayfarer-compiler",
  "wayfarer-costing",
  "wayfarer-package",
+ "wayfarer-sar",
  "wayfarer-service",
 ]
 

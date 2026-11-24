@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoverageRequest",
+  "description": "Searched tracks against a probability map. See\n`docs/design/sar-planning.md` 2.6.",
+  "type": "object",
+  "properties": {
+    "defaultPod": {
+      "description": "Per-pass detection probability of tracks that set none (default 0.8,\na hasty search along a path: a starting value, not calibrated).",
+      "type": "number",
+      "format": "double",
+      "default": 0.8
+    },
+    "probability": {
+      "description": "The probability before the search (`ReachResult::probability`).",
+      "$ref": "#/$defs/ProbabilityMap"
+    },
+    "segments": {
+      "description": "Segments to report coverage for (ids unique); may be empty.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SearchSegment"
+      }
+    },
+    "tracks": {
+      "description": "1 to 256 tracks.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TeamTrack"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tracks",
+    "probability"
+  ],
+  "$defs": {
+    "EdgeProbability": {
+      "description": "One edge's probability of holding the person.",
+      "type": "object",
+      "properties": {
+        "avoidOnly": {
+          "description": "Reached only by crossing an `avoid` zone (or inside one).",
+          "type": "boolean"
+        },
+        "edgeId": {
+          "description": "The undirected key (the smaller directed id of the edge's two).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "probability": {
+          "type": "number",
+          "format": "double"
+        },
+        "timeS": {
+          "description": "The model time at which the edge is first entered (the complying\nsearch's when it reaches the edge).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "probability",
+        "lengthM"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: the roads cars may use and busways, and not\nconfined to through roads (it may cross private and destination-only\nroads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the ways `OnFoot` may\nuse, and bikeable ways `foot=no` closes to it (a cycleway with\n`foot=no`, a track with `access=no, bicycle=yes`). Tracks and paths cost\nhalf as much as streets, main roads are avoided more strongly, and the\npace on tracks and paths is faster (6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "NavigationPositionSample": {
+      "type": "object",
+      "properties": {
+        "accuracyMeters": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "headingDegrees": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "position": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sampledAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "speedMetersPerSecond": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "position"
+      ]
+    },
+    "ProbabilityMap": {
+      "description": "Probability of area on the network: per edge, plus what lies beyond.\nEdges, `unlisted`, `rest_of_world` and `off_network` add up to 1.",
+      "type": "object",
+      "properties": {
+        "edges": {
+          "description": "Sorted by edge key; only edges above 0.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EdgeProbability"
+          }
+        },
+        "offNetwork": {
+          "description": "Mass of bands or rings with no reachable path in them (the network\nended: the person went off the network or stopped at its end).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "restOfWorld": {
+          "description": "Beyond the outermost band (faster than nearly everyone, or outside the\ndistance rings).",
+          "type": "number",
+          "format": "double"
+        },
+        "unlisted": {
+          "description": "Mass of reached edges left out of `edges` by the request's `maxEdges`\nor `minEdgeProbability`: on the network, but not on any listed edge.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "edges",
+        "restOfWorld"
+      ]
+    },
+    "SearchSegment": {
+      "description": "A search segment: an area one team searches in one assignment.",
+      "type": "object",
+      "properties": {
+        "accessPoint": {
+          "description": "Where a team enters the segment; by default the polygon's centroid.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "polygon": {
+          "description": "At least three points.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "probability": {
+          "description": "The segment's probability of area when the planner sets it; by\ndefault the sum of the plan's edge probabilities inside the polygon.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "polygon"
+      ]
+    },
+    "TeamTrack": {
+      "description": "One team's GPS track of a search assignment.",
+      "type": "object",
+      "properties": {
+        "pod": {
+          "description": "The probability one pass along a path detects the person on it, in\n[0, 1]; by default the request's `default_pod`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "profile": {
+          "$ref": "#/$defs/MobilityProfile",
+          "default": "on_foot"
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NavigationPositionSample"
+          }
+        },
+        "teamId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "teamId",
+        "samples"
+      ]
+    }
+  }
+}

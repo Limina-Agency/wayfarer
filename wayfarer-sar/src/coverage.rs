@@ -232,6 +232,7 @@ pub fn apply_coverage(
             .collect(),
         rest_of_world: request.probability.rest_of_world * scale,
         off_network: request.probability.off_network * scale,
+        unlisted: request.probability.unlisted * scale,
     };
     let after = probability.by_edge();
 

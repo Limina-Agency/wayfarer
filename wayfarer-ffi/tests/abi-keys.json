@@ -906,7 +906,8 @@
     "compiler",
     "costingModel",
     "library",
-    "readableFormats"
+    "readableFormats",
+    "sar"
   ],
   "workflow": [
     "alternatives",

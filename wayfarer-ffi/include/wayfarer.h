@@ -122,7 +122,8 @@ typedef struct WayfarerNavigationRoute WayfarerNavigationRoute;
 uint32_t wayfarer_abi_version(void);
 
 /* The library's versions as JSON: {"library", "abi", "readableFormats":
- * [min, max], "costingModel"}. Free with wayfarer_string_free. */
+ * [min, max], "costingModel", "compiler", "sar"} ("compiler" and "sar": whether
+ * this build has those calls). Free with wayfarer_string_free. */
 char *wayfarer_versions(void);
 
 /* Opens the package at `path` (UTF-8, also on Windows: see "Paths and
@@ -340,6 +341,48 @@ int32_t wayfarer_compile_wait(WayfarerCompileJob *job, char **out_json);
 /* Frees a job once no other call on it is in flight; a running compile is
  * cancelled and waited for first. NULL is ignored. */
 void wayfarer_compile_free(WayfarerCompileJob *job);
+
+/* ---- Search and rescue planning (sar build only) ------------------------ */
+
+/* The calls below exist only in a build of the library with the `sar`
+ * feature; wayfarer_versions reports "sar": true there. They take and return
+ * JSON like the requests above; see schema/sar-*.json. An invalid request
+ * fails with WAYFARER_INVALID_ARGUMENT ("code": "invalid_request"), and a
+ * search that fails with the route error's code. */
+
+/* Predicts where a missing person could be: a ReachRequest {"lastKnown",
+ * "uncertaintyM", "elapsedS" (or "lastSeenAtMs" and "atMs"), "profile",
+ * "pace" (a pace model, as `wayfarer pace calibrate` writes it), "zones"
+ * ([{"id", "kind": "no_go" | "avoid" | "weight", "polygon", "factor"}]),
+ * "destinations", "distanceRings", "maxEdges", "minEdgeProbability", ...}
+ * gives a ReachResult: the fast, typical and slow person's reach
+ * ("areas"), the probability per edge ("probability": {"edges",
+ * "restOfWorld", "offNetwork", "unlisted"}), likely "routes" and
+ * "corridors". `cancel` (may be NULL) stops it. */
+int32_t wayfarer_sar_reach(const WayfarerPackage *package,
+                                   const char *request_json,
+                                   const WayfarerCancelToken *cancel,
+                                   char **out_json);
+
+/* Plans teams onto search segments: a TeamPlanRequest {"teams", "segments",
+ * "probability" (a reach result's, optional), "shiftS", "pace", "zones",
+ * ...} gives a TeamPlanResult {"paces", "arrivals", "segments",
+ * "assignments", "territories", "warnings"}. `cancel` (may be NULL) stops
+ * it. */
+int32_t wayfarer_sar_plan_teams(const WayfarerPackage *package,
+                                        const char *request_json,
+                                        const WayfarerCancelToken *cancel,
+                                        char **out_json);
+
+/* Applies searched tracks: a CoverageRequest {"tracks": [{"teamId",
+ * "samples", "profile", "pod"}], "probability", "segments", "defaultPod"}
+ * gives a CoverageResult {"tracks", "coveredEdges", "segments",
+ * "probability" (updated after the unsuccessful search),
+ * "probabilityOfSuccess"}. A track that matches no road is reported in
+ * "tracks", not as an error. */
+int32_t wayfarer_sar_coverage(const WayfarerPackage *package,
+                                      const char *request_json,
+                                      char **out_json);
 
 #ifdef __cplusplus
 }
