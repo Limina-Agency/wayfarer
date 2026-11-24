@@ -82,7 +82,31 @@ pub fn from_slice<'de, T: de::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, E
 pub fn take_from_slice<'de, T: de::Deserialize<'de>>(
     bytes: &'de [u8],
 ) -> Result<(T, &'de [u8]), Error> {
-    let mut deserializer = Deserializer { input: bytes };
+    let mut deserializer = Deserializer {
+        input: bytes,
+        field_limit: None,
+    };
+    let value = T::deserialize(&mut deserializer)?;
+    Ok((value, deserializer.input))
+}
+
+/// Decodes the struct `T` from the start of `bytes`, reading only its first
+/// `fields` fields, and returns it and the bytes after them. Fields past
+/// `fields` (or past the struct's own count, if that is smaller) are not read
+/// and take their serde defaults, so `T` needs `#[serde(default)]`. Nested
+/// structs are read whole.
+///
+/// This is how a record that only ever gains fields at its end is read
+/// across revisions: an older record has fewer fields, a newer one has bytes
+/// after the reader's last field.
+pub fn take_struct_prefix<'de, T: de::Deserialize<'de>>(
+    bytes: &'de [u8],
+    fields: usize,
+) -> Result<(T, &'de [u8]), Error> {
+    let mut deserializer = Deserializer {
+        input: bytes,
+        field_limit: Some(fields),
+    };
     let value = T::deserialize(&mut deserializer)?;
     Ok((value, deserializer.input))
 }
@@ -337,6 +361,9 @@ impl<W: Write> ser::SerializeStructVariant for &mut Serializer<W> {
 
 struct Deserializer<'de> {
     input: &'de [u8],
+    /// How many fields the next struct read takes ([`take_struct_prefix`]);
+    /// it applies once, to the outermost struct.
+    field_limit: Option<usize>,
 }
 
 impl<'de> Deserializer<'de> {
@@ -511,10 +538,11 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Error> {
-        visitor.visit_seq(Elements {
-            de: self,
-            len: fields.len(),
-        })
+        let len = match self.field_limit.take() {
+            Some(limit) => limit.min(fields.len()),
+            None => fields.len(),
+        };
+        visitor.visit_seq(Elements { de: self, len })
     }
     fn deserialize_enum<V: Visitor<'de>>(
         self,
@@ -848,5 +876,70 @@ mod tests {
         assert!(
             from_slice::<Vec<u8>>(&[253, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]).is_err()
         );
+    }
+
+    /// A struct that only gains fields at its end reads across revisions:
+    /// the older record leaves the new fields at their defaults, and the
+    /// newer one leaves its extra fields unread.
+    #[test]
+    fn a_struct_prefix_reads_older_and_newer_records() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Default)]
+        #[serde(default)]
+        struct Inner {
+            x: u32,
+            y: Option<u16>,
+        }
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Default)]
+        #[serde(default)]
+        struct Old {
+            a: u32,
+            inner: Inner,
+        }
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Default)]
+        #[serde(default)]
+        struct New {
+            a: u32,
+            inner: Inner,
+            b: Option<String>,
+            c: bool,
+        }
+        let inner = || Inner { x: 300, y: Some(7) };
+        let old = to_vec(&Old {
+            a: 5,
+            inner: inner(),
+        })
+        .unwrap();
+        let new = to_vec(&New {
+            a: 5,
+            inner: inner(),
+            b: Some("x".into()),
+            c: true,
+        })
+        .unwrap();
+        // The newer reader on an older record: two fields, nested struct whole.
+        let (read, rest) = take_struct_prefix::<New>(&old, 2).unwrap();
+        assert_eq!(
+            read,
+            New {
+                a: 5,
+                inner: inner(),
+                b: None,
+                c: false
+            }
+        );
+        assert!(rest.is_empty());
+        // The older reader on a newer record: its two fields, then the rest.
+        let (read, rest) = take_struct_prefix::<Old>(&new, 4).unwrap();
+        assert_eq!(
+            read,
+            Old {
+                a: 5,
+                inner: inner()
+            }
+        );
+        assert_eq!(rest, &new[old.len()..]);
+        // Too few bytes for the fields asked for.
+        assert!(take_struct_prefix::<New>(&old, 3).is_err());
+        assert!(take_struct_prefix::<New>(&old[..old.len() - 1], 2).is_err());
     }
 }
