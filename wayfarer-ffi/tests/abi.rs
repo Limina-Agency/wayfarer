@@ -158,7 +158,12 @@ fn packages_open_from_non_ascii_paths() {
     assert_eq!(status, WAYFARER_OK, "{route}");
     unsafe { wayfarer_close(package) };
     let status = unsafe { wayfarer_verify(utf8.as_ptr(), &mut out) };
-    assert_eq!(status, WAYFARER_OK, "{}", take(out));
+    let verified = take(out);
+    assert_eq!(status, WAYFARER_OK, "{verified}");
+    // Format 2: both hashes are the root checksum.
+    assert_eq!(info["contentHash"], info["datasetHash"]);
+    assert_eq!(verified["datasetHash"], info["datasetHash"]);
+    assert_eq!(verified["contentHash"], info["contentHash"]);
 
     #[cfg(windows)]
     {

@@ -9,6 +9,10 @@
       "format": "uint64",
       "minimum": 0
     },
+    "contentHash": {
+      "description": "The package's root checksum, over every byte of the file.",
+      "type": "string"
+    },
     "costingModelVersion": {
       "description": "The costing model the package's costs were baked with.",
       "type": "integer",
@@ -22,7 +26,7 @@
       ]
     },
     "datasetHash": {
-      "description": "The package's root checksum.",
+      "description": "The package's dataset hash: what overlay sets and results bind to.\nIn format 3 the identity hash; in format 2 the root checksum, as\n[`Self::content_hash`].",
       "type": "string"
     },
     "edgeCount": {
@@ -58,6 +62,7 @@
     "package",
     "byteLen",
     "datasetHash",
+    "contentHash",
     "formatVersion",
     "costingModelVersion",
     "graphId",

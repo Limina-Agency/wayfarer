@@ -183,6 +183,7 @@
   ],
   "open": [
     "byteLen",
+    "contentHash",
     "costingModelVersion",
     "countryCode",
     "datasetHash",
@@ -893,6 +894,7 @@
   ],
   "verify": [
     "byteLen",
+    "contentHash",
     "datasetHash",
     "sections",
     "sections[].blake3",

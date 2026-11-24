@@ -2,10 +2,11 @@
 
 Status: being built behind an off-by-default compiler switch (decision F1
 of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: steps 1 to 3 of section 12 (the tagged
+--package-format 3`, hidden). Done: steps 1 to 4 of section 12 (the tagged
 table, both hashes, `PackageParams`, retired reserved sections, implied ids;
-`ProfileSlots` and the u16 masks; versioned attribute-class records), draft
-revision 3. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
+`ProfileSlots` and the u16 masks; versioned attribute-class records;
+`RegionInfo`, `NodeSourceId` and `contentHash` on the wire), draft
+revision 4. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -265,6 +266,12 @@ reports), and `contentHash` is added. For a format-2 package both are the
 root checksum, so nothing that binds to today's packages breaks. `verify`
 and `info` print both.
 
+*As built (draft revision 4).* `contentHash` sits beside `datasetHash` in
+the C ABI's `wayfarer_info` and `wayfarer_verify` results, in the compile
+result (`CompileResult`, `schema/compile-result.json`) and as
+`packageContentHash` in the CLI host protocol's `complete` event. Route
+results keep `revision`, the dataset hash.
+
 ## 5. Sections the bump adds or changes
 
 ### 5.1 `ProfileSlots` (id 128, mandatory, REQUIRED, IDENTITY)
@@ -473,6 +480,16 @@ refuses what it doesn't know). Neighbours and the identity hash each portal
 table was matched against go in `RegionNeighbours` (section 6), not here, so a
 bundle can record a re-match without changing a region's identity.
 
+*As built (draft revision 4).* A compile writes a stand-alone region: zero
+ids, halo, rule and flags, the bounding box of the nodes' E7 positions, and
+a zero boundary hash, since no compile records a clip polygon yet. Open
+refuses a section that is not exactly 96 bytes, a box that is not on the
+globe (min above max, or beyond ±90° and ±180°; all zero for a package
+without nodes), and flag bit 0 without a section 258 (`NodeOwner`) in the
+table or the reverse. A flag bit it doesn't know needs a newer build
+(`TooNew`). `wayfarer info` prints the region. Małopolskie's extent is
+49.1502309° to 50.5541784° N, 19.0589264° to 21.4403995° E.
+
 ### 5.6 `NodeSourceId` (ids 140, 141, mandatory, REQUIRED, IDENTITY)
 
 The OSM node id of every node, as `u32` low bits (id 140) and `u16` high
@@ -489,6 +506,17 @@ fraction. Plaza ways already have stable synthetic ids
 way id in a reference is a plaza of that OSM way. The engine builds the
 reverse lookup (OSM id to node) on first use, as it does for edge ids
 today.
+
+*As built (draft revision 4).* A format-3 compile keeps the road graph's
+source node ids through the node reordering and refuses a negative id or
+one above 2^48 − 2^32 − 1 (the largest whose high part is not `0xFFFF`);
+format 2 compiles as before. Open refuses a node whose high part is `0xFFFF`
+and low part is not zero. `Sections::osm_node_id` reads a node's id and
+`Sections::nodes_with_osm_id` finds the nodes of an id through the nodes
+sorted by it (4 bytes a node), built on first use. *Measured* on
+Małopolskie: 6,415,962 bytes for 1,069,327 nodes; 3,332 have no OSM node,
+no OSM node maps to two nodes, 710,348 ids are above 2^32 and the largest is
+14,392,565,185.
 
 Stable references are a 1.0 contract (API-5, P0), so this can't be an
 optional section added later: a 1.0 package without it couldn't be resolved

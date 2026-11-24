@@ -54,11 +54,12 @@ use wayfarer_package::MobilityProfile;
 use wayfarer_package::format::{
     EDGE_FLAG_BARRIER_AT_TARGET, EDGE_FLAG_COMPLEX_RESTRICTION_FIRST,
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
-    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES, NO_COLUMN,
-    NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts, PackageFile, PackageFormat,
-    PackageLayout, PackageParams, PackageWriter, RoutingPackageError, RoutingPackageMetadata,
-    SHAPE_START_STRIDE, Section, WAY_ID_WIDE, e7_from_fixed_xyz, edge_id_span_limit, encode_shape,
-    fixed_xyz, is_exact_e7, profile_slot, reverse_heading, to_e7, unit_xyz, xyz_from_fixed,
+    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES,
+    MAX_SOURCE_NODE_ID, NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts,
+    PackageFile, PackageFormat, PackageLayout, PackageParams, PackageWriter, RegionInfo,
+    RoutingPackageError, RoutingPackageMetadata, SHAPE_START_STRIDE, Section, WAY_ID_WIDE,
+    e7_from_fixed_xyz, edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7, profile_slot,
+    reverse_heading, split_source_node_id, to_e7, unit_xyz, xyz_from_fixed,
 };
 use wayfarer_package::format::{junction, road_type_rank};
 use wayfarer_package::request::derived_opposing;
@@ -462,9 +463,12 @@ fn build_package_from(
             *component_sizes.entry(component).or_default() += 1;
         }
     }
-    // Not read by the package.
+    // Not read by the package. Format 3 keeps the OSM node ids, written in
+    // package order below.
+    if !implied_ids {
+        network.release_node_columns(&[NodeColumn::SourceNodeId]);
+    }
     network.release_node_columns(&[
-        NodeColumn::SourceNodeId,
         NodeColumn::EdgeCounts,
         NodeColumn::Junction,
         NodeColumn::RoundaboutEntryCount,
@@ -541,6 +545,20 @@ fn build_package_from(
     drop(edge_raw);
     network.permute_nodes(&nodes);
     drop(nodes);
+    if implied_ids {
+        // Format 3: every node's OSM node id, low 32 and high 16 bits.
+        let (low, high) = (0..node_count)
+            .map(|node| split_source_node_id(network.node_source_node_id(node)))
+            .collect::<Result<(Vec<u32>, Vec<u16>), i64>>()
+            .map_err(|id| {
+                RoutingPackageError::Unsupported(format!(
+                    "OSM node id {id} is outside what format 3 stores (0 to {MAX_SOURCE_NODE_ID})"
+                ))
+            })?;
+        network.release_node_columns(&[NodeColumn::SourceNodeId]);
+        writer.put(Section::NodeSourceIdLow, low);
+        writer.put(Section::NodeSourceIdHigh, high);
+    }
     let edge_count = network.edge_count();
     let edge_source = network.take_sources();
     let edge_target = network.take_targets();
@@ -1134,6 +1152,23 @@ fn build_package_from(
     } else {
         (node_lat_e7, node_lng_e7)
     };
+    if implied_ids {
+        // A stand-alone package is a bundle of one: its region info holds
+        // only the nodes' extent (no clip polygon is recorded yet).
+        let extent = (0..node_count)
+            .map(|node| (to_e7(node_lat(node)), to_e7(node_lng(node))))
+            .fold(None, |extent: Option<[i32; 4]>, (lat, lng)| {
+                Some(match extent {
+                    None => [lat, lng, lat, lng],
+                    Some([a, b, c, d]) => [a.min(lat), b.min(lng), c.max(lat), d.max(lng)],
+                })
+            })
+            .unwrap_or_default();
+        writer.put(
+            Section::RegionInfo,
+            RegionInfo::stand_alone(extent).to_bytes().to_vec(),
+        );
+    }
     writer.put(Section::NodeLatE7, node_lat_e7);
     writer.put(Section::NodeLngE7, node_lng_e7);
     report.node_inexact_count = (0..node_count)
@@ -1995,5 +2030,110 @@ mod tests {
             PackageFile::from_bytes(&bytes),
             Err(RoutingPackageError::Invalid(message)) if message.contains("edge ids")
         ));
+    }
+
+    /// Two streets sharing a node, one of whose ends has no OSM node and one
+    /// an id above 2^32, renumbered as a compile does.
+    fn source_id_graph(far_end: Option<i64>) -> RoadGraph {
+        let mut builder = RoadGraphBuilder::new("source-ids");
+        builder.push_way(RoutableWay {
+            osm_way_id: 1,
+            points: vec![(50.0, 19.9), (50.001, 19.9), (50.002, 19.9)],
+            source_node_ids: vec![Some(11), Some(12), Some(13)],
+            road_type: RoadType::Residential,
+            ..RoutableWay::default()
+        });
+        builder.push_way(RoutableWay {
+            osm_way_id: 2,
+            points: vec![(50.002, 19.9), (50.002, 19.902), (50.003, 19.904)],
+            source_node_ids: vec![Some(13), Some((7 << 32) + 5), far_end],
+            road_type: RoadType::Residential,
+            ..RoutableWay::default()
+        });
+        let mut graph = builder.finish();
+        wayfarer_road_graph::enhance_road_graph(&mut graph);
+        order::renumber_in_package_order(&mut graph).unwrap();
+        graph
+    }
+
+    fn format_3_options() -> PackageBuildOptions {
+        PackageBuildOptions {
+            package_format: PackageFormat::V3,
+            ..PackageBuildOptions::default()
+        }
+    }
+
+    /// Format 3 states every node's OSM node id and a stand-alone region;
+    /// format 2 states neither.
+    #[test]
+    fn format_3_writes_osm_node_ids_and_its_region() {
+        let graph = source_id_graph(None);
+        let expected = [
+            ((50.0, 19.9), Some(11)),
+            ((50.002, 19.9), Some(13)),
+            ((50.003, 19.904), None),
+        ];
+        let (bytes, _) = package_bytes(&graph, &format_3_options()).unwrap();
+        let package = PackageFile::from_bytes(&bytes).unwrap();
+        let view = package.view();
+        assert!(package.has_osm_node_ids());
+        assert_eq!(view.node_count, expected.len());
+        let mut extent = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for node in 0..view.node_count as u32 {
+            let (lat, lng) = view.node_lat_lng(node);
+            let (_, id) = expected
+                .iter()
+                .find(|((a, b), _)| (lat - a).abs() < 1e-9 && (lng - b).abs() < 1e-9)
+                .unwrap_or_else(|| panic!("node {node} at {lat}, {lng}"));
+            assert_eq!(view.osm_node_id(node), *id, "node {node}");
+            if let Some(id) = id {
+                assert_eq!(view.nodes_with_osm_id(*id), &[node]);
+            }
+            let (lat_e7, lng_e7) = view.node_e7(node);
+            extent = [
+                extent[0].min(lat_e7),
+                extent[1].min(lng_e7),
+                extent[2].max(lat_e7),
+                extent[3].max(lng_e7),
+            ];
+        }
+        // Shape points are not nodes; unknown and negative ids match none.
+        assert!(view.nodes_with_osm_id(12).is_empty());
+        assert!(view.nodes_with_osm_id((7 << 32) + 5).is_empty());
+        assert!(view.nodes_with_osm_id(-11).is_empty());
+        assert_eq!(
+            package.region_info(),
+            Some(&RegionInfo::stand_alone(extent))
+        );
+        assert_eq!(extent, [500_000_000, 199_000_000, 500_030_000, 199_040_000]);
+
+        let (bytes, _) = package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+        let package = PackageFile::from_bytes(&bytes).unwrap();
+        let view = package.view();
+        assert!(!package.has_osm_node_ids());
+        assert_eq!(package.region_info(), None);
+        assert_eq!(view.osm_node_id(0), None);
+        assert!(view.nodes_with_osm_id(11).is_empty());
+    }
+
+    /// An id at the top of the 48-bit range is stored; one past it, or a
+    /// negative one, fails a format-3 compile and not a format-2 one.
+    #[test]
+    fn format_3_refuses_osm_node_ids_it_cannot_store() {
+        let graph = source_id_graph(Some(MAX_SOURCE_NODE_ID));
+        let (bytes, _) = package_bytes(&graph, &format_3_options()).unwrap();
+        let package = PackageFile::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            package.view().nodes_with_osm_id(MAX_SOURCE_NODE_ID).len(),
+            1
+        );
+        for id in [MAX_SOURCE_NODE_ID + 1, -3] {
+            let graph = source_id_graph(Some(id));
+            assert!(matches!(
+                package_bytes(&graph, &format_3_options()),
+                Err(RoutingPackageError::Unsupported(message)) if message.contains(&id.to_string())
+            ));
+            package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+        }
     }
 }

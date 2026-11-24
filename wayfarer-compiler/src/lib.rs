@@ -218,6 +218,7 @@ pub(crate) struct RouteArchiveCompileRequest {
 pub(crate) struct RouteArchiveCompileResult {
     pub byte_len: u64,
     pub dataset_hash: String,
+    pub content_hash: String,
     pub format_version: u32,
     pub costing_model_version: u32,
     pub node_count: u64,
@@ -343,6 +344,7 @@ fn compile_with_job(
     let written = RouteArchiveCompileResult {
         byte_len: package.byte_len() as u64,
         dataset_hash: package.dataset_hash().to_string(),
+        content_hash: package.content_hash().to_string(),
         format_version: package.format_version(),
         costing_model_version: package.metadata().costing_model_version,
         node_count: counts.node_count as u64,
