@@ -235,7 +235,16 @@ impl RoutingEngine {
                 && cells.iter().any(retries_relaxed)
             {
                 let retry = cells.iter().map(retries_relaxed).collect::<Vec<_>>();
-                let mut relaxed = cells.clone();
+                // The relaxed pass replaces only retried (unreachable) cells:
+                // the copy leaves the others' paths out.
+                let mut relaxed = cells
+                    .iter()
+                    .map(|cell| RouteMatrixCell {
+                        edge_ids: Vec::new(),
+                        failure_reason: cell.failure_reason.clone(),
+                        ..*cell
+                    })
+                    .collect::<Vec<_>>();
                 match self.matrix_cells(
                     &request,
                     &source_candidates,
@@ -487,6 +496,31 @@ impl RoutingEngine {
         // Discounted edges and fragments become gates of the potentials.
         let bounds = override_bounds(view, column, &cost_overrides, &split_cost);
         let heuristic_cost_per_m = bounds.heuristic_cost_per_m;
+        // Discounts past the exact gates, over many cells: bound with the
+        // request's own costs (M4). Overlays keep the gates, which their
+        // patch's bounds share.
+        let searches = (0..sources.len())
+            .filter(|source| !sources[*source].is_empty())
+            .map(|source| {
+                (0..target_count)
+                    .filter(|target| !targets[*target].is_empty() && retries(source, *target))
+                    .count()
+            })
+            .sum::<usize>();
+        let forced = crate::debug::request_metric();
+        #[cfg(test)]
+        let forced = test_mode::request_metric().or(forced);
+        let request_metric = (overlay.is_none()
+            && forced.unwrap_or_else(|| bounds.wants_request_metric(searches)))
+        .then(|| {
+            crate::package::search::request_metric(view, |edge| {
+                cost_overrides
+                    .get(&edge)
+                    .copied()
+                    .unwrap_or_else(|| column.cost(edge))
+            })
+        })
+        .flatten();
         let query = AnalysisQuery {
             column,
             profile_bit: view.profile_bit(request.profile),
@@ -495,6 +529,7 @@ impl RoutingEngine {
             cost_overrides,
             gates: bounds.gates.clone(),
             restriction_penalty: crate::sar::restriction_penalty(&request.options),
+            request_metric,
         };
         let edge_cost = |edge: u32| query.edge_cost(view, edge);
         let costs = PatchCosts {
@@ -531,18 +566,28 @@ impl RoutingEngine {
             restriction_penalty: crate::sar::restriction_penalty(&request.options),
             pieces: None,
         };
+        // Edge ids only where they are returned, or where the pocket check
+        // after a strict pass reads them (see `confine_to_own_pockets`).
+        let keep_edge_ids = request.include_edge_ids || !unblocked.is_empty();
         let patch_path = |patch: &PatchGraph<'_>, path: PatchPath| MatrixPath {
-            edge_ids: patch.step_edge_ids(view, &path.steps),
+            edge_ids: if keep_edge_ids {
+                patch.step_edge_ids(view, &path.steps)
+            } else {
+                Vec::new()
+            },
             distance_m: path.distance_m,
             duration_s: path.duration_s,
             cost: path.cost,
         };
         let compact_path = |path: AnalysisPath| MatrixPath {
-            edge_ids: path
-                .edges
-                .iter()
-                .map(|edge| view.edge_id(*edge as usize))
-                .collect(),
+            edge_ids: if keep_edge_ids {
+                path.edges
+                    .iter()
+                    .map(|edge| view.edge_id(*edge as usize))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             distance_m: path.distance_m,
             duration_s: path.duration_s,
             cost: path.cost,
@@ -868,7 +913,7 @@ impl RoutingEngine {
                 }
                 let cell = cell_mut(cells, target_count, source_index, target_index);
                 if let Some(path) = path {
-                    apply_matrix_path(cell, &path);
+                    apply_matrix_path(cell, path);
                 } else if components_are_disconnected(
                     access,
                     source_candidates[source_index],
@@ -1122,6 +1167,7 @@ pub(crate) mod test_mode {
         static MODE: Cell<Option<MatrixMode>> = const { Cell::new(None) };
         static FULL_RELAXED_PASS: Cell<bool> = const { Cell::new(false) };
         static KEEP_UNREACHABLE_TARGETS: Cell<bool> = const { Cell::new(false) };
+        static REQUEST_METRIC: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
     /// Makes the relaxed pass search every cell again, as it used to.
@@ -1140,6 +1186,15 @@ pub(crate) mod test_mode {
 
     pub(crate) fn keep_unreachable_targets() -> bool {
         KEEP_UNREACHABLE_TARGETS.with(Cell::get)
+    }
+
+    /// Forces the request metric on or off (`None`: the cost model).
+    pub(crate) fn set_request_metric(force: Option<bool>) {
+        REQUEST_METRIC.with(|cell| cell.set(force));
+    }
+
+    pub(crate) fn request_metric() -> Option<bool> {
+        REQUEST_METRIC.with(Cell::get)
     }
 
     pub(crate) fn set(mode: Option<MatrixMode>) {
@@ -1209,12 +1264,12 @@ pub(crate) fn cell_mut(
     &mut cells[source_index * target_count + target_index]
 }
 
-pub(crate) fn apply_matrix_path(cell: &mut RouteMatrixCell, path: &MatrixPath) {
+pub(crate) fn apply_matrix_path(cell: &mut RouteMatrixCell, path: MatrixPath) {
     cell.status = RouteMatrixCellStatus::Reachable;
     cell.distance_m = Some(path.distance_m);
     cell.duration_s = Some(path.duration_s);
     cell.cost = Some(path.cost);
-    cell.edge_ids = path.edge_ids.clone();
+    cell.edge_ids = path.edge_ids;
     cell.failure_reason = None;
 }
 

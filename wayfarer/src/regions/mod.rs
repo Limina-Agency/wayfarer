@@ -369,6 +369,7 @@ impl SeamRouter {
             bidirectional: true,
             restriction_penalty: None,
             pieces: handle.piece_kinds(&view),
+            request_metric: None,
         };
         work(&Prepared {
             view,

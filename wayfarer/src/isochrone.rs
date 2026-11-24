@@ -629,6 +629,7 @@ impl RoutingEngine {
             // A one-to-all expansion has no goal to direct it towards.
             gates: Vec::new(),
             restriction_penalty: crate::sar::restriction_penalty(&request.options),
+            request_metric: None,
         };
         let edge_cost = |edge: u32| query.edge_cost(view, edge);
         let costs = PatchCosts {

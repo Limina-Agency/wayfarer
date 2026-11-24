@@ -88,6 +88,18 @@ pub(crate) fn matrix_mode() -> Option<String> {
         .clone()
 }
 
+/// `WAYFARER_REQUEST_METRIC` (`on` or `off`): whether every matrix without
+/// an overlay bounds with its own costs customized, whatever its gates
+/// (benchmarking).
+pub(crate) fn request_metric() -> Option<bool> {
+    static VALUE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| match env_value("WAYFARER_REQUEST_METRIC")?.as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    })
+}
+
 /// `WAYFARER_MATRIX_PAIRWISE_MAX_TARGETS`: the most targets a matrix
 /// searches pairwise, for every profile (benchmarking).
 pub(crate) fn matrix_pairwise_max_targets() -> Option<usize> {

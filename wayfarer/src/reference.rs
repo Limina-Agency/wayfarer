@@ -630,7 +630,7 @@ impl<'a> ReferenceEngine<'a> {
                 }
                 let cell = cell_mut(cells, target_count, source, target);
                 if let Some(path) = path {
-                    apply_matrix_path(cell, &path);
+                    apply_matrix_path(cell, path);
                 } else if matrix_components_are_disconnected(&self.view, origins, &targets[target])
                 {
                     apply_matrix_error(cell, &RouteError::Disconnected);

@@ -197,6 +197,54 @@ pub(crate) fn potential_plan<'g>(
     })
 }
 
+/// The plan of a query that customized its own costs into `metric` (see
+/// [`request_metric`]): exact lower bounds at scale 1, so discounts need no
+/// gates.
+pub(crate) fn request_plan<'g>(
+    g: SearchGraph<'g>,
+    metric: &std::sync::Arc<OwnMetric>,
+) -> Option<PotentialPlan<'g>> {
+    Some(PotentialPlan {
+        potentials: g.cch?,
+        metric: PlanMetric::Own(metric.clone()),
+        factor: 1.0,
+        gated: false,
+        floor: 0.0,
+    })
+}
+
+/// A CCH metric customized from a query's own edge costs (`edge_cost`, the
+/// column's with the request's overrides), lowered by a hair against
+/// rounding in f32 weights. `None` without CCH potentials.
+///
+/// It bounds every path of the query exactly, at the price of one
+/// customization (about 0.1-0.3 s on a region): worth it where the
+/// overrides would otherwise gate the potentials with more gate nodes than
+/// `cch::EXACT_GATE_NODES`, or drop them to a scaled fallback, over many
+/// searches (a matrix).
+pub(crate) fn request_metric(
+    g: SearchGraph<'_>,
+    edge_cost: impl Fn(u32) -> f32,
+) -> Option<std::sync::Arc<OwnMetric>> {
+    /// Safety margin against rounding in f32 weights.
+    const MARGIN: f32 = 1.0 - 1e-6;
+    let potentials = g.cch?;
+    let costs = (0..g.edge_count as u32)
+        .map(|edge| {
+            let cost = edge_cost(edge);
+            if cost.is_finite() {
+                cost * MARGIN
+            } else {
+                cost
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(std::sync::Arc::new(OwnMetric {
+        metric: potentials.topology.customize(&g, &costs),
+        costs,
+    }))
+}
+
 /// How the CCH potentials bound a query (see [`potential_plan`]).
 pub(crate) struct PotentialPlan<'g> {
     pub potentials: &'g CchPotentials,
@@ -701,6 +749,9 @@ pub(crate) struct SearchQuery<'q> {
     /// search; set only where the walks are exact (a stored column, no edge
     /// opened by an override, no SAR transitions or restriction penalty).
     pub pieces: Option<ColumnPieceKinds<'q>>,
+    /// The query's own costs customized (see [`request_metric`]): the
+    /// potentials bound with it instead of the column's metric and gates.
+    pub request_metric: Option<&'q std::sync::Arc<OwnMetric>>,
 }
 
 /// A restriction broken by a path (see `SearchGraph::restriction_violations`):
@@ -1469,7 +1520,10 @@ impl<'q> Run<'_, '_, 'q> {
     }
 
     fn potentials<'g>(g: SearchGraph<'g>, q: &SearchQuery<'_>) -> Option<PotentialPlan<'g>> {
-        potential_plan(g, &q.column, q.cost_overrides, !q.gates.is_empty())
+        match q.request_metric {
+            Some(metric) => request_plan(g, metric),
+            None => potential_plan(g, &q.column, q.cost_overrides, !q.gates.is_empty()),
+        }
     }
 
     fn bidirectional_search(
