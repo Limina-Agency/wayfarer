@@ -6169,7 +6169,10 @@ fn sar_off_network_legs_reach_far_endpoints_and_are_reported() {
     assert!(error.is_no_candidate(), "{error:?}");
     let off_network = |request: &mut LegRequest| {
         let mut sar = crate::RouteSarOptions::default();
-        sar.relaxations.off_network = Some(crate::sar::SarOffNetwork { max_leg_m: 2_000.0 });
+        sar.relaxations.off_network = Some(crate::sar::SarOffNetwork {
+            max_leg_m: 2_000.0,
+            costed: false,
+        });
         request.options.sar = Some(sar);
     };
     let mut request = LegRequest::new(far, destination, MobilityProfile::Wheeled);
@@ -6195,7 +6198,10 @@ fn sar_off_network_legs_reach_far_endpoints_and_are_reported() {
     // A reach shorter than the leg still fails.
     let mut request = LegRequest::new(far, destination, MobilityProfile::Wheeled);
     let mut sar = crate::RouteSarOptions::default();
-    sar.relaxations.off_network = Some(crate::sar::SarOffNetwork { max_leg_m: 1_200.0 });
+    sar.relaxations.off_network = Some(crate::sar::SarOffNetwork {
+        max_leg_m: 1_200.0,
+        costed: false,
+    });
     request.options.sar = Some(sar);
     assert!(
         compact
@@ -9677,6 +9683,557 @@ fn matrix_isochrone_and_nearest_overlays_apply_as_on_a_route() {
         compact.nearest(invalid_nearest),
         Err(crate::RouteError::InvalidRequest { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Costed off-network access legs (FEAT-X1, `crate::access`).
+
+/// The centres of some of the large grid's blocks, 100 m from their four
+/// roads.
+fn block_points() -> Vec<GeoPoint> {
+    vec![
+        GeoPoint::new(0.0009, 0.0009),
+        GeoPoint::new(0.0045, 0.0063),
+        GeoPoint::new(0.0081, 0.0027),
+        GeoPoint::new(0.0117, 0.0117),
+        GeoPoint::new(0.0027, 0.0099),
+    ]
+}
+
+fn with_access(request: &mut LegRequest) {
+    request.options.off_network = Some(crate::access::RouteOffNetworkOptions::default());
+}
+
+/// A route with access legs: the same totals as the oracle's, each
+/// stretch from the requested point in the leg's distance, duration, cost,
+/// geometry, shape segments and maneuvers.
+#[test]
+fn access_leg_routes_match_the_reference_and_include_their_stretches() {
+    use crate::types::{RouteManeuverKind, RouteShapeDynamicOverlayKind, RouteShapeQualityFlag};
+    let dir = tempdir().unwrap();
+    let reader = persist(&large_grid_graph(), &dir.path().join("access.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let mut compared = 0;
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        for origin in block_points() {
+            for destination in block_points() {
+                if origin == destination {
+                    continue;
+                }
+                let expected = route(&oracle, origin, destination, profile, with_access).unwrap();
+                let actual = route(&compact, origin, destination, profile, with_access).unwrap();
+                let context = format!("{profile:?} {origin:?} -> {destination:?}");
+                for (left, right) in [
+                    (expected.cost, actual.cost),
+                    (expected.duration_s, actual.duration_s),
+                    (expected.distance_m, actual.distance_m),
+                ] {
+                    assert!(
+                        (left - right).abs() <= 1e-4 * left.max(1.0),
+                        "{context}: {left} vs {right}"
+                    );
+                }
+                compared += 1;
+                let summary = actual.off_network.clone().expect("access summary");
+                let (start, end) = (summary.origin.unwrap(), summary.destination.unwrap());
+                assert_eq!(start.point, origin, "{context}");
+                assert_eq!(end.point, destination, "{context}");
+                assert!(
+                    start.distance_m > 90.0 && end.distance_m > 90.0,
+                    "{context}"
+                );
+                // Walkers pay twice their time, vehicles one and a half times.
+                let factor = if profile == MobilityProfile::OnFoot {
+                    2.0
+                } else {
+                    1.5
+                };
+                assert!((start.cost - factor * start.duration_s).abs() < 1e-9);
+                // The totals are the road's plus both stretches.
+                let road_m = actual.legs[0]
+                    .edges
+                    .iter()
+                    .map(|edge| edge.distance_m)
+                    .sum::<f64>();
+                assert!(
+                    (actual.distance_m - road_m - start.distance_m - end.distance_m).abs()
+                        <= 1e-6 * actual.distance_m,
+                    "{context}"
+                );
+                assert!(
+                    (actual.legs[0].distance_m - actual.distance_m).abs() <= 1e-9,
+                    "{context}"
+                );
+                // The geometry starts and ends at the requested points.
+                assert_eq!(actual.geometry.first(), Some(&origin), "{context}");
+                assert_eq!(actual.geometry.last(), Some(&destination), "{context}");
+                assert_eq!(actual.legs[0].geometry, actual.geometry);
+                let segments = &actual.legs[0].shape_segments;
+                for segment in [&segments[0], segments.last().unwrap()] {
+                    assert!(
+                        segment
+                            .quality_flags
+                            .contains(&RouteShapeQualityFlag::OffNetworkAccess)
+                    );
+                    assert_eq!(
+                        segment.dynamic_overlay.as_ref().unwrap().kind,
+                        RouteShapeDynamicOverlayKind::AccessLeg
+                    );
+                }
+                assert_eq!(segments[0].begin_shape_index, 0);
+                assert_eq!(
+                    segments.last().unwrap().end_shape_index,
+                    actual.geometry.len() - 1
+                );
+                // A stretch's maneuver starts the leg and another ends it.
+                let maneuvers = &actual.maneuvers;
+                assert_eq!(maneuvers[0].kind, RouteManeuverKind::Start);
+                assert_eq!(maneuvers[0].instruction_key, "route.access_depart");
+                assert_eq!(
+                    maneuvers
+                        .iter()
+                        .filter(|maneuver| maneuver.kind == RouteManeuverKind::Start)
+                        .count(),
+                    1,
+                    "{context}"
+                );
+                let arrive = &maneuvers[maneuvers.len() - 2];
+                assert_eq!(arrive.instruction_key, "route.access_arrive");
+                let destination_maneuver = maneuvers.last().unwrap();
+                assert_eq!(destination_maneuver.kind, RouteManeuverKind::Destination);
+                assert_eq!(
+                    destination_maneuver.begin_shape_index,
+                    actual.geometry.len() - 1
+                );
+                assert!(
+                    maneuvers
+                        .windows(2)
+                        .all(|pair| pair[0].begin_shape_index <= pair[1].begin_shape_index),
+                    "{context}"
+                );
+                // Navigation durations add up to the leg's.
+                let navigation = crate::RouteNavigationInput::from_leg(&actual);
+                let durations = navigation
+                    .shape_segment_durations_seconds
+                    .iter()
+                    .sum::<f64>();
+                assert!(
+                    (durations + junction_delays(&actual) - actual.duration_s).abs()
+                        <= 1e-6 * actual.duration_s,
+                    "{context}: {durations} vs {}",
+                    actual.duration_s
+                );
+            }
+        }
+    }
+    assert!(compared >= 40, "{compared}");
+}
+
+fn junction_delays(leg: &LegResult) -> f64 {
+    leg.legs
+        .iter()
+        .flat_map(|leg| &leg.edges)
+        .map(|edge| edge.junction_delay_s)
+        .sum()
+}
+
+/// Every candidate within the radius pays its whole stretch, so the join may
+/// move off the nearest road to a nearer point of a better one, and a
+/// route's cost is never below its stretches'.
+#[test]
+fn access_legs_cost_more_than_the_free_snap() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&large_grid_graph(), &dir.path().join("access-free.mrt"));
+    let compact = RoutingEngine::from_package(reader.package.clone());
+    for origin in block_points() {
+        for destination in block_points() {
+            if origin == destination {
+                continue;
+            }
+            let snapped = |configure: fn(&mut LegRequest)| {
+                route(
+                    &compact,
+                    origin,
+                    destination,
+                    MobilityProfile::OnFoot,
+                    |request| {
+                        request.options.max_correlation_distance_m = 150;
+                        configure(request);
+                    },
+                )
+                .unwrap()
+            };
+            let free = snapped(|_| {});
+            let costed = snapped(with_access);
+            let summary = costed.off_network.clone().unwrap();
+            let access = summary.origin.unwrap().cost + summary.destination.unwrap().cost;
+            assert!(costed.cost >= access);
+            // The free snap's road cost, plus its stretches priced, bounds the
+            // costed route: it is one of the candidate pairs.
+            let pricing = wayfarer_costing::profile_access(MobilityProfile::OnFoot);
+            let priced_free = free.cost
+                + pricing.cost_factor * (free.origin.distance_m + free.destination.distance_m)
+                    / pricing.pace_mps;
+            assert!(
+                costed.cost <= priced_free + 1e-6 * priced_free,
+                "{origin:?} -> {destination:?}: {} vs {priced_free}",
+                costed.cost
+            );
+            assert!(costed.duration_s > free.duration_s);
+        }
+    }
+}
+
+/// Matrices with access legs match the oracle, pairwise and by rows, and a
+/// cell is the route between its points.
+#[test]
+fn access_leg_matrices_match_the_reference_and_routes() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&large_grid_graph(), &dir.path().join("access-matrix.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let request = |sources: Vec<GeoPoint>, targets: Vec<GeoPoint>, profile| {
+        let mut request = crate::RouteMatrixRequest::new(sources, targets, profile);
+        request.options.off_network = Some(crate::access::RouteOffNetworkOptions::default());
+        request
+    };
+    // More targets than the pairwise cut-off, so rows share one expansion.
+    let many = (0..70)
+        .map(|index| {
+            let (row, col) = (index / 10, index % 10);
+            GeoPoint::new(0.0004 + 0.0012 * row as f64, 0.0005 + 0.0013 * col as f64)
+        })
+        .collect::<Vec<_>>();
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        let pairwise = request(block_points(), block_points(), profile);
+        let expected = oracle.matrix(pairwise.clone());
+        let actual = compact.matrix(pairwise);
+        assert_matrix_parity(&expected, &actual);
+        for cell in &actual.cells {
+            if cell.source_index == cell.target_index {
+                continue;
+            }
+            let routed = route(
+                &compact,
+                block_points()[cell.source_index],
+                block_points()[cell.target_index],
+                profile,
+                with_access,
+            )
+            .unwrap();
+            for (cell_value, route_value) in [
+                (cell.cost.unwrap(), routed.cost),
+                (cell.duration_s.unwrap(), routed.duration_s),
+                (cell.distance_m.unwrap(), routed.distance_m),
+            ] {
+                assert!(
+                    (cell_value - route_value).abs() <= 1e-6 * route_value.max(1.0),
+                    "{profile:?} cell {}->{}: matrix {cell_value} vs route {route_value}",
+                    cell.source_index,
+                    cell.target_index,
+                );
+            }
+        }
+        let rows = request(block_points()[..2].to_vec(), many.clone(), profile);
+        let expected = oracle.matrix(rows.clone());
+        let actual = compact.matrix(rows);
+        assert_matrix_parity(&expected, &actual);
+        for (left, right) in expected.cells.iter().zip(&actual.cells) {
+            if let (Some(left), Some(right)) = (left.duration_s, right.duration_s) {
+                assert!((left - right).abs() <= 1e-4 * left.max(1.0));
+            }
+            if let (Some(left), Some(right)) = (left.distance_m, right.distance_m) {
+                assert!((left - right).abs() <= 1e-4 * left.max(1.0));
+            }
+        }
+        assert!(
+            actual
+                .cells
+                .iter()
+                .filter(|cell| cell.cost.is_some())
+                .count()
+                > 100
+        );
+    }
+}
+
+/// Isochrones with access legs match the oracle on cost, time and distance
+/// contours, start each candidate after its stretch, and reach the same
+/// through an overlay patch as without it.
+#[test]
+fn access_leg_isochrones_match_the_reference() {
+    let dir = tempdir().unwrap();
+    let graph = large_grid_graph();
+    let reader = persist(&graph, &dir.path().join("access-isochrone.mrt"));
+    let (oracle, compact) = engines(&reader);
+    // Part of a far edge no contour reaches is blocked: the isochrone then
+    // searches through the overlay patch without changing what it reaches.
+    let far = graph
+        .graph
+        .edge_references()
+        .find(|edge| {
+            graph.graph.node(edge.source()).source_node_id == Some(5_070)
+                && graph.graph.node(edge.target()).source_node_id == Some(5_071)
+        })
+        .map(|edge| edge.weight().edge_id)
+        .expect("directed edge");
+    let overlay = crate::RouteDynamicOverlay::from_blocked_ranges(&[crate::RouteEdgeRange {
+        edge_id: far,
+        start_fraction: 0.4,
+        end_fraction: 0.6,
+    }]);
+    assert!(!overlay.split_edge_ranges.is_empty());
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        let limits = if profile == MobilityProfile::OnFoot {
+            [200.0, 400.0, 600.0]
+        } else {
+            [60.0, 90.0, 120.0]
+        };
+        for order in [
+            crate::RouteIsochroneOrder::Cost,
+            crate::RouteIsochroneOrder::Time,
+        ] {
+            let mut request = grid_isochrone_request(profile, limits);
+            request.origin = GeoPoint::new(0.0045, 0.0063);
+            request.order = order;
+            request.options.off_network = Some(crate::access::RouteOffNetworkOptions::default());
+            let expected = oracle.isochrone(request.clone()).unwrap();
+            let actual = compact.isochrone(request.clone()).unwrap();
+            let context = format!("{profile:?} {order:?}");
+            assert_isochrone_parity(&expected, &actual, &context);
+            assert!(!actual.buckets[0].edge_ids.is_empty(), "{context}");
+            let mut patched = request.clone();
+            patched.options.dynamic_overlay = Some(overlay.clone());
+            let through_patch = compact.isochrone(patched).unwrap();
+            assert_isochrone_parity(&actual, &through_patch, &format!("{context} patch"));
+            // A time contour shorter than the nearest stretch reaches nothing.
+            let mut short = request.clone();
+            short.contours = vec![crate::RouteIsochroneContour {
+                contour: 10.0,
+                metric: crate::RouteIsochroneMetric::TimeSeconds,
+            }];
+            let reached = compact.isochrone(short.clone()).unwrap();
+            assert!(reached.buckets[0].edge_ids.is_empty(), "{context}");
+            assert_isochrone_parity(&oracle.isochrone(short).unwrap(), &reached, &context);
+        }
+    }
+}
+
+/// A trip through an off-network waypoint passes through it: the leg
+/// arriving there ends with a stretch to it, and the leg leaving starts
+/// with one from it, with no gap between them.
+#[test]
+fn access_legs_pass_through_off_network_waypoints() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&large_grid_graph(), &dir.path().join("access-trip.mrt"));
+    let compact = RoutingEngine::from_package(reader.package.clone());
+    let points = block_points();
+    let mut request =
+        crate::RouteRequest::through([points[0], points[1], points[3]], MobilityProfile::OnFoot);
+    request.options.off_network = Some(crate::access::RouteOffNetworkOptions::default());
+    let trip = compact.route(request).unwrap();
+    assert_eq!(trip.diagnostics.waypoint_gap_count, 0);
+    assert!(trip.geometry.contains(&points[1]));
+    assert_eq!(trip.geometry.first(), Some(&points[0]));
+    assert_eq!(trip.geometry.last(), Some(&points[3]));
+    let legs = trip
+        .segments
+        .iter()
+        .map(|segment| segment.as_routed().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        legs[0]
+            .off_network
+            .as_ref()
+            .unwrap()
+            .destination
+            .as_ref()
+            .unwrap()
+            .point,
+        points[1]
+    );
+    assert_eq!(
+        legs[1]
+            .off_network
+            .as_ref()
+            .unwrap()
+            .origin
+            .as_ref()
+            .unwrap()
+            .point,
+        points[1]
+    );
+    let total = legs.iter().map(|leg| leg.duration_s).sum::<f64>();
+    assert!((trip.duration_s - total).abs() < 1e-9);
+    // One Start for the trip; the waypoint maneuver runs on to the second
+    // leg's road.
+    assert_eq!(
+        trip.maneuvers
+            .iter()
+            .filter(|maneuver| maneuver.kind == crate::types::RouteManeuverKind::Start)
+            .count(),
+        1
+    );
+    assert_eq!(
+        trip.maneuvers
+            .iter()
+            .filter(|maneuver| maneuver.kind == crate::types::RouteManeuverKind::Waypoint)
+            .count(),
+        1
+    );
+    for maneuver in &trip.maneuvers {
+        assert!(maneuver.end_shape_index < trip.geometry.len());
+    }
+}
+
+/// X6: a costed SAR `off_network` puts the leg in the route's totals and
+/// geometry, reports what it added, and matches the oracle, matrices and
+/// routes alike.
+#[test]
+fn costed_sar_off_network_legs_are_in_the_totals() {
+    let dir = tempdir().unwrap();
+    let reader = persist(
+        &large_grid_graph(),
+        &dir.path().join("off-network-costed.mrt"),
+    );
+    let (oracle, compact) = engines(&reader);
+    let far = GeoPoint::new(-0.0125, 0.0);
+    let destination = GeoPoint::new(0.0063, 0.0072);
+    let sar = |costed: bool| {
+        let mut sar = crate::RouteSarOptions::default();
+        sar.relaxations.off_network = Some(crate::sar::SarOffNetwork {
+            max_leg_m: 2_000.0,
+            costed,
+        });
+        sar
+    };
+    let request = |costed: bool| {
+        let mut request = LegRequest::new(far, destination, MobilityProfile::Wheeled);
+        request.options.sar = Some(sar(costed));
+        request
+    };
+    let reported = compact.route_leg(request(false)).unwrap();
+    let costed = compact.route_leg(request(true)).unwrap();
+    let reference = oracle.route_leg(request(true)).unwrap();
+    assert!((costed.cost - reference.cost).abs() <= 1e-4 * costed.cost);
+    assert!((costed.duration_s - reference.duration_s).abs() <= 1e-4 * costed.duration_s);
+    let stretch = costed
+        .off_network
+        .as_ref()
+        .and_then(|summary| summary.origin.clone())
+        .unwrap();
+    // 1,390 m to the nearest road; chosen by total time, the join may lie
+    // farther along it.
+    assert!(
+        (1_300.0..1_700.0).contains(&stretch.distance_m),
+        "{stretch:?}"
+    );
+    let report = costed.sar.as_ref().unwrap();
+    let leg = &report.uses[0];
+    assert_eq!(leg.kind, crate::SarRelaxationKind::OffNetwork);
+    assert!((leg.added_cost_s - stretch.cost).abs() < 1e-9);
+    // At a cost factor of 1 the added cost is the added duration.
+    assert_eq!(
+        stretch.cost_factor,
+        crate::access::SAR_OFF_NETWORK_COST_FACTOR
+    );
+    assert!((leg.added_cost_s - stretch.duration_s).abs() < 1e-9);
+    assert_eq!(leg.geometry.first(), Some(&far));
+    assert!(leg.geometry.len() > 2, "densified: {}", leg.geometry.len());
+    assert_eq!(reference.sar.as_ref().unwrap().uses, report.uses);
+    // The reported leg was left out of the totals; the costed one is in.
+    let pace = wayfarer_costing::profile_off_road_speed_mps(MobilityProfile::Wheeled);
+    assert!((stretch.duration_s - stretch.distance_m / pace).abs() < 1e-9);
+    assert!(costed.duration_s > reported.duration_s);
+    // Chosen by total time, the costed join is no slower than the reported
+    // one with its leg added (that join is among the candidates).
+    let reported_leg = reported.sar.as_ref().unwrap().uses[0].added_cost_s;
+    assert!(costed.duration_s <= (reported.duration_s + reported_leg) * (1.0 + 1e-9));
+    assert_eq!(costed.geometry.first(), Some(&far));
+    assert!(reported.off_network.is_none());
+    // Matrices cost the leg too.
+    let mut matrix =
+        crate::RouteMatrixRequest::new(vec![far], vec![destination], MobilityProfile::Wheeled);
+    matrix.options.sar = Some(sar(true));
+    let cell = compact.matrix(matrix.clone()).cells[0].clone();
+    assert!((cell.cost.unwrap() - costed.cost).abs() <= 1e-6 * costed.cost);
+    assert!((cell.duration_s.unwrap() - costed.duration_s).abs() <= 1e-6 * costed.duration_s);
+    assert_matrix_parity(&oracle.matrix(matrix.clone()), &compact.matrix(matrix));
+}
+
+/// Access options out of bounds are invalid requests, for routes, matrices
+/// and isochrones alike.
+#[test]
+fn access_leg_options_are_validated() {
+    use crate::access::RouteOffNetworkOptions as Options;
+    let dir = tempdir().unwrap();
+    let reader = persist(&grid_graph(), &dir.path().join("access-validate.mrt"));
+    let compact = RoutingEngine::from_package(reader.package.clone());
+    let invalid = [
+        Options {
+            max_radius_m: Some(0.0),
+            ..Options::default()
+        },
+        Options {
+            max_radius_m: Some(10_001.0),
+            ..Options::default()
+        },
+        Options {
+            max_radius_m: Some(f64::NAN),
+            ..Options::default()
+        },
+        Options {
+            max_candidates: Some(0),
+            ..Options::default()
+        },
+        Options {
+            max_candidates: Some(65),
+            ..Options::default()
+        },
+        Options {
+            pace_mps: Some(0.0),
+            ..Options::default()
+        },
+        Options {
+            pace_mps: Some(51.0),
+            ..Options::default()
+        },
+        Options {
+            cost_factor: Some(0.5),
+            ..Options::default()
+        },
+        Options {
+            cost_factor: Some(f64::INFINITY),
+            ..Options::default()
+        },
+    ];
+    let (a, b) = (GeoPoint::new(0.0016, 0.0042), GeoPoint::new(0.0039, 0.0029));
+    for options in invalid {
+        let mut request = LegRequest::new(a, b, MobilityProfile::OnFoot);
+        request.options.off_network = Some(options.clone());
+        let error = compact.route_leg(request).unwrap_err().error;
+        assert!(
+            matches!(error, crate::RouteError::InvalidRequest { .. }),
+            "{options:?}: {error:?}"
+        );
+        let mut route = crate::RouteRequest::new(a, b, MobilityProfile::OnFoot);
+        route.options.off_network = Some(options.clone());
+        assert!(compact.route(route).is_err(), "{options:?}");
+        let mut matrix = crate::RouteMatrixRequest::new(vec![a], vec![b], MobilityProfile::OnFoot);
+        matrix.options.off_network = Some(options.clone());
+        assert!(matrix.validate().is_err(), "{options:?}");
+        let mut isochrone = grid_isochrone_request(MobilityProfile::OnFoot, [60.0, 120.0, 240.0]);
+        isochrone.options.off_network = Some(options.clone());
+        assert!(compact.isochrone(isochrone).is_err(), "{options:?}");
+    }
+    let valid = Options {
+        max_radius_m: Some(10_000.0),
+        max_candidates: Some(64),
+        pace_mps: Some(1.0),
+        cost_factor: Some(1.0),
+    };
+    let mut request = LegRequest::new(a, b, MobilityProfile::OnFoot);
+    request.options.off_network = Some(valid);
+    assert!(compact.route_leg(request).is_ok());
 }
 
 /// The background warm-up returns at once; routes during it and after it are

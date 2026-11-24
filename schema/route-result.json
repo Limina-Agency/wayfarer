@@ -230,9 +230,43 @@
     "overlaySets"
   ],
   "$defs": {
+    "CandidateAccess": {
+      "description": "The costed access stretch of one correlation candidate: from the\nrequested `point` in a straight line to the candidate's snap point, its\nlength the candidate's `distance_m`.",
+      "type": "object",
+      "properties": {
+        "costFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "paceMps": {
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "The requested point the stretch runs from (an origin) or to (a\ndestination).",
+          "$ref": "#/$defs/GeoPoint"
+        }
+      },
+      "required": [
+        "point",
+        "paceMps",
+        "costFactor"
+      ]
+    },
     "CorrelatedLocation": {
       "type": "object",
       "properties": {
+        "access": {
+          "description": "The costed access stretch from the requested point, when the request\nhas `offNetwork` (see [`crate::access`]): searches then charge it in\nfull instead of a relative approach penalty, and results include it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "componentSize": {
           "type": [
             "integer",
@@ -674,6 +708,17 @@
             "$ref": "#/$defs/RouteManeuver"
           }
         },
+        "offNetwork": {
+          "description": "The costed off-network access stretches the leg's totals include;\nrequests with `offNetwork` (or a costed SAR `off_network`) only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOffNetworkSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "origin": {
           "$ref": "#/$defs/CorrelatedLocation"
         },
@@ -944,6 +989,62 @@
           "type": "string",
           "const": "unrecorded"
         }
+      ]
+    },
+    "RouteAccessStretch": {
+      "description": "One costed access stretch of a route leg.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "costFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "durationS": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "description": "The directed edge it joins, and where along it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "joinPoint": {
+          "description": "Where the stretch meets the road network.",
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "paceMps": {
+          "description": "The pricing it was costed with.",
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "The requested point.",
+          "$ref": "#/$defs/GeoPoint"
+        }
+      },
+      "required": [
+        "point",
+        "joinPoint",
+        "edgeId",
+        "fraction",
+        "distanceM",
+        "durationS",
+        "cost",
+        "paceMps",
+        "costFactor"
       ]
     },
     "RouteAlternative": {
@@ -2602,6 +2703,32 @@
         }
       ]
     },
+    "RouteOffNetworkSummary": {
+      "description": "The costed access stretches of a route leg (`LegResult::off_network`),\nwhich its distance, duration and cost include.",
+      "type": "object",
+      "properties": {
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteAccessStretch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteAccessStretch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
     "RouteOverlayDiagnostics": {
       "description": "Counters describing what the overlay pass did to a route, surfaced on the\ncomputed route's diagnostics. Populated by whoever applies the projections.",
       "type": "object",
@@ -3520,7 +3647,7 @@
       "type": "object",
       "properties": {
         "addedCostS": {
-          "description": "Cost the relaxation added (seconds): the R3 penalty, or for R7 the\nleg's time at the off-road pace (which the route's own cost and\nduration leave out).",
+          "description": "Cost the relaxation added (seconds): the R3 penalty, or for R7 the\nleg's time at the off-road pace (which the route's own cost and\nduration leave out), or with `costed` the leg's cost, which the\nroute's cost includes (and, at the costed leg's cost factor of 1,\nits time, which the duration includes).",
           "type": "number",
           "format": "double"
         },
@@ -3719,6 +3846,14 @@
           ],
           "format": "double"
         },
+        "durationSeconds": {
+          "description": "Travel time, for access stretches (a connector's is its cost).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "kind": {
           "$ref": "#/$defs/RouteShapeDynamicOverlayKind"
         },
@@ -3806,13 +3941,22 @@
       ]
     },
     "RouteShapeDynamicOverlayKind": {
-      "type": "string",
-      "enum": [
-        "partial_edge_fragment",
-        "endpoint_connector",
-        "road_entry_connector",
-        "road_to_road_bypass_connector",
-        "cross_country_connector"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "partial_edge_fragment",
+            "endpoint_connector",
+            "road_entry_connector",
+            "road_to_road_bypass_connector",
+            "cross_country_connector"
+          ]
+        },
+        {
+          "description": "A costed off-network access stretch (`crate::access`).",
+          "type": "string",
+          "const": "access_leg"
+        }
       ]
     },
     "RouteShapeQualityFlag": {
@@ -3834,6 +3978,11 @@
           "description": "The leg starts away from where the previous leg ended (the waypoint\nsnapped to different places for its two legs).",
           "type": "string",
           "const": "waypoint_gap"
+        },
+        {
+          "description": "A costed off-network access stretch between a requested point and\nthe road network (`crate::access`); no edge of its own.",
+          "type": "string",
+          "const": "off_network_access"
         }
       ]
     },

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::access::AccessTotals;
 use crate::cancellation::RouteCancellation;
 use crate::correlator::{CandidateSearch, Correlator};
 use crate::costing::CostingPolicy;
@@ -415,6 +416,7 @@ impl RoutingEngine {
             if stop_after.is_some() {
                 for point in &mut points {
                     point.approach = 0.0;
+                    point.access = Default::default();
                 }
             }
             Ok::<_, RouteError>(points)
@@ -569,15 +571,30 @@ impl RoutingEngine {
         // Edge ids only where they are returned, or where the pocket check
         // after a strict pass reads them (see `confine_to_own_pockets`).
         let keep_edge_ids = request.include_edge_ids || !unblocked.is_empty();
-        let patch_path = |patch: &PatchGraph<'_>, path: PatchPath| MatrixPath {
-            edge_ids: if keep_edge_ids {
-                patch.step_edge_ids(view, &path.steps)
-            } else {
-                Vec::new()
-            },
-            distance_m: path.distance_m,
-            duration_s: path.duration_s,
-            cost: path.cost,
+        // A patch path with its endpoints' costed access stretches
+        // (`crate::access`), from the candidates it starts and ends on.
+        let patch_path = |patch: &PatchGraph<'_>,
+                          path: PatchPath,
+                          origins: &[CorrelatedLocation],
+                          destinations: &[CorrelatedLocation]| {
+            let of = |candidates: &[CorrelatedLocation], index: Option<usize>| {
+                index
+                    .and_then(|index| candidates.get(index))
+                    .map(AccessTotals::of)
+                    .unwrap_or_default()
+            };
+            let access =
+                of(origins, path.origin_index).plus(of(destinations, path.destination_index));
+            MatrixPath {
+                edge_ids: if keep_edge_ids {
+                    patch.step_edge_ids(view, &path.steps)
+                } else {
+                    Vec::new()
+                },
+                distance_m: path.distance_m + access.distance_m,
+                duration_s: path.duration_s + access.duration_s,
+                cost: path.cost + access.cost,
+            }
         };
         let compact_path = |path: AnalysisPath| MatrixPath {
             edge_ids: if keep_edge_ids {
@@ -619,14 +636,19 @@ impl RoutingEngine {
                     );
                     let mut counters = PatchCounters::default();
                     let outcome = run_patch(view, state, patch, &query, &mut counters);
+                    let (origins, destinations) =
+                        (source_candidates[source], target_candidates[target]);
                     let (path, budget_exceeded) = match outcome {
-                        PatchOutcome::Found(path) => (Some(patch_path(patch, path)), false),
+                        PatchOutcome::Found(path) => {
+                            (Some(patch_path(patch, path, origins, destinations)), false)
+                        }
                         PatchOutcome::NoPath => (None, false),
                         // Out of budget, a cell keeps its best path
                         // so far, as a row does.
-                        PatchOutcome::BudgetExceeded { best, .. } => {
-                            (best.map(|(path, _)| patch_path(patch, path)), true)
-                        }
+                        PatchOutcome::BudgetExceeded { best, .. } => (
+                            best.map(|(path, _)| patch_path(patch, path, origins, destinations)),
+                            true,
+                        ),
                     };
                     (
                         path,
@@ -838,7 +860,16 @@ impl RoutingEngine {
                                 paths: row
                                     .paths
                                     .into_iter()
-                                    .map(|path| path.map(|path| patch_path(patch, path)))
+                                    .map(|path| {
+                                        path.map(|path| {
+                                            patch_path(
+                                                patch,
+                                                path,
+                                                source_candidates[source],
+                                                &locations,
+                                            )
+                                        })
+                                    })
                                     .collect(),
                                 budget_exceeded: vec![row.budget_exceeded; target_count],
                                 visited_edge_count: row.counters.visited_edge_count,

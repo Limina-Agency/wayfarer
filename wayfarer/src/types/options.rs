@@ -67,6 +67,15 @@ pub struct RouteOptions {
     /// Search-and-rescue relaxations (`crate::sar`); off when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sar: Option<crate::sar::RouteSarOptions>,
+    /// Costed off-network access legs (`crate::access`): every location's
+    /// candidates within the access radius are priced by a straight stretch
+    /// from the point, which results include. Off when absent.
+    #[serde(
+        default,
+        alias = "off_network",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub off_network: Option<crate::access::RouteOffNetworkOptions>,
     /// Budget for one search: the most out-edges it may examine before it
     /// stops with `SearchBudgetExceeded`. A route is one search. A matrix
     /// applies it to each search separately, never to the request as a
@@ -116,6 +125,7 @@ impl Default for RouteOptions {
             edge_speed_override_ranges: Vec::new(),
             opened_edge_ids: BTreeSet::new(),
             sar: None,
+            off_network: None,
             max_visited_edge_count: None,
             costing: RouteCostingOptions::default(),
             alternatives: RouteAlternativePolicy::default(),

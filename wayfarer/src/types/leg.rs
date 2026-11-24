@@ -75,6 +75,10 @@ pub struct LegResult {
     /// The SAR relaxations the route used; requests with SAR only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sar: Option<crate::sar::RouteSarReport>,
+    /// The costed off-network access stretches the leg's totals include;
+    /// requests with `offNetwork` (or a costed SAR `off_network`) only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_network: Option<crate::access::RouteOffNetworkSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,6 +377,9 @@ pub enum RouteShapeQualityFlag {
     /// The leg starts away from where the previous leg ended (the waypoint
     /// snapped to different places for its two legs).
     WaypointGap,
+    /// A costed off-network access stretch between a requested point and
+    /// the road network (`crate::access`); no edge of its own.
+    OffNetworkAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -399,6 +406,8 @@ pub enum RouteShapeDynamicOverlayKind {
     RoadEntryConnector,
     RoadToRoadBypassConnector,
     CrossCountryConnector,
+    /// A costed off-network access stretch (`crate::access`).
+    AccessLeg,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -414,6 +423,9 @@ pub struct RouteShapeDynamicOverlay {
     pub source_chunk_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance_meters: Option<f64>,
+    /// Travel time, for access stretches (a connector's is its cost).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

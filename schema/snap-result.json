@@ -26,9 +26,43 @@
     "mode"
   ],
   "$defs": {
+    "CandidateAccess": {
+      "description": "The costed access stretch of one correlation candidate: from the\nrequested `point` in a straight line to the candidate's snap point, its\nlength the candidate's `distance_m`.",
+      "type": "object",
+      "properties": {
+        "costFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "paceMps": {
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "The requested point the stretch runs from (an origin) or to (a\ndestination).",
+          "$ref": "#/$defs/GeoPoint"
+        }
+      },
+      "required": [
+        "point",
+        "paceMps",
+        "costFactor"
+      ]
+    },
     "CorrelatedLocation": {
       "type": "object",
       "properties": {
+        "access": {
+          "description": "The costed access stretch from the requested point, when the request\nhas `offNetwork` (see [`crate::access`]): searches then charge it in\nfull instead of a relative approach penalty, and results include it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "componentSize": {
           "type": [
             "integer",

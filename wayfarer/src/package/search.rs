@@ -372,8 +372,12 @@ pub(crate) fn approach_costs(candidates: &[CorrelatedLocation]) -> Vec<f64> {
 }
 
 /// The approach cost of `chosen` among one endpoint's `candidates` (see
-/// [`approach_costs`]).
+/// [`approach_costs`]). A candidate with a costed access stretch
+/// (`crate::access`) pays all of it, the nearest included.
 pub(crate) fn approach_cost(chosen: &CorrelatedLocation, candidates: &[CorrelatedLocation]) -> f64 {
+    if let Some(access) = &chosen.access {
+        return access.cost(snap_distance(chosen));
+    }
     let nearest = candidates
         .iter()
         .map(snap_distance)
@@ -396,8 +400,25 @@ pub(crate) fn approach_costs_by_target(
     candidates
         .iter()
         .zip(targets)
-        .map(|(candidate, target)| approach_cost_of(snap_distance(candidate) - nearest[target]))
+        .map(|(candidate, target)| match &candidate.access {
+            Some(access) => access.cost(snap_distance(candidate)),
+            None => approach_cost_of(snap_distance(candidate) - nearest[target]),
+        })
         .collect()
+}
+
+/// The part of `chosen`'s approach cost its route's reported cost leaves
+/// out: all of it, except a costed access stretch, which results include
+/// (`crate::access`). Routes compete on their reported cost plus this.
+pub(crate) fn unreported_approach_cost(
+    chosen: &CorrelatedLocation,
+    candidates: &[CorrelatedLocation],
+) -> f64 {
+    if chosen.access.is_some() {
+        0.0
+    } else {
+        approach_cost(chosen, candidates)
+    }
 }
 
 fn snap_distance(candidate: &CorrelatedLocation) -> f64 {

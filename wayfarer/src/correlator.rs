@@ -290,6 +290,7 @@ impl<'a> Correlator<'a> {
                 score,
                 score_breakdown,
                 confidence,
+                access: None,
             })
         };
         #[cfg(test)]
@@ -373,43 +374,20 @@ impl<'a> Correlator<'a> {
         policy: &CorrelationPolicy,
         endpoint_options: &RouteEndpointOptions,
     ) -> CandidateSearch {
+        if let Some(access) = &policy.access {
+            return self.search_access(
+                point,
+                profile,
+                policy,
+                endpoint_options,
+                access.resolve(profile),
+            );
+        }
         let nearby = self.search(point, profile, policy, endpoint_options);
-        // Components count every mode's edges, so the profile's reach must
-        // saturate too: a square open to cars but ringed by private streets
-        // lies in the city's component and is still an island for cars.
-        let connected = |candidate: &CorrelatedLocation| {
-            candidate
-                .component_size
-                .is_some_and(|size| size >= EXPANDED_CORRELATION_MIN_COMPONENT_SIZE)
-                && [
-                    candidate.outbound_reach_edge_count,
-                    candidate.inbound_reach_edge_count,
-                ]
-                .iter()
-                .all(|reach| reach.is_some_and(|reach| reach >= DEFAULT_REACH_EDGE_LIMIT))
-        };
         if nearby.candidates.iter().any(connected) {
             return nearby;
         }
-        let mut expanded_options = endpoint_options.clone();
-        expanded_options.min_component_size = Some(
-            endpoint_options
-                .min_component_size
-                .unwrap_or_default()
-                .max(EXPANDED_CORRELATION_MIN_COMPONENT_SIZE),
-        );
-        expanded_options.min_outbound_reach_edge_count = Some(
-            endpoint_options
-                .min_outbound_reach_edge_count
-                .unwrap_or_default()
-                .max(DEFAULT_REACH_EDGE_LIMIT),
-        );
-        expanded_options.min_inbound_reach_edge_count = Some(
-            endpoint_options
-                .min_inbound_reach_edge_count
-                .unwrap_or_default()
-                .max(DEFAULT_REACH_EDGE_LIMIT),
-        );
+        let expanded_options = connected_options(endpoint_options);
         // The SAR `off_network` reach extends the radii beyond the last one.
         let off_network = policy
             .off_network_max_distance_m
@@ -425,33 +403,126 @@ impl<'a> Correlator<'a> {
                 max_distance_m,
                 ..policy.clone()
             };
-            let mut expanded = self.search(point, profile, &wider, &expanded_options);
+            let expanded = self.search(point, profile, &wider, &expanded_options);
             if expanded.candidates.is_empty() {
                 continue;
             }
-            // At most half the slots for the nearer island candidates, so the
-            // connected ones are always seeded.
-            let mut candidates = nearby.candidates;
-            candidates.truncate(policy.candidate_limit / 2);
-            for candidate in expanded.candidates {
-                if !candidates
-                    .iter()
-                    .any(|nearer| nearer.edge_id == candidate.edge_id)
-                {
-                    candidates.push(candidate);
-                }
-            }
-            candidates.truncate(policy.candidate_limit.max(1));
-            expanded.candidates = candidates;
-            expanded.rejected_candidate_count += nearby.rejected_candidate_count;
-            expanded
-                .rejected_candidates
-                .splice(0..0, nearby.rejected_candidates);
+            let mut expanded = with_islands(nearby, expanded, policy.candidate_limit);
             expanded.expanded_max_distance_m = Some(max_distance_m);
             return expanded;
         }
         nearby
     }
+
+    /// The candidates of a request with costed access legs
+    /// (`crate::access`): one search within the access radius, for up to
+    /// its candidate count, each candidate priced by its stretch from
+    /// `point`. The connectivity rule of [`Self::search_expanding`] holds
+    /// within the radius: when no candidate is connected, the connected
+    /// ones within it are searched for and take at least half the slots.
+    /// Nothing widens beyond the radius.
+    fn search_access(
+        &self,
+        point: GeoPoint,
+        profile: MobilityProfile,
+        policy: &CorrelationPolicy,
+        endpoint_options: &RouteEndpointOptions,
+        access: crate::access::AccessPolicy,
+    ) -> CandidateSearch {
+        let within = CorrelationPolicy {
+            max_distance_m: access.radius_whole_m(),
+            candidate_limit: access.candidate_limit,
+            off_network_max_distance_m: None,
+            sar_open: policy.sar_open,
+            access: None,
+        };
+        let mut search = self.search(point, profile, &within, endpoint_options);
+        if !search.candidates.is_empty() && !search.candidates.iter().any(connected) {
+            let reachable = self.search(
+                point,
+                profile,
+                &within,
+                &connected_options(endpoint_options),
+            );
+            if !reachable.candidates.is_empty() {
+                search = with_islands(search, reachable, within.candidate_limit);
+            }
+        }
+        let priced = access.access_from(point);
+        for candidate in &mut search.candidates {
+            candidate.access = Some(priced);
+        }
+        search
+    }
+}
+
+/// Whether a candidate is connected to the network: a component of at least
+/// [`EXPANDED_CORRELATION_MIN_COMPONENT_SIZE`] nodes and a saturated reach
+/// both ways. Components count every mode's edges, so the profile's reach
+/// must saturate too: a square open to cars but ringed by private streets
+/// lies in the city's component and is still an island for cars.
+fn connected(candidate: &CorrelatedLocation) -> bool {
+    candidate
+        .component_size
+        .is_some_and(|size| size >= EXPANDED_CORRELATION_MIN_COMPONENT_SIZE)
+        && [
+            candidate.outbound_reach_edge_count,
+            candidate.inbound_reach_edge_count,
+        ]
+        .iter()
+        .all(|reach| reach.is_some_and(|reach| reach >= DEFAULT_REACH_EDGE_LIMIT))
+}
+
+/// `endpoint_options` asking for connected candidates only (see
+/// [`connected`]).
+fn connected_options(endpoint_options: &RouteEndpointOptions) -> RouteEndpointOptions {
+    let mut options = endpoint_options.clone();
+    options.min_component_size = Some(
+        endpoint_options
+            .min_component_size
+            .unwrap_or_default()
+            .max(EXPANDED_CORRELATION_MIN_COMPONENT_SIZE),
+    );
+    options.min_outbound_reach_edge_count = Some(
+        endpoint_options
+            .min_outbound_reach_edge_count
+            .unwrap_or_default()
+            .max(DEFAULT_REACH_EDGE_LIMIT),
+    );
+    options.min_inbound_reach_edge_count = Some(
+        endpoint_options
+            .min_inbound_reach_edge_count
+            .unwrap_or_default()
+            .max(DEFAULT_REACH_EDGE_LIMIT),
+    );
+    options
+}
+
+/// The connected candidates of `connected_search`, after at most half the
+/// slots of `nearby`'s nearer island candidates, so that the connected ones
+/// are always seeded; the rejections of both.
+fn with_islands(
+    nearby: CandidateSearch,
+    mut connected_search: CandidateSearch,
+    candidate_limit: usize,
+) -> CandidateSearch {
+    let mut candidates = nearby.candidates;
+    candidates.truncate(candidate_limit / 2);
+    for candidate in connected_search.candidates {
+        if !candidates
+            .iter()
+            .any(|nearer| nearer.edge_id == candidate.edge_id)
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates.truncate(candidate_limit.max(1));
+    connected_search.candidates = candidates;
+    connected_search.rejected_candidate_count += nearby.rejected_candidate_count;
+    connected_search
+        .rejected_candidates
+        .splice(0..0, nearby.rejected_candidates);
+    connected_search
 }
 
 #[derive(Debug, Clone)]

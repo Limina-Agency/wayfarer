@@ -56,6 +56,7 @@
 // `clippy.toml` and `wayfarer_package::math`).
 #![allow(clippy::disallowed_methods)]
 
+pub mod access;
 mod cancellation;
 mod correlator;
 mod costing;
