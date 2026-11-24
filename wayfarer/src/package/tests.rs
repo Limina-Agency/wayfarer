@@ -4748,13 +4748,24 @@ fn discount_gate_bounds_are_consistent() {
             }
             let plan = search::potential_plan(g, &column, &overrides, true).expect("gated plan");
             for reversed in [false, true] {
+                // Targets at random offsets (an endpoint candidate's edge
+                // rest and approach), some at 0.
                 let targets = (0..3)
-                    .map(|_| (next() * g.node_count as f64) as u32)
+                    .map(|index| {
+                        let node = (next() * g.node_count as f64) as u32;
+                        let offset = if index == 0 { 0.0 } else { 200.0 * next() };
+                        (node, offset)
+                    })
                     .collect::<Vec<_>>();
-                let potential =
-                    plan.potential(&targets, reversed, &gates, &scratch[0], &scratch[1]);
-                for target in &targets {
-                    assert_eq!(potential.get(*target), 0.0);
+                let potential = plan.potential_with_offsets(
+                    &targets,
+                    reversed,
+                    &gates,
+                    &scratch[0],
+                    &scratch[1],
+                );
+                for (target, offset) in &targets {
+                    assert!(potential.get(*target) <= *offset, "{target} at {offset}");
                 }
                 let context = format!("{profile:?} round {round}");
                 checked += assert_consistent(

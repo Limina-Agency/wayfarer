@@ -1671,7 +1671,7 @@ impl<'a> GatedPotential<'a> {
     pub(crate) fn new(
         topology: &'a CchTopology,
         metric: &'a CchMetric,
-        targets: &[u32],
+        targets: &[(u32, f64)],
         reversed: bool,
         factor: f64,
         gates: &[PotentialGate],
@@ -1679,7 +1679,21 @@ impl<'a> GatedPotential<'a> {
         scratch: &'a RefCell<PotentialScratch>,
         gated_scratch: &'a RefCell<PotentialScratch>,
     ) -> Self {
-        let seeds = targets.iter().map(|node| (*node, 0.0)).collect::<Vec<_>>();
+        // Target offsets in request costs; seeds in metric units (`get`
+        // scales them back), lowered by a hair against rounding.
+        let scale = factor * POTENTIAL_MARGIN;
+        let seeds = targets
+            .iter()
+            .filter(|(_, offset)| offset.is_finite())
+            .map(|(node, offset)| {
+                let offset = if *offset > 0.0 {
+                    offset / scale * (1.0 - 1e-12)
+                } else {
+                    0.0
+                };
+                (*node, offset)
+            })
+            .collect::<Vec<_>>();
         let base = CchPotential::new(topology, metric, &seeds, reversed, factor, scratch);
         if gates.is_empty() {
             return Self {
@@ -1688,9 +1702,7 @@ impl<'a> GatedPotential<'a> {
                 floor: 0.0,
             };
         }
-        // Offsets in request costs; seeds in metric units (`get` scales
-        // them back), lowered by a hair against rounding.
-        let scale = base.factor;
+        // Gate offsets are scaled as the targets' are.
         // Gates by the node they continue from (`end`), to relax the gates
         // ending where a settled gate starts.
         let mut by_end = FxHashMap::<u32, Vec<usize>>::default();
