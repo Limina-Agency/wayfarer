@@ -61,8 +61,9 @@ The engine answers:
   overlays (no-go, slow-go, warning, discount, open; as geometry or package
   edges, optionally per profile and time window). One search per routed leg
   (`route_leg` runs a single one).
-- `matrix`, `isochrone`, `map_match` (GPS traces), `snap` (where a point meets
-  the road network) and `project` (the package edges a geometry covers).
+- `matrix`, `isochrone` (reached edges per contour, optionally drawn as GeoJSON
+  polygons), `map_match` (GPS traces), `snap` (where a point meets the road
+  network) and `project` (the package edges a geometry covers).
 - Navigation progress along a prepared route (`PreparedNavigationRoute`).
 
 Requests and results are serde types; their JSON keys are camelCase and enum
