@@ -23,7 +23,7 @@ X0 = min(i[0] for i in infos); Y1 = max(i[1] for i in infos)
 W = int(round(max(i[0] + i[2] for i in infos) - X0)); H = int(round(Y1 - min(i[1] - i[3] for i in infos)))
 big = np.full((H, W), np.nan)
 for x, y, w, h, a, nd in infos:
-    a = np.where((a < -1000) | (a > 9000) | ((a == nd) if nd is not None else False), np.nan, a)
+    a = np.where((a <= 0) | (a > 9000) | ((a == nd) if nd is not None else False), np.nan, a)
     big[int(round(Y1 - y)):int(round(Y1 - y)) + h, int(round(x - X0)):int(round(x - X0)) + w] = a
 
 def truth_at(lat, lon):
@@ -116,12 +116,13 @@ def evaluate(label, PI, PJ, V, s, bias_fix):
     err = err - bias
     lrec = bilinear_grid(PI, PJ, V, s, LL[:, 0], LL[:, 1]) - bias
     lc = climb(lrec)
-    ok = truth_climb > 20
+    ok = (truth_climb > 20) & ~np.isnan(truth_lines).any(axis=1) & ~np.isnan(lrec).any(axis=1)
     rel = (lc[ok] - truth_climb[ok])/truth_climb[ok]
     sl = horn_slope_deg(V, s*m_per_tick_y, s*m_per_tick_x)
     row = {'grid': label, 'spacing_ticks': s, 'bias_removed_m': round(bias, 2),
            'rmse_m': round(float(np.sqrt(np.nanmean(err**2))), 2),
            'p95_abs_m': round(float(np.nanpercentile(np.abs(err), 95)), 2),
+           'lines': int(ok.sum()),
            'climb_err_median_pct': round(float(100*np.median(rel)), 1),
            'climb_abs_err_p90_pct': round(float(100*np.percentile(np.abs(rel), 90)), 1),
            'slope_over30_pct': round(float(100*np.nanmean(sl > 30)), 2)}
