@@ -64,7 +64,7 @@ they are taken from.
    numbering that makes the dissection, and so the final ids, independent of
    build order; a tiled compile forces its tile borders to the top of the
    dissection (section 8).
-5. **A global lattice** in arc-seconds anchored at 0°, 0° for the DEM grid,
+5. **A global lattice** in ticks of 1/120″ anchored at 0°, 0° for the DEM grid,
    land cover, any raster and the request grid, so two regions' grids tile
    exactly and ties break on global cell indexes (section 9).
 6. **Reserved ids** with layouts sketched for portals, node ownership,
@@ -584,25 +584,47 @@ both, so the choice changes no id:
   routing package has. Rules are keyed by profile code (section 5.1), and a
   reader maps codes to its own profiles.
 - Grids (`DemGrid` 514, `LandCover` 516, `SteepnessMax` 520) share one
-  layout. Element size 1, `param` = `s_lat << 16 | s_lon` in arc-seconds,
-  so one container can hold the same kind of grid at two spacings. The
-  section holds a block count `n` (u64), `n` sorted block keys (u64:
-  `(i_block + 2^31) << 32 | (j_block + 2^31)`, so the order of the keys is
-  the order of the signed block indexes), `n + 1` u64 byte offsets into the
-  payload, and the payload. Each block's payload is a tag byte and the
-  block's data. Tag 0: the data uncompressed, posts row by row (`i`, then
-  `j`). Tag 1: one value for the whole block. Other tags are kind-specific
-  (`DemGrid`'s zig-zag delta varints). `GridBlocks` (138) uses the same key.
+  layout. Element size 1, `param` = `s_lat << 16 | s_lon` in lattice ticks
+  (1/120″, section 9.1), so one container can hold the same kind of grid at
+  two spacings. The section holds a block count `n` (u64), `n` sorted block
+  keys (u64: `(i_block + 2^31) << 32 | (j_block + 2^31)`, so the order of
+  the keys is the order of the signed block indexes), `n + 1` u64 byte
+  offsets into the payload, and the payload. `GridBlocks` (138) uses the same
+  key.
+- Each block's payload is a tag byte and the block's data, posts row by row
+  from the south-west (`i`, then `j`). Bit 7 of the tag says a 512-byte
+  presence bitmap (one bit per post, 1 = has data) follows the tag. It is
+  written only when some post has no data, and the values of absent posts
+  are skipped. The low bits pick the coding:
+  - 0: the values uncompressed (i16 for `DemGrid`, two 4-bit values per byte
+    with the lower `j` in the low nibble for the others).
+  - 1: one value for the whole block.
+  - 2 (`DemGrid`): Rice-coded residuals of the MED (LOCO-I) predictor over
+    the block's posts, one 4-bit Rice parameter per 64-post row, and an
+    escape to the raw value at quotient 24.
+  - 3 (4-bit grids): runs along the rows, each a varint
+    `(length - 1) << 4 | value`.
+  A writer picks the smallest coding per block; the choice is deterministic,
+  so rebuilds stay byte-identical. The terrain lane's E1 measured these on
+  Małopolskie (GLO-30, whole metres; `off-road-sar/exp/E1`): `DemGrid` at
+  1″ is 9.3 MB with Rice against 26.1 MB with the zig-zag varint planned
+  before (a varint costs at least a byte a post), 2.9 MB at 2″ and 1.6 MB at
+  3″. `LandCover` in runs is 4.3 MB at 1″, a third of packed nibbles.
 
 `SteepnessMax` (520, T4) is 4 bits per post, at the spacing and on the blocks
 of the `DemGrid` it accompanies. Each value is the steepest slope in the full
-resolution source within the post's cell, the `s_lat × s_lon` square centred
-on the post. Codes 0 to 14 are 5° bands (code `c` covers `5c` up to `5c + 5`
-degrees, and 14 covers 70° and steeper). 15 means no data. An uncompressed
-block is 2,048 bytes, two posts per byte with the lower `j` in the low
-nibble. It lets exit legality and the incident surface catch embankments
-and cliffs that a 3″ DEM averages away (plan section 8). It costs about
-1 MB raw on Małopolskie at 3″, *estimated* from the `DemGrid` cell count.
+resolution source within the post's cell (the source pixels whose centres
+fall in `[p − s/2, p + s/2)` in both axes), as a class with upper bounds 2,
+5, 8, 11, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 and 70° (classes 0 to 14),
+and 15 for anything steeper. Slopes are Horn's on the source's own grid, with
+the thresholds compared exactly in integers. Posts the `DemGrid` has no data
+for are absent here too. It lets exit legality and the incident surface catch
+embankments and cliffs that a coarse DEM averages away (plan section 8): at
+3″ on Małopolskie, 3.25 % of cells hold a source pixel steeper than 30°, but
+only 0.66 % look that steep from the 3″ grid itself (E1). It is written
+beside a `DemGrid` coarser than its source and left out when the spacing
+equals the source's, where it adds nothing. About 1.5 MB in runs on
+Małopolskie at 3″ and 3.0 MB at 2″ (E1).
 
 `BarrierLines` (515, X2) holds linear features of any kind: streams, rivers
 and shorelines, ridges, cliffs and embankments, power lines and cutlines,
@@ -610,8 +632,8 @@ fences, walls, hedges, guard rails, railways and fenced roads, and
 optionally building outlines. Element size 1, `param` 0. The section holds:
 
 - A 64-byte header: class rule count u32, line count u32, index spacing
-  u32 (arc-seconds, 12 as the request grid), index block count u32, then
-  zero.
+  u32 (lattice ticks, 1,440 = 12″ as the request grid), index block count
+  u32, then zero.
 - Class rules, 8 bytes each, sorted by (class, profile code): class u8,
   zero u8, profile code u16 (0 = any profile not listed), crossing u8
   (0 free, 1 at a cost, 2 not crossable, 3 only from the left of the
@@ -770,10 +792,15 @@ was used.
 ### 9.1 Definition
 
 Every gridded section uses one angular lattice: posts at
-`(i × s_lat, j × s_lon)` arc-seconds from 0° N, 0° E, with `i`, `j` signed
-32-bit integers and `s_lat`, `s_lon` whole divisors of 3,600 (so whole
-degrees are post lines, where DEM source tiles meet). A grid section states
-its `(s_lat, s_lon)` and stores data in blocks of 64 × 64 posts, block
+`(i × s_lat, j × s_lon)` ticks from 0° N, 0° E, where a tick is 1/120″,
+with `i`, `j` signed 32-bit integers and `s_lat`, `s_lon` whole divisors of
+432,000 ticks, a degree (so whole degrees are post lines, where DEM source
+tiles meet). 1″ is 120 ticks, 3″ is 360, and ½″ (60) stays possible for a
+15 m source such as GEM-15 without a format 4; GLO-30's 1.5″ columns above
+50° N (180) and WorldCover's 0.3″ (36) are whole ticks too, so resampling is
+exact integer arithmetic. Post indexes still fit an i32 at ½″ (2.6 M posts
+around the globe). A grid section states its `(s_lat, s_lon)` and stores
+data in blocks of 64 × 64 posts, block
 `(floor(i / 64), floor(j / 64))`, as a sorted block index and per-block
 offsets, so only covered blocks take space. Global post indexes `(i, j)`
 break ties (lexicographically), never a package-local index.
@@ -787,9 +814,9 @@ its members; the 1.0 compiler uses `s_lon = s_lat` everywhere.
 
 | Grid | Spacing | Values |
 |---|---|---|
-| DEM (`DemGrid`, T4) | 3″ default, 1″ or 6″ | i16 metres, `i16::MIN` none; zig-zag delta varint per block (the terrain analysis) |
-| Steepness (`SteepnessMax`, T4) | the DEM's | 4-bit 5° bands of the steepest full-resolution slope (section 6.1) |
-| Land cover (`LandCover`, X3a) | 1″ or 2″ (25–50 m) | 4-bit classes |
+| DEM (`DemGrid`, T4) | 3″ default, 1″ or 6″, ½″ possible | i16 whole metres, absent posts in the block's presence bitmap; Rice-coded MED residuals per block (section 6.1) |
+| Steepness (`SteepnessMax`, T4) | the DEM's, when coarser than its source | 4-bit classes of the steepest full-resolution slope, in runs (section 6.1) |
+| Land cover (`LandCover`, X3a) | 1″ or 2″ (25–50 m) | 4-bit classes (1–11 WorldCover's, 12–15 for OSM-only classes), in runs |
 | X4 friction raster | built per request at 1″ | not stored |
 | Request grid (section 9.3) | 12″ | edge lists |
 
