@@ -35,12 +35,15 @@
 
 use std::cell::RefCell;
 
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+#[cfg(test)]
 use wayfarer_package::cch_order::is_permutation;
 
 use super::Sections;
@@ -377,100 +380,34 @@ impl CchTopology {
         };
         let n = g.node_count;
         let started = Instant::now();
-        if g.cch_rank.len() != n || !is_permutation(g.cch_rank) {
+        if g.cch_rank.len() != n {
             return None;
         }
-        let rank = g.cch_rank.to_vec();
-        let mut node = vec![0u32; n];
-        for (v, r) in rank.iter().enumerate() {
-            node[*r as usize] = v as u32;
-        }
+        let (rank, node) = rank_and_node(g.cch_rank)?;
         stats.order_ms = started.elapsed().as_secs_f64() * 1e3;
 
         let started = Instant::now();
-        // The node graph's upward neighbours by rank (lower → higher),
-        // grouped by a counting sort on the lower rank; repeats (an edge and
-        // its twin) are left for the elimination to drop.
-        let ends = |u: usize, e: u32| {
-            let v = g.edge_target[e as usize] as usize;
-            (v != u).then(|| {
-                let (ru, rv) = (rank[u], rank[v]);
-                if ru < rv { (ru, rv) } else { (rv, ru) }
-            })
+        // The node graph by rank, its elimination tree (Liu's algorithm on
+        // the lower neighbours), then the elimination itself: a node's
+        // upward neighbours are its own and its children's but the child
+        // itself (each child's list starts with this node, its parent).
+        // Subtrees of the tree are independent, so each task eliminates one
+        // in post-order; the nodes above them follow in rank order. Every
+        // list is a sorted set, whichever thread builds it, so the arrays
+        // are the same on any number of threads.
+        // On one or two threads the tasks cost more than they save, so the
+        // elimination runs in rank order on one thread instead; the arrays
+        // are the same.
+        let (first_up, up_head, parent) = if rayon::current_num_threads() < PARALLEL_THREADS {
+            eliminate_in_rank_order(g, &rank)?
+        } else {
+            let adjacency = RankAdjacency::build(g, &rank, &node)?;
+            let lists = eliminate(&adjacency)?;
+            drop(adjacency);
+            let (first_up, up_head) = lists.assemble()?;
+            (first_up, up_head, lists.parent)
         };
-        let mut first_orig = vec![0u32; n + 1];
-        for u in 0..n {
-            for e in g.first_out[u]..g.first_out[u + 1] {
-                if let Some((lo, _)) = ends(u, e) {
-                    first_orig[lo as usize + 1] += 1;
-                }
-            }
-        }
-        for x in 0..n {
-            first_orig[x + 1] += first_orig[x];
-        }
-        let mut fill = first_orig.clone();
-        let mut orig_head = vec![0u32; first_orig[n] as usize];
-        for u in 0..n {
-            for e in g.first_out[u]..g.first_out[u + 1] {
-                if let Some((lo, hi)) = ends(u, e) {
-                    orig_head[fill[lo as usize] as usize] = hi;
-                    fill[lo as usize] += 1;
-                }
-            }
-        }
-        drop(fill);
-        // Elimination in rank order: a node's upward neighbours are its own
-        // and its children's but the child itself (each child's list starts
-        // with this node, its parent). Children have lower ranks, so their
-        // lists are final, and so is this node's once built: it goes to the
-        // arc array as it is.
-        let mut first_up = Vec::with_capacity(n + 1);
-        first_up.push(0u32);
-        let mut up_head: Vec<u32> = Vec::with_capacity(orig_head.len());
-        let mut parent = vec![NO_NODE; n];
-        let mut first_child = vec![NO_NODE; n];
-        let mut next_sibling = vec![NO_NODE; n];
-        let mut list: Vec<u32> = Vec::new();
-        for x in 0..n {
-            list.clear();
-            list.extend_from_slice(&orig_head[first_orig[x] as usize..first_orig[x + 1] as usize]);
-            let mut child = first_child[x];
-            while child != NO_NODE {
-                let c = child as usize;
-                list.extend_from_slice(
-                    &up_head[first_up[c] as usize + 1..first_up[c + 1] as usize],
-                );
-                child = next_sibling[c];
-            }
-            list.sort_unstable();
-            list.dedup();
-            if let Some(&p) = list.first() {
-                parent[x] = p;
-                next_sibling[x] = first_child[p as usize];
-                first_child[p as usize] = x as u32;
-            }
-            up_head.extend_from_slice(&list);
-            if up_head.len() as u64 >= u64::from(UP_BIT) {
-                return None;
-            }
-            first_up.push(up_head.len() as u32);
-        }
-        drop((orig_head, first_orig, first_child, next_sibling, list));
-        up_head.shrink_to_fit();
-        let arcs = up_head.len();
-        // Statistics: elimination-tree depth = upward search space size.
-        let mut depth = vec![0u32; n];
-        for x in (0..n).rev() {
-            let p = parent[x];
-            depth[x] = if p == NO_NODE {
-                1
-            } else {
-                depth[p as usize] + 1
-            };
-        }
-        stats.elimination_tree_height = depth.iter().copied().max().unwrap_or(0) as usize;
-        stats.arc_count = arcs;
+        stats.arc_count = up_head.len();
         let topology = Self {
             rank,
             node,
@@ -481,6 +418,9 @@ impl CchTopology {
             keep_customization: true,
         };
         let arrays = CustomizationArrays::build(g, &topology);
+        // Levels count from the leaves, so there are as many as the longest
+        // path down the tree has nodes.
+        stats.elimination_tree_height = arrays.level_start.len() - 1;
         *topology
             .customization
             .lock()
@@ -1079,45 +1019,673 @@ impl Customizer<'_> {
     }
 }
 
+// -------------------------------------------------------------------------
+// Topology build, in parallel
+// -------------------------------------------------------------------------
+
+/// Ranks per chunk of the topology build's parallel passes (tests: few, so
+/// that the small test packages have several chunks).
+const RANK_CHUNK: usize = if cfg!(test) { 8 } else { 16_384 };
+/// Subtrees of the elimination tree of at most this many nodes are
+/// eliminated by one task each (tests: tiny, so that the small test packages
+/// have tasks and nodes above them too).
+const TASK_NODES: u32 = if cfg!(test) { 4 } else { 4096 };
+/// [`Lists::owner`] of a rank above the tasks' subtrees (and of one not
+/// placed yet).
+const TOP: u32 = NO_NODE;
+
+/// `values` without their atomics.
+fn plain(values: Vec<AtomicU32>) -> Vec<u32> {
+    values.into_iter().map(AtomicU32::into_inner).collect()
+}
+
+/// `len` zeros to fill from many threads.
+fn atomic_zeros(len: usize) -> Vec<AtomicU32> {
+    (0..len)
+        .into_par_iter()
+        .with_min_len(RANK_CHUNK)
+        .map(|_| AtomicU32::new(0))
+        .collect()
+}
+
+/// Exclusive prefix sums of `counts` (one per rank) as `first`, `n + 1`
+/// long; `None` when the total reaches `limit`.
+fn prefix_sums(counts: &[u32], limit: u64) -> Option<Vec<u32>> {
+    let mut first = Vec::with_capacity(counts.len() + 1);
+    let mut total = 0u64;
+    first.push(0);
+    for count in counts {
+        total += u64::from(*count);
+        if total >= limit {
+            return None;
+        }
+        first.push(total as u32);
+    }
+    Some(first)
+}
+
+/// `data`, a CSR array with ranges `first[x]..first[x + 1]` by rank, cut
+/// into the ranges of chunks of [`RANK_CHUNK`] ranks: (the chunk's first
+/// rank, its part of `data`).
+fn rank_chunks<'a, T>(mut data: &'a mut [T], first: &[u32]) -> Vec<(usize, &'a mut [T])> {
+    let n = first.len() - 1;
+    let mut chunks = Vec::with_capacity(n.div_ceil(RANK_CHUNK));
+    for start in (0..n).step_by(RANK_CHUNK) {
+        let end = (start + RANK_CHUNK).min(n);
+        let (chunk, rest) = data.split_at_mut((first[end] - first[start]) as usize);
+        chunks.push((start, chunk));
+        data = rest;
+    }
+    chunks
+}
+
+/// Threads from which the topology build runs in parallel (on Małopolskie
+/// the parallel build is slower on two threads and faster on three).
+const PARALLEL_THREADS: usize = 3;
+
+/// The upward lists (`first_up`, `up_head`) and the elimination tree, on one
+/// thread: the node graph's upward neighbours by rank (lower → higher),
+/// grouped by a counting sort on the lower rank, then the elimination in
+/// rank order. A node's upward neighbours are its own and its children's
+/// but the child itself (each child's list starts with this node, its
+/// parent). Children have lower ranks, so their lists are final, and so is
+/// this node's once built: it goes to the arc array as it is. Repeats (an
+/// edge and its twin) are dropped by the elimination. `None` when the arcs
+/// outgrow the 31-bit arc ids.
+fn eliminate_in_rank_order(
+    g: &Sections<'_>,
+    rank: &[u32],
+) -> Option<(Vec<u32>, Vec<u32>, Vec<u32>)> {
+    let n = g.node_count;
+    let ends = |u: usize, e: u32| {
+        let v = g.edge_target[e as usize] as usize;
+        (v != u).then(|| {
+            let (ru, rv) = (rank[u], rank[v]);
+            if ru < rv { (ru, rv) } else { (rv, ru) }
+        })
+    };
+    let mut first_orig = vec![0u32; n + 1];
+    for u in 0..n {
+        for e in g.first_out[u]..g.first_out[u + 1] {
+            if let Some((lo, _)) = ends(u, e) {
+                first_orig[lo as usize + 1] += 1;
+            }
+        }
+    }
+    for x in 0..n {
+        first_orig[x + 1] += first_orig[x];
+    }
+    let mut fill = first_orig.clone();
+    let mut orig_head = vec![0u32; first_orig[n] as usize];
+    for u in 0..n {
+        for e in g.first_out[u]..g.first_out[u + 1] {
+            if let Some((lo, hi)) = ends(u, e) {
+                orig_head[fill[lo as usize] as usize] = hi;
+                fill[lo as usize] += 1;
+            }
+        }
+    }
+    drop(fill);
+    let mut first_up = Vec::with_capacity(n + 1);
+    first_up.push(0u32);
+    let mut up_head: Vec<u32> = Vec::with_capacity(orig_head.len());
+    let mut parent = vec![NO_NODE; n];
+    let mut first_child = vec![NO_NODE; n];
+    let mut next_sibling = vec![NO_NODE; n];
+    let mut list: Vec<u32> = Vec::new();
+    for x in 0..n {
+        list.clear();
+        list.extend_from_slice(&orig_head[first_orig[x] as usize..first_orig[x + 1] as usize]);
+        let mut child = first_child[x];
+        while child != NO_NODE {
+            let c = child as usize;
+            list.extend_from_slice(&up_head[first_up[c] as usize + 1..first_up[c + 1] as usize]);
+            child = next_sibling[c];
+        }
+        list.sort_unstable();
+        list.dedup();
+        if let Some(&p) = list.first() {
+            parent[x] = p;
+            next_sibling[x] = first_child[p as usize];
+            first_child[p as usize] = x as u32;
+        }
+        up_head.extend_from_slice(&list);
+        if up_head.len() as u64 >= u64::from(UP_BIT) {
+            return None;
+        }
+        first_up.push(up_head.len() as u32);
+    }
+    drop((orig_head, first_orig, first_child, next_sibling, list));
+    up_head.shrink_to_fit();
+    Some((first_up, up_head, parent))
+}
+
+/// The stored order (node → rank) and its inverse; `None` unless it is a
+/// permutation.
+fn rank_and_node(cch_rank: &[u32]) -> Option<(Vec<u32>, Vec<u32>)> {
+    let n = cch_rank.len();
+    if n >= NO_NODE as usize {
+        return None;
+    }
+    let node: Vec<AtomicU32> = (0..n)
+        .into_par_iter()
+        .with_min_len(RANK_CHUNK)
+        .map(|_| AtomicU32::new(NO_NODE))
+        .collect();
+    // n ranks below n, each claimed once: a permutation.
+    let claimed = cch_rank
+        .par_iter()
+        .with_min_len(RANK_CHUNK)
+        .enumerate()
+        .all(|(v, r)| {
+            node.get(*r as usize).is_some_and(|slot| {
+                slot.compare_exchange(NO_NODE, v as u32, Relaxed, Relaxed)
+                    .is_ok()
+            })
+        });
+    claimed.then(|| (cch_rank.to_vec(), plain(node)))
+}
+
+/// The node graph by rank: per rank, the ranks of its neighbours along every
+/// edge but loops, out-edges and in-edges alike (an edge and its twin give
+/// the same neighbour twice): those below it, then those above.
+struct RankAdjacency {
+    first: Vec<u32>,
+    /// Where each rank's neighbours above it start.
+    mid: Vec<u32>,
+    heads: Vec<u32>,
+}
+
+impl RankAdjacency {
+    fn build(g: &Sections<'_>, rank: &[u32], node: &[u32]) -> Option<Self> {
+        let n = g.node_count;
+        // A node's in-edges are the twins of its out-edges, whose sources
+        // are those out-edges' targets, and its lone in-edges.
+        let lone_in = |u: usize| {
+            let present = g
+                .lone_in_present
+                .get(u / 64)
+                .is_some_and(|bits| bits & (1 << (u % 64)) != 0);
+            let target = |edge: &u32| g.edge_target[*edge as usize] as usize;
+            let (start, end) = if present {
+                (
+                    g.lone_in_edge.partition_point(|edge| target(edge) < u),
+                    g.lone_in_edge.partition_point(|edge| target(edge) <= u),
+                )
+            } else {
+                (0, 0)
+            };
+            g.lone_in_edge[start..end].iter().copied()
+        };
+        let neighbours = |x: usize| {
+            let u = node[x] as usize;
+            let out = (g.first_out[u]..g.first_out[u + 1]).map(|e| g.edge_target[e as usize]);
+            let into = lone_in(u).map(|edge| g.edge_source(edge as usize));
+            out.chain(into)
+                .filter(move |v| *v as usize != u)
+                .map(|v| rank[v as usize])
+        };
+        // Per rank: its neighbours, and those below it.
+        let (counts, lower): (Vec<u32>, Vec<u32>) = (0..n)
+            .into_par_iter()
+            .with_min_len(RANK_CHUNK)
+            .map(|x| {
+                neighbours(x).fold((0, 0), |(all, below), r| {
+                    (all + 1, below + u32::from((r as usize) < x))
+                })
+            })
+            .unzip();
+        let first = prefix_sums(&counts, u64::from(u32::MAX))?;
+        drop(counts);
+        let mid = (0..n)
+            .into_par_iter()
+            .with_min_len(RANK_CHUNK)
+            .map(|x| first[x] + lower[x])
+            .collect();
+        drop(lower);
+        let mut heads = vec![0u32; first[n] as usize];
+        rank_chunks(&mut heads, &first)
+            .into_par_iter()
+            .for_each(|(start, chunk)| {
+                let mut at = 0;
+                for x in start..(start + RANK_CHUNK).min(n) {
+                    let slot = &mut chunk[at..at + (first[x + 1] - first[x]) as usize];
+                    let (mut below, mut above) = (0, slot.len());
+                    for r in neighbours(x) {
+                        if (r as usize) < x {
+                            slot[below] = r;
+                            below += 1;
+                        } else {
+                            above -= 1;
+                            slot[above] = r;
+                        }
+                    }
+                    at += slot.len();
+                }
+            });
+        Some(Self { first, mid, heads })
+    }
+
+    /// Rank `x`'s neighbours below it.
+    fn lower(&self, x: usize) -> &[u32] {
+        &self.heads[self.first[x] as usize..self.mid[x] as usize]
+    }
+
+    /// Rank `x`'s neighbours above it.
+    fn upper(&self, x: usize) -> &[u32] {
+        &self.heads[self.mid[x] as usize..self.first[x + 1] as usize]
+    }
+}
+
+/// Every rank's upward list (see [`eliminate`]), in the buffers of the
+/// task, or the top, that built it.
+struct Lists {
+    /// The elimination-tree parent of every rank: the lowest of its upward
+    /// neighbours, `NO_NODE` for a root.
+    parent: Vec<u32>,
+    /// By rank: the task that built its list, or [`TOP`].
+    owner: Vec<u32>,
+    tasks: Vec<Vec<u32>>,
+    top: Vec<u32>,
+    start: Vec<u32>,
+    len: Vec<u32>,
+}
+
+/// The elimination tree's child links while it is built: children by
+/// sibling lists, each node's list complete once the tree reaches past it.
+struct ChildLinks {
+    first_child: Vec<AtomicU32>,
+    next_sibling: Vec<AtomicU32>,
+    /// Each rank's parent (`NO_NODE` for a root), set as the parent's list
+    /// is built.
+    parent: Vec<AtomicU32>,
+}
+
+impl ChildLinks {
+    fn children(&self, x: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut child = self.first_child[x].load(Relaxed);
+        std::iter::from_fn(move || {
+            (child != NO_NODE).then(|| {
+                let c = child as usize;
+                child = self.next_sibling[c].load(Relaxed);
+                c
+            })
+        })
+    }
+}
+
+/// Where each rank's list is while the tasks run.
+struct Placement {
+    start: Vec<AtomicU32>,
+    len: Vec<AtomicU32>,
+    owner: Vec<AtomicU32>,
+}
+
+impl Placement {
+    fn range(&self, x: usize) -> std::ops::Range<usize> {
+        let start = self.start[x].load(Relaxed) as usize;
+        start..start + self.len[x].load(Relaxed) as usize
+    }
+
+    fn set(&self, x: usize, start: usize, len: usize, owner: u32) {
+        self.start[x].store(start as u32, Relaxed);
+        self.len[x].store(len as u32, Relaxed);
+        self.owner[x].store(owner, Relaxed);
+    }
+}
+
+/// Builds rank `x`'s upward list into `list`: its upward neighbours and its
+/// children's lists but the child itself (each child's list starts with
+/// its parent, this rank), as a sorted set. `list_of` finds a child's.
+fn eliminate_one<'b>(
+    adjacency: &RankAdjacency,
+    links: &ChildLinks,
+    x: usize,
+    list: &mut Vec<u32>,
+    list_of: impl Fn(usize) -> &'b [u32],
+) {
+    list.clear();
+    list.extend_from_slice(adjacency.upper(x));
+    for child in links.children(x) {
+        links.parent[child].store(x as u32, Relaxed);
+        let child_list = list_of(child);
+        debug_assert_eq!(child_list.first(), Some(&(x as u32)));
+        list.extend_from_slice(&child_list[1..]);
+    }
+    list.sort_unstable();
+    list.dedup();
+}
+
+/// The lists of the subtrees of `roots` (complete), each in post-order:
+/// every child before its parent. `None` when they outgrow the 31-bit arc
+/// ids.
+fn eliminate_subtrees(
+    adjacency: &RankAdjacency,
+    links: &ChildLinks,
+    placement: &Placement,
+    roots: &[u32],
+    task: u32,
+) -> Option<Vec<u32>> {
+    let mut heads = Vec::new();
+    let mut list = Vec::new();
+    let mut stack = Vec::new();
+    for root in roots {
+        let root = *root as usize;
+        stack.push((root, links.first_child[root].load(Relaxed)));
+        while let Some((x, next)) = stack.last_mut() {
+            let x = *x;
+            if *next != NO_NODE {
+                let child = *next as usize;
+                *next = links.next_sibling[child].load(Relaxed);
+                stack.push((child, links.first_child[child].load(Relaxed)));
+                continue;
+            }
+            stack.pop();
+            eliminate_one(adjacency, links, x, &mut list, |c| {
+                &heads[placement.range(c)]
+            });
+            placement.set(x, heads.len(), list.len(), task);
+            heads.extend_from_slice(&list);
+            if heads.len() as u64 >= u64::from(UP_BIT) {
+                return None;
+            }
+        }
+    }
+    Some(heads)
+}
+
+/// Marks a subtree size in [`eliminate`] whose subtree holds a task's.
+const HOLDS_TASK: u32 = 1 << 31;
+
+/// Small trees waiting for a task, and their nodes.
+#[derive(Default)]
+struct Batch {
+    roots: Vec<u32>,
+    nodes: u32,
+}
+
+impl Batch {
+    /// Adds the tree of `root`, with `size` nodes; the batch to spawn once
+    /// it holds [`TASK_NODES`].
+    fn add(&mut self, root: usize, size: u32) -> Option<Vec<u32>> {
+        self.roots.push(root as u32);
+        self.nodes += size;
+        (self.nodes >= TASK_NODES).then(|| {
+            self.nodes = 0;
+            std::mem::take(&mut self.roots)
+        })
+    }
+}
+
+/// Every rank's upward list. The elimination tree comes first, by Liu's
+/// algorithm: each lower neighbour's tree so far, found through ancestors
+/// with path compression, hangs from the rank that reaches it first. A tree
+/// is complete once hung (its nodes all rank below its root), so tasks
+/// eliminate trees while the rest of the tree is still being built: each
+/// tree of at least [`TASK_NODES`] nodes with no task's inside, and the
+/// smaller trees hanging from a rank whose subtree holds a task's, in
+/// batches of about as many nodes. The ranks whose subtrees hold a task's
+/// follow in rank order. `None` when the arcs outgrow the 31-bit arc ids.
+fn eliminate(adjacency: &RankAdjacency) -> Option<Lists> {
+    let n = adjacency.first.len() - 1;
+    let no_nodes = || -> Vec<AtomicU32> {
+        (0..n)
+            .into_par_iter()
+            .with_min_len(RANK_CHUNK)
+            .map(|_| AtomicU32::new(NO_NODE))
+            .collect()
+    };
+    let links = ChildLinks {
+        first_child: no_nodes(),
+        next_sibling: no_nodes(),
+        parent: no_nodes(),
+    };
+    let placement = Placement {
+        start: atomic_zeros(n),
+        len: atomic_zeros(n),
+        owner: no_nodes(),
+    };
+    let results: Mutex<Vec<(u32, Option<Vec<u32>>)>> = Mutex::new(Vec::new());
+    let run = |roots: &[u32], task: u32| {
+        let heads = eliminate_subtrees(adjacency, &links, &placement, roots, task);
+        results
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((task, heads));
+    };
+    let mut holds_task = Vec::new();
+    let mut tasks = 0u32;
+    let mut batch = Batch::default();
+    rayon::scope(|scope| {
+        let (links, run) = (&links, &run);
+        let mut spawn = |roots: Vec<u32>| {
+            let task = tasks;
+            tasks += 1;
+            scope.spawn(move |_| run(&roots, task));
+        };
+        // Per rank, side by side (one cache line): its ancestor so far, and
+        // its subtree's size with [`HOLDS_TASK`] when the subtree holds a
+        // task's.
+        let mut nodes = vec![[NO_NODE, 1u32]; n];
+        for x in 0..n {
+            for low in adjacency.lower(x) {
+                let mut r = *low as usize;
+                loop {
+                    let next = nodes[r][0];
+                    if next == x as u32 {
+                        break;
+                    }
+                    nodes[r][0] = x as u32;
+                    if next != NO_NODE {
+                        r = next as usize;
+                        continue;
+                    }
+                    // r's tree hangs from x.
+                    let [_, r_size] = nodes[r];
+                    nodes[x][1] += r_size & !HOLDS_TASK;
+                    let sibling = links.first_child[x].load(Relaxed);
+                    links.next_sibling[r].store(sibling, Relaxed);
+                    links.first_child[x].store(r as u32, Relaxed);
+                    let r_holds = r_size & HOLDS_TASK != 0;
+                    let large = r_size >= TASK_NODES;
+                    if nodes[x][1] & HOLDS_TASK != 0 {
+                        if r_holds {
+                        } else if large {
+                            spawn(vec![r as u32]);
+                        } else if let Some(roots) = batch.add(r, r_size) {
+                            spawn(roots);
+                        }
+                    } else if r_holds || large {
+                        // x's subtree now holds a task's: its other
+                        // children so far wait no longer.
+                        nodes[x][1] |= HOLDS_TASK;
+                        for child in links.children(x).skip(1) {
+                            if let Some(roots) = batch.add(child, nodes[child][1]) {
+                                spawn(roots);
+                            }
+                        }
+                        if !r_holds {
+                            spawn(vec![r as u32]);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // Whole trees (never hung), and which ranks hold a task.
+        for (root, [ancestor, size]) in nodes.iter().enumerate() {
+            if *ancestor == NO_NODE
+                && size & HOLDS_TASK == 0
+                && let Some(roots) = batch.add(root, *size)
+            {
+                spawn(roots);
+            }
+        }
+        if !batch.roots.is_empty() {
+            spawn(std::mem::take(&mut batch.roots));
+        }
+        holds_task = nodes
+            .par_iter()
+            .with_min_len(RANK_CHUNK)
+            .map(|[_, size]| size & HOLDS_TASK != 0)
+            .collect();
+    });
+    let mut buffers = std::mem::take(&mut *results.lock().unwrap_or_else(PoisonError::into_inner));
+    buffers.sort_unstable_by_key(|(task, _)| *task);
+    let tasks = buffers
+        .into_iter()
+        .map(|(_, heads)| heads)
+        .collect::<Option<Vec<_>>>()?;
+    // The ranks whose subtrees hold a task's, in rank order.
+    let mut top = Vec::new();
+    let mut list = Vec::new();
+    for x in (0..n).filter(|x| holds_task[*x]) {
+        eliminate_one(adjacency, &links, x, &mut list, |c| {
+            match placement.owner[c].load(Relaxed) {
+                TOP => &top[placement.range(c)],
+                task => &tasks[task as usize][placement.range(c)],
+            }
+        });
+        placement.set(x, top.len(), list.len(), TOP);
+        top.extend_from_slice(&list);
+        if top.len() as u64 >= u64::from(UP_BIT) {
+            return None;
+        }
+    }
+    Some(Lists {
+        parent: plain(links.parent),
+        owner: plain(placement.owner),
+        tasks,
+        top,
+        start: plain(placement.start),
+        len: plain(placement.len),
+    })
+}
+
+impl Lists {
+    /// The lists as one array by rank (`first_up`, `up_head`).
+    fn assemble(&self) -> Option<(Vec<u32>, Vec<u32>)> {
+        let n = self.len.len();
+        let first_up = prefix_sums(&self.len, u64::from(UP_BIT))?;
+        let mut up_head = vec![0u32; first_up[n] as usize];
+        rank_chunks(&mut up_head, &first_up)
+            .into_par_iter()
+            .for_each(|(start, chunk)| {
+                let mut at = 0;
+                for x in start..(start + RANK_CHUNK).min(n) {
+                    let buffer = match self.owner[x] {
+                        TOP => &self.top,
+                        task => &self.tasks[task as usize],
+                    };
+                    let (s, len) = (self.start[x] as usize, self.len[x] as usize);
+                    chunk[at..at + len].copy_from_slice(&buffer[s..s + len]);
+                    at += len;
+                }
+            });
+        Some((first_up, up_head))
+    }
+}
+
 impl CustomizationArrays {
     /// The arrays of `topology`, the topology of `g`.
     fn build(g: &Sections<'_>, topology: &CchTopology) -> Self {
-        let n = g.node_count;
-        let (rank, first_up, up_head, parent) = (
-            topology.rank.as_slice(),
-            topology.first_up.as_slice(),
-            topology.up_head.as_slice(),
-            topology.parent.as_slice(),
+        let (
+            (first_down, down_tail, down_arc),
+            ((level_order, level_start), (edge_arc, edge_blocks)),
+        ) = rayon::join(
+            || Self::down_lists(topology),
+            || rayon::join(|| Self::levels(topology), || Self::edge_arcs(g, topology)),
         );
+        Self {
+            first_down,
+            down_tail,
+            down_arc,
+            level_order,
+            level_start,
+            edge_arc,
+            edge_blocks,
+        }
+    }
+
+    /// By rank: downward arcs as (lower node, its arc to this one), in rank
+    /// order (`first_down`, `down_tail`, `down_arc`).
+    fn down_lists(topology: &CchTopology) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let (first_up, up_head) = (topology.first_up.as_slice(), topology.up_head.as_slice());
+        let n = first_up.len() - 1;
         let arcs = up_head.len();
-        let ends = |u: usize, e: u32| {
-            let v = g.edge_target[e as usize] as usize;
-            (v != u).then(|| {
-                let (ru, rv) = (rank[u], rank[v]);
-                if ru < rv { (ru, rv) } else { (rv, ru) }
-            })
-        };
-        // Downward lists.
-        let mut first_down = vec![0u32; n + 1];
-        for head in up_head {
-            first_down[*head as usize + 1] += 1;
+        // Downward lists: each of a few ranges of upper ends goes over every
+        // arc in rank order and keeps its own, so the lists come out in rank
+        // order, as one pass would fill them.
+        let parts = rayon::current_num_threads().clamp(1, n.max(1));
+        let bounds = (0..=parts).map(|p| p * n / parts).collect::<Vec<_>>();
+        let mut counts = vec![0u32; n];
+        let mut rest = counts.as_mut_slice();
+        let mut slices = Vec::with_capacity(parts);
+        for p in 0..parts {
+            let (slice, tail) = rest.split_at_mut(bounds[p + 1] - bounds[p]);
+            slices.push((bounds[p], slice));
+            rest = tail;
         }
-        for y in 0..n {
-            first_down[y + 1] += first_down[y];
-        }
-        let mut fill = first_down.clone();
-        let mut down_tail = vec![0u32; arcs];
-        let mut down_arc = vec![0u32; arcs];
-        for x in 0..n {
-            for a in first_up[x]..first_up[x + 1] {
-                let y = up_head[a as usize] as usize;
-                down_tail[fill[y] as usize] = x as u32;
-                down_arc[fill[y] as usize] = a;
-                fill[y] += 1;
+        slices.into_par_iter().for_each(|(low, counts)| {
+            let high = low + counts.len();
+            for y in up_head {
+                let y = *y as usize;
+                if (low..high).contains(&y) {
+                    counts[y - low] += 1;
+                }
             }
+        });
+        let first_down =
+            prefix_sums(&counts, u64::from(u32::MAX) + 1).expect("as many downward arcs as arcs");
+        drop(counts);
+        // Most arcs lead to high ranks: the fill splits the arcs evenly.
+        let bounds = (0..=parts)
+            .map(|p| match p {
+                0 => 0,
+                p if p == parts => n,
+                p => first_down.partition_point(|first| (*first as usize) < p * arcs / parts),
+            })
+            .collect::<Vec<_>>();
+        let (mut down_tail, mut down_arc) = (vec![0u32; arcs], vec![0u32; arcs]);
+        let (mut tails, mut arcs_of) = (down_tail.as_mut_slice(), down_arc.as_mut_slice());
+        let mut slices = Vec::with_capacity(parts);
+        for p in 0..parts {
+            let len = (first_down[bounds[p + 1]] - first_down[bounds[p]]) as usize;
+            let (tail_slice, tail_rest) = tails.split_at_mut(len);
+            let (arc_slice, arc_rest) = arcs_of.split_at_mut(len);
+            slices.push((bounds[p], bounds[p + 1], tail_slice, arc_slice));
+            (tails, arcs_of) = (tail_rest, arc_rest);
         }
-        drop(fill);
-        // Elimination-tree levels.
+        slices
+            .into_par_iter()
+            .for_each(|(low, high, tails, arcs_of)| {
+                let base = first_down[low];
+                let mut fill = first_down[low..high]
+                    .iter()
+                    .map(|first| first - base)
+                    .collect::<Vec<_>>();
+                for x in 0..n {
+                    for a in first_up[x]..first_up[x + 1] {
+                        let y = up_head[a as usize] as usize;
+                        if (low..high).contains(&y) {
+                            let at = &mut fill[y - low];
+                            tails[*at as usize] = x as u32;
+                            arcs_of[*at as usize] = a;
+                            *at += 1;
+                        }
+                    }
+                }
+            });
+        (first_down, down_tail, down_arc)
+    }
+
+    /// Ranks in elimination-tree level order, leaves first, and where each
+    /// level starts (`level_order`, `level_start`).
+    fn levels(topology: &CchTopology) -> (Vec<u32>, Vec<u32>) {
+        let parent = topology.parent.as_slice();
+        let n = parent.len();
+        // Elimination-tree levels, then the ranks by level (in rank order
+        // within a level), by chunks of ranks in parallel.
         let mut level = vec![0u32; n];
         for x in 0..n {
             let p = parent[x];
@@ -1126,21 +1694,59 @@ impl CustomizationArrays {
             }
         }
         let level_count = level.iter().copied().max().map_or(0, |l| l as usize + 1);
-        let mut level_start = vec![0u32; level_count + 1];
-        for l in &level {
-            level_start[*l as usize + 1] += 1;
-        }
+        let mut at: Vec<Vec<u32>> = level
+            .par_chunks(RANK_CHUNK)
+            .map(|levels| {
+                let mut count = vec![0u32; level_count];
+                for l in levels {
+                    count[*l as usize] += 1;
+                }
+                count
+            })
+            .collect();
+        let mut level_start = Vec::with_capacity(level_count + 1);
+        let mut total = 0u32;
         for l in 0..level_count {
-            level_start[l + 1] += level_start[l];
+            level_start.push(total);
+            for chunk in &mut at {
+                let count = chunk[l];
+                chunk[l] = total;
+                total += count;
+            }
         }
-        let mut fill = level_start.clone();
-        let mut level_order = vec![0u32; n];
-        for (x, l) in level.iter().enumerate() {
-            let l = *l as usize;
-            level_order[fill[l] as usize] = x as u32;
-            fill[l] += 1;
-        }
-        drop((level, fill));
+        level_start.push(total);
+        let level_order = atomic_zeros(n);
+        level
+            .par_chunks(RANK_CHUNK)
+            .zip(at)
+            .enumerate()
+            .for_each(|(chunk, (levels, mut at))| {
+                for (i, l) in levels.iter().enumerate() {
+                    let slot = &mut at[*l as usize];
+                    level_order[*slot as usize].store((chunk * RANK_CHUNK + i) as u32, Relaxed);
+                    *slot += 1;
+                }
+            });
+        let level_order = plain(level_order);
+        (level_order, level_start)
+    }
+
+    /// Per package edge its arc, and the edge blocks (`edge_arc`,
+    /// `edge_blocks`).
+    fn edge_arcs(g: &Sections<'_>, topology: &CchTopology) -> (Vec<u32>, Vec<u32>) {
+        let n = g.node_count;
+        let (rank, first_up, up_head) = (
+            topology.rank.as_slice(),
+            topology.first_up.as_slice(),
+            topology.up_head.as_slice(),
+        );
+        let ends = |u: usize, e: u32| {
+            let v = g.edge_target[e as usize] as usize;
+            (v != u).then(|| {
+                let (ru, rv) = (rank[u], rank[v]);
+                if ru < rv { (ru, rv) } else { (rv, ru) }
+            })
+        };
         // Package edges → arcs, by blocks of source nodes.
         let mut edge_arc = vec![NO_NODE; g.edge_count];
         const BLOCK: usize = SOURCE_BLOCK;
@@ -1175,15 +1781,7 @@ impl CustomizationArrays {
                     }
                 }
             });
-        Self {
-            first_down,
-            down_tail,
-            down_arc,
-            level_order,
-            level_start,
-            edge_arc,
-            edge_blocks,
-        }
+        (edge_arc, edge_blocks)
     }
 
     fn heap_bytes(&self) -> usize {

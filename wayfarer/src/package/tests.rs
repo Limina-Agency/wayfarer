@@ -8686,8 +8686,83 @@ fn cch_potentials_are_exact_node_distances() {
     }
 }
 
-/// The topology built in one pass in rank order has the same arrays as the
-/// node graph's elimination with per-node lists.
+/// A `side` x `side` grid of two-node ways, each one-way either way or
+/// two-way at random (half the one-ways motorways), some doubled by a second
+/// way, plus a small separate
+/// cluster: the node graph has lone in-edges, repeated neighbours and two
+/// components.
+fn one_way_grid(seed: u64, side: i64) -> RoadGraph {
+    let mut seed = seed;
+    let mut below = |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    let id = |i: i64, j: i64| i * side + j + 1;
+    let at = |i: i64, j: i64| (i as f64 * 0.001, j as f64 * 0.0013);
+    let mut ways = Vec::new();
+    // One-way motorways have edges without a twin (no mode goes against
+    // them); one-way residential streets are still walked both ways.
+    let mut push = |a: (i64, i64), b: (i64, i64), access: DirectionalAccess| {
+        let way_id = ways.len() as i64 + 1;
+        let motorway = access != DirectionalAccess::Both && way_id % 2 == 0;
+        let road_type = if motorway {
+            RoadType::Motorway
+        } else {
+            RoadType::Residential
+        };
+        let base = way(
+            way_id,
+            at(a.0, a.1),
+            at(b.0, b.1),
+            id(a.0, a.1),
+            id(b.0, b.1),
+            road_type,
+            access,
+        );
+        ways.push(if motorway {
+            RoutableWay {
+                highway: Some("motorway".into()),
+                ..base
+            }
+        } else {
+            base
+        });
+    };
+    for i in 0..side {
+        for j in 0..side {
+            for (di, dj) in [(0, 1), (1, 0)] {
+                let (bi, bj) = (i + di, j + dj);
+                if bi >= side || bj >= side {
+                    continue;
+                }
+                let access = match below(4) {
+                    0 => DirectionalAccess::Forward,
+                    1 => DirectionalAccess::Backward,
+                    _ => DirectionalAccess::Both,
+                };
+                push((i, j), (bi, bj), access);
+                if below(8) == 0 {
+                    push((bi, bj), (i, j), DirectionalAccess::Forward);
+                }
+            }
+        }
+    }
+    // The separate cluster, far off.
+    for (a, b) in [
+        ((40, 40), (40, 41)),
+        ((40, 41), (41, 41)),
+        ((41, 41), (40, 40)),
+    ] {
+        push(a, b, DirectionalAccess::Forward);
+    }
+    small_graph("one-way-grid", ways)
+}
+
+/// The topology built in parallel has the same arrays as the node graph's
+/// elimination with per-node lists, on any number of threads (its chunks
+/// and tasks are tiny in tests, so even these small packages are split).
 #[test]
 fn cch_topology_matches_the_reference_build() {
     let dir = tempdir().unwrap();
@@ -8697,20 +8772,33 @@ fn cch_topology_matches_the_reference_build() {
         ("junction", junction_graph()),
         ("restricted", randomly_restricted_grid(7)),
         ("restricted-2", randomly_restricted_grid(11)),
+        ("one-way", one_way_grid(5, 12)),
+        ("one-way-2", one_way_grid(9, 17)),
     ];
+    let mut lone = 0;
     for (name, graph) in graphs {
         let fixture = persist(&graph, &dir.path().join(format!("{name}.mrt")));
         let view = fixture.package.file.view();
-        let (built, stats) = cch::CchTopology::build(&view).expect("topology");
+        lone += view.lone_in_edge.len();
         let (reference, reference_stats) =
             cch::CchTopology::build_reference(&view).expect("topology");
-        assert!(built.same_arrays(&reference), "{name}");
-        assert_eq!(stats.arc_count, reference_stats.arc_count, "{name}");
-        assert_eq!(
-            stats.elimination_tree_height, reference_stats.elimination_tree_height,
-            "{name}"
-        );
+        for threads in [1, 2, 3, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (built, stats) = pool
+                .install(|| cch::CchTopology::build(&view))
+                .expect("topology");
+            assert!(built.same_arrays(&reference), "{name}, {threads} threads");
+            assert_eq!(stats.arc_count, reference_stats.arc_count, "{name}");
+            assert_eq!(
+                stats.elimination_tree_height, reference_stats.elimination_tree_height,
+                "{name}"
+            );
+        }
     }
+    assert!(lone > 0, "the graphs have edges without a twin");
 }
 
 /// Parallel customization gives the bits of nodes relaxed one at a time, in
