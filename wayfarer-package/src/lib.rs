@@ -489,7 +489,11 @@ impl MobilityMode {
     pub const ON_FOOT: ModeMask = 1 << 2;
     pub const LEGGED: ModeMask = 1 << 3;
     pub const AERIAL: ModeMask = 1 << 4;
-    pub const ALL_GROUND: ModeMask = Self::WHEELED | Self::TRACKED | Self::ON_FOOT | Self::LEGGED;
+    /// Emergency vehicles: the ways motor vehicles, buses or HGVs may use,
+    /// busways included. Every edge open to `WHEELED` has it too.
+    pub const EMERGENCY: ModeMask = 1 << 5;
+    pub const ALL_GROUND: ModeMask =
+        Self::WHEELED | Self::TRACKED | Self::ON_FOOT | Self::LEGGED | Self::EMERGENCY;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,16 +541,18 @@ pub enum MobilityProfile {
     /// on main roads). Private and destination-only roads only at a route's
     /// ends.
     Tracked,
-    /// An emergency vehicle: wheeled and tracked access, and not confined to
-    /// through roads (it may cross private and destination-only roads).
+    /// An emergency vehicle: the roads cars may use and busways, and not
+    /// confined to through roads (it may cross private and destination-only
+    /// roads).
     Emergency,
     /// A person walking, costed close to walking time (about 5 km/h), as
     /// Valhalla's pedestrian costing: footways, paths and streets alike.
     OnFoot,
-    /// Travel on foot that keeps to tracks and paths: the same ways as
-    /// `OnFoot`, but tracks and paths cost half as much as streets, main roads
-    /// are avoided more strongly, and the pace on tracks and paths is faster
-    /// (6–6.5 km/h).
+    /// Travel on foot that keeps to tracks and paths: the ways `OnFoot` may
+    /// use, and bikeable ways `foot=no` closes to it (a cycleway with
+    /// `foot=no`, a track with `access=no, bicycle=yes`). Tracks and paths cost
+    /// half as much as streets, main roads are avoided more strongly, and the
+    /// pace on tracks and paths is faster (6–6.5 km/h).
     Legged,
 }
 
@@ -555,7 +561,11 @@ impl MobilityProfile {
         match self {
             Self::Default | Self::Wheeled => MobilityMode::WHEELED,
             Self::Tracked => MobilityMode::TRACKED,
-            Self::Emergency => MobilityMode::WHEELED | MobilityMode::TRACKED,
+            // Edges built before the emergency mode existed (and road graphs
+            // of tests) carry only the wheeled and tracked bits.
+            Self::Emergency => {
+                MobilityMode::WHEELED | MobilityMode::TRACKED | MobilityMode::EMERGENCY
+            }
             Self::OnFoot => MobilityMode::ON_FOOT,
             Self::Legged => MobilityMode::LEGGED,
         }

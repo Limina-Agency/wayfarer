@@ -2653,6 +2653,7 @@ mod tests {
                 *mobility_mode_mask,
                 wayfarer_road_graph::MobilityMode::WHEELED
                     | wayfarer_road_graph::MobilityMode::TRACKED
+                    | wayfarer_road_graph::MobilityMode::EMERGENCY
             );
             banned.push(*to_edge_id);
         }
@@ -2894,8 +2895,9 @@ mod tests {
 
     #[test]
     fn car_restrictions_still_bind_cars_whatever_they_except() {
-        let wheeled =
-            wayfarer_road_graph::MobilityMode::WHEELED | wayfarer_road_graph::MobilityMode::TRACKED;
+        let wheeled = wayfarer_road_graph::MobilityMode::WHEELED
+            | wayfarer_road_graph::MobilityMode::TRACKED
+            | wayfarer_road_graph::MobilityMode::EMERGENCY;
         for tags in [
             &[("restriction", "no_left_turn")][..],
             &[("restriction:motorcar", "no_left_turn")],
@@ -3015,6 +3017,121 @@ mod tests {
         assert_eq!(
             masks(&[("route", "shuttle_train"), ("foot", "no")]),
             (OsmMode::ALL & !foot, OsmMode::ALL & !foot)
+        );
+    }
+
+    /// A package of a 140 m `Shortcut` way between nodes 1 and 2, tagged
+    /// `shortcut`, and a 580 m residential detour round it, with the
+    /// directory that holds it.
+    fn shortcut_engine(shortcut: FixtureTags<'_>) -> (tempfile::TempDir, RoutingEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let pbf = dir.path().join("shortcut.osm.pbf");
+        let mut tags = shortcut.to_vec();
+        tags.push(("name", "Shortcut"));
+        write_osm_pbf(
+            &pbf,
+            &[
+                (1, 52.0, 21.0),
+                (2, 52.0, 21.002),
+                (3, 52.002, 21.0),
+                (4, 52.002, 21.002),
+            ],
+            &[
+                FixtureWay {
+                    id: 10,
+                    nodes: &[1, 2],
+                    tags: &tags,
+                },
+                FixtureWay {
+                    id: 11,
+                    nodes: &[1, 3, 4, 2],
+                    tags: &[("highway", "residential"), ("name", "Detour")],
+                },
+            ],
+            &[],
+        );
+        let archive_path = dir.path().join("routing.mrt");
+        compile(
+            &CompileRequest::new(pbf, archive_path.clone()).graph_id("shortcut"),
+            &CancelToken::new(),
+            |_| {},
+        )
+        .unwrap();
+        let engine = package_engine(&archive_path);
+        (dir, engine)
+    }
+
+    /// Whether `request` (from node 1 to node 2) takes the shortcut.
+    fn takes_shortcut(engine: &RoutingEngine, request: LegRequest) -> bool {
+        engine.route_leg(request).unwrap().legs[0]
+            .edges
+            .iter()
+            .any(|edge| edge.name.as_deref() == Some("Shortcut"))
+    }
+
+    fn shortcut_request(profile: MobilityProfile) -> LegRequest {
+        LegRequest::new(
+            GeoPoint::new(52.0, 21.0),
+            GeoPoint::new(52.0, 21.002),
+            profile,
+        )
+    }
+
+    /// The profiles that take the shortcut from node 1 to node 2.
+    fn profiles_taking_shortcut(shortcut: FixtureTags<'_>) -> Vec<MobilityProfile> {
+        let (_dir, engine) = shortcut_engine(shortcut);
+        [
+            MobilityProfile::Wheeled,
+            MobilityProfile::Tracked,
+            MobilityProfile::Emergency,
+            MobilityProfile::OnFoot,
+            MobilityProfile::Legged,
+        ]
+        .into_iter()
+        .filter(|profile| takes_shortcut(&engine, shortcut_request(*profile)))
+        .collect()
+    }
+
+    #[test]
+    fn bicycle_only_ways_are_closed_to_walkers_but_not_to_legged() {
+        use MobilityProfile::{Legged, OnFoot};
+        // P0a: bicycle access alone no longer opens a way to `OnFoot`;
+        // `Legged` ignores `foot=no` (decision D2).
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "cycleway"), ("foot", "no")]),
+            [Legged]
+        );
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "track"), ("access", "no"), ("bicycle", "yes")]),
+            [Legged]
+        );
+        // Cycleways are walkable by default, and footways stay walkable.
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "cycleway")]),
+            [OnFoot, Legged]
+        );
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "footway")]),
+            [OnFoot, Legged]
+        );
+    }
+
+    #[test]
+    fn busways_are_closed_to_cars_but_not_to_emergency_vehicles() {
+        use MobilityProfile::{Emergency, Legged, OnFoot, Tracked, Wheeled};
+        // P0d: bus access alone no longer opens a way to cars.
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "busway")]),
+            [Emergency]
+        );
+        // Roads open to cars stay open to emergency vehicles.
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "residential")]),
+            [Wheeled, Tracked, Emergency, OnFoot, Legged]
+        );
+        assert_eq!(
+            profiles_taking_shortcut(&[("highway", "residential"), ("motor_vehicle", "no")]),
+            [OnFoot, Legged]
         );
     }
 

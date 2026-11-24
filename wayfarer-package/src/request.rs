@@ -26,7 +26,7 @@ use crate::format::{
     EDGE_FLAG_SHAPE_REVERSED, LEG_ATTRS_REVISION, NO_HEADING, PackageFile, ProfileMasks,
     RoutingPackageError, Section, Sections, get_varint, put_varint, unzigzag, zigzag,
 };
-use crate::{GeoPoint, GraphViewEdge, MobilityProfile, lat_lng_envelope_for_radius};
+use crate::{GeoPoint, GraphViewEdge, MobilityMode, MobilityProfile, lat_lng_envelope_for_radius};
 
 /// Layout revision of the request sections, stored in `RequestMeta[0]`.
 pub const REQUEST_LAYOUT: u64 = 2;
@@ -751,14 +751,15 @@ impl LegAttrs {
 /// `profile_access` holds the slot bits of `profiles`.
 pub fn rebuilt_mode_mask(profiles: &crate::format::ProfileMap, profile_access: u16) -> u32 {
     [
-        MobilityProfile::Wheeled,
-        MobilityProfile::Tracked,
-        MobilityProfile::OnFoot,
-        MobilityProfile::Legged,
+        (MobilityProfile::Wheeled, MobilityMode::WHEELED),
+        (MobilityProfile::Tracked, MobilityMode::TRACKED),
+        (MobilityProfile::Emergency, MobilityMode::EMERGENCY),
+        (MobilityProfile::OnFoot, MobilityMode::ON_FOOT),
+        (MobilityProfile::Legged, MobilityMode::LEGGED),
     ]
     .into_iter()
-    .filter(|profile| profile_access & profiles.bit(*profile) != 0)
-    .fold(0, |mask, profile| mask | profile.mobility_mode_mask())
+    .filter(|(profile, _)| profile_access & profiles.bit(*profile) != 0)
+    .fold(0, |mask, (_, mode)| mask | mode)
 }
 
 pub fn exact_mode_mask(mask: u32) -> bool {
