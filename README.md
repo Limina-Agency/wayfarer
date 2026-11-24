@@ -91,6 +91,7 @@ overlap 0.97.
 | `wayfarer-costing` | The edge-cost model packages are built and queried with |
 | `wayfarer` | The engine: routes with alternatives, matrices, isochrones, map matching, turn-by-turn guidance, dynamic overlays |
 | `wayfarer-service` | Routing sources, readiness checks and route workflows (waypoints, direct legs) over the engine |
+| `wayfarer-sar` | Search and rescue planning over the engine: reach prediction (probability of area), likely routes, team assignment and track coverage |
 | `wayfarer-ffi` | The C ABI (`include/wayfarer.h`): JSON requests and results |
 | `wayfarer-compiler` | The compiler library: `compile` a `CompileRequest`, with progress and cancellation, or poll a `CompileJob` |
 | `wayfarer-cli` | The `wayfarer` command line: `compile`, `info`, `verify`, `route`, `matrix`, `nearest`, `isochrone`, `match`, `snap` |

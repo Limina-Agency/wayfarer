@@ -1,0 +1,35 @@
+[package]
+name = "wayfarer-sar"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Search and rescue planning over the offline routing engine: reach prediction, likely routes, team assignment and track coverage"
+readme = "README.md"
+keywords = ["routing", "search-and-rescue", "isochrone", "openstreetmap", "offline"]
+categories = ["science::geo", "algorithms"]
+# Builds its test packages with the compiler, a workspace-only dev-dependency.
+exclude = ["tests/"]
+
+[lints]
+workspace = true
+
+[dependencies]
+libm = { workspace = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+wayfarer = { workspace = true }
+wayfarer-costing = { workspace = true }
+wayfarer-package = { workspace = true }
+
+[features]
+# JSON Schema derives for the request and result types (`schemars`).
+schema = ["dep:schemars", "wayfarer/schema"]
+
+[dev-dependencies]
+wayfarer-road-graph = { workspace = true, features = ["snapshot"] }
+# Builds the test packages. Path only (no version), so publishing drops it.
+wayfarer-compiler = { path = "../wayfarer-compiler" }
