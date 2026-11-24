@@ -73,6 +73,7 @@ mod matrix;
 mod navigation;
 mod nearest;
 mod overlay;
+pub mod pace_calibration;
 mod package;
 mod queries;
 #[cfg(feature = "reference")]
@@ -180,3 +181,6 @@ pub use types::{
     RouteShapeSegment, RouteSpeedPreference, RouteSpeedSource, RouteStatus,
 };
 pub use wayfarer_costing::COSTING_MODEL_VERSION;
+/// The walking pace model (slope curve, trail factors, time percentiles);
+/// [`pace_calibration`] fits one to a team's GPS tracks.
+pub use wayfarer_costing::pace;

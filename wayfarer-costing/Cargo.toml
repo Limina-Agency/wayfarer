@@ -18,6 +18,13 @@ schemars = { workspace = true, optional = true }
 wayfarer-package = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+# Pace calibration files (`pace::PaceModel::from_json`).
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Regenerates the built-in pace table in a test.
+libm = { workspace = true }
 
 [features]
 # JSON Schema derives for the request and result types (`schemars`).

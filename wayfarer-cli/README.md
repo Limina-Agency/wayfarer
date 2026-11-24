@@ -112,6 +112,26 @@ closed area:
 A request that cannot be answered (no road near a point, no path) exits with
 status 1 and the error on stderr.
 
+## Walking pace: `wayfarer pace`
+
+```sh
+wayfarer pace default
+wayfarer pace calibrate <track.gpx> ... [--label TEXT] [--base model.json]
+                        [--trail paved|track|path|mountain-path|alpine-path|steps|unknown]
+                        [--no-curve] [-o model.json]
+```
+
+`default` prints the built-in walking pace model (`wayfarer_costing::pace`):
+a slope curve, trail-type factors and P10/P50/P90 travel-time multipliers,
+calibrated on OpenStreetMap public GPS traces in southern Poland. `calibrate`
+fits a model to a team's own GPX tracks, which need timestamps and heights in
+`<ele>`. It drops breaks, short pieces and pieces that are not walking, scales
+the flat speed to the team's moving time, reshapes the slope curve per 5 % grade
+bin (`--no-curve` keeps the base curve), and takes the team's own P10/P90 once
+it has five walks of 1 km or more. It prints `{"model", "report"}`. With `-o` it
+also writes the model alone, which a later `--base` or any pace option takes in place of the default.
+`--trail` says what the tracks were walked on (most tracks mix types: `unknown`).
+
 ## The host protocol
 
 An application that runs the compiler as a child process, rather than linking

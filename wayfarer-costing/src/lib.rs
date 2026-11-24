@@ -49,6 +49,7 @@ use wayfarer_package::sar::{
 use wayfarer_package::{GraphViewEdge, MobilityProfile, RoadEdge, RoadType, SharedEdgeInfo};
 
 pub mod junction;
+pub mod pace;
 pub use junction::{JunctionDelay, JunctionTransition, edge_speed_mps};
 
 /// Build-time cost classification of the free-form OSM `surface` tag.
