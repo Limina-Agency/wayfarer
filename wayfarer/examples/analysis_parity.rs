@@ -40,6 +40,8 @@
 //! scaled by the least cost ratio), and `ANALYSIS_SAR=<RouteSarOptions JSON>`
 //! (e.g. `{"relaxations": {"turn_restrictions": {}}}`) SAR relaxations on
 //! every wheeled request; both combine with `ANALYSIS_OVERLAY`.
+//! `ANALYSIS_OFF_NETWORK=<RouteOffNetworkOptions JSON>` (e.g. `{}`) turns on
+//! costed access legs for every request.
 //!
 //! `ANALYSIS_REFERENCE_CONTEXT=<k>` makes the reference exact under complex
 //! restrictions with up to k prefix edges (one label per edge and context).
@@ -428,9 +430,20 @@ fn sar_options() -> Option<wayfarer::RouteSarOptions> {
         .map(|json| serde_json::from_str(&json).expect("ANALYSIS_SAR is a SAR options JSON"))
 }
 
-/// The request options of every mode: the overlay, discounts and SAR.
+/// `ANALYSIS_OFF_NETWORK=<RouteOffNetworkOptions JSON>` (e.g. `{}` for the
+/// profile defaults, or `{"maxCandidates": 8}`): costed access legs on every
+/// request (`wayfarer::access`).
+fn off_network_options() -> Option<wayfarer::access::RouteOffNetworkOptions> {
+    std::env::var("ANALYSIS_OFF_NETWORK").ok().map(|json| {
+        serde_json::from_str(&json).expect("ANALYSIS_OFF_NETWORK is an off-network options JSON")
+    })
+}
+
+/// The request options of every mode: the overlay, discounts, SAR and
+/// costed access legs.
 fn extend_options(options: &mut RouteOptions, profile: MobilityProfile) {
     options.dynamic_overlay = overlay();
+    options.off_network = off_network_options();
     if let Some(discounts) = DISCOUNTS.get() {
         options.edge_cost_multipliers.extend(discounts);
     }

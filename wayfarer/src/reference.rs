@@ -72,9 +72,51 @@ const FRACTION_EPSILON: f64 = f64::EPSILON;
 /// A seed shorter than this traverses nothing.
 const TRAVERSED_EPSILON: f64 = 1e-9;
 
+/// A candidate's costed access stretch (`crate::access`), written out as
+/// (cost, duration, distance): its snap distance at the access pace, the
+/// time times the cost factor for its cost. Zeros without one.
+fn access_of(candidate: &CorrelatedLocation) -> Access {
+    let Some(access) = candidate.access else {
+        return Access::default();
+    };
+    let distance_m = if candidate.distance_m.is_finite() {
+        candidate.distance_m.max(0.0)
+    } else {
+        0.0
+    };
+    let duration_s = distance_m / access.pace_mps;
+    Access {
+        cost: access.cost_factor * duration_s,
+        duration_s,
+        distance_m,
+    }
+}
+
+/// The totals of a path's costed access stretches, which matrix cells and
+/// isochrone reach include and route searches leave to leg building.
+#[derive(Debug, Clone, Copy, Default)]
+struct Access {
+    cost: f64,
+    duration_s: f64,
+    distance_m: f64,
+}
+
+impl std::ops::Add for Access {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            cost: self.cost + other.cost,
+            duration_s: self.duration_s + other.duration_s,
+            distance_m: self.distance_m + other.distance_m,
+        }
+    }
+}
+
 /// Approach costs (`package::search::approach_costs`), written out: each
 /// `(target, candidate)`'s snap distance beyond the nearest candidate of the
-/// same target, priced by `approach_cost_of`.
+/// same target, priced by `approach_cost_of`; a candidate with costed access
+/// pays its access cost instead.
 fn approach_costs(candidates: &[(usize, &CorrelatedLocation)]) -> Vec<f64> {
     let distance = |candidate: &CorrelatedLocation| {
         if candidate.distance_m.is_finite() {
@@ -90,7 +132,10 @@ fn approach_costs(candidates: &[(usize, &CorrelatedLocation)]) -> Vec<f64> {
     }
     candidates
         .iter()
-        .map(|(target, candidate)| approach_cost_of(distance(candidate) - nearest[target]))
+        .map(|(target, candidate)| match candidate.access {
+            Some(_) => access_of(candidate).cost,
+            None => approach_cost_of(distance(candidate) - nearest[target]),
+        })
         .collect()
 }
 
@@ -699,14 +744,7 @@ impl<'a> ReferenceEngine<'a> {
                 }
                 paths
                     .into_iter()
-                    .map(|path| {
-                        path.map(|path| MatrixPath {
-                            edge_ids: path.edge_ids,
-                            distance_m: path.distance_m,
-                            duration_s: path.duration_s,
-                            cost: path.cost,
-                        })
-                    })
+                    .map(|path| path.map(PlainPath::matrix_path))
                     .collect()
             }
         }
@@ -1241,6 +1279,7 @@ struct PlainDestination {
     edge: Rc<Edge>,
     fraction: f64,
     approach: f64,
+    access: Access,
 }
 
 struct PlainFinish {
@@ -1263,6 +1302,19 @@ struct PlainPath {
     total: f64,
     duration_s: f64,
     distance_m: f64,
+    /// Both endpoints' costed access stretches, which a matrix cell adds.
+    access: Access,
+}
+
+impl PlainPath {
+    fn matrix_path(self) -> MatrixPath {
+        MatrixPath {
+            edge_ids: self.edge_ids,
+            distance_m: self.distance_m + self.access.distance_m,
+            duration_s: self.duration_s + self.access.duration_s,
+            cost: self.cost + self.access.cost,
+        }
+    }
 }
 
 /// One label per (edge, context), the context being the last `context`
@@ -1397,6 +1449,7 @@ fn plain_search(
                 edge: records.edge_by_id(candidate.edge_id)?,
                 fraction: candidate.fraction_along_edge.clamp(0.0, 1.0),
                 approach: approach[location],
+                access: access_of(candidate),
             })
         })
         .collect::<Vec<_>>();
@@ -1448,7 +1501,14 @@ fn plain_search(
             Item::Finish(index) => {
                 let finish = &finishes[index as usize];
                 let destination = &destinations[finish.destination];
-                let path = plain_path(records, &labels, finish, destination, &origin_approach);
+                let path = plain_path(
+                    records,
+                    &labels,
+                    finish,
+                    destination,
+                    &origin_approach,
+                    origins,
+                );
                 settler.offer(
                     destination.target,
                     finish.cost,
@@ -1532,6 +1592,7 @@ fn plain_path(
     finish: &PlainFinish,
     destination: &PlainDestination,
     origin_approach: &[f64],
+    origins: &[CorrelatedLocation],
 ) -> PlainPath {
     let label = labels.labels[finish.label as usize];
     let mut seed = finish.label;
@@ -1551,6 +1612,7 @@ fn plain_path(
             + finish.delay_s
             + destination.edge.duration() * destination.fraction,
         distance_m: label.distance_m + destination.edge.length() * destination.fraction,
+        access: access_of(&origins[origin]) + destination.access,
     }
 }
 
@@ -1594,6 +1656,7 @@ fn cheapest_direct(
                         total,
                         duration_s: duration_s * fraction,
                         distance_m: edge.length() * fraction,
+                        access: access_of(origin) + access_of(destination),
                     },
                 ));
             }
@@ -2185,15 +2248,17 @@ struct OverlayPath {
     cost: f64,
     duration_s: f64,
     distance_m: f64,
+    /// Both endpoints' costed access stretches, which a matrix cell adds.
+    access: Access,
 }
 
 impl OverlayPath {
     fn matrix_path(self) -> MatrixPath {
         MatrixPath {
             edge_ids: self.steps.iter().map(RouteSearchStep::edge_id).collect(),
-            distance_m: self.distance_m,
-            duration_s: self.duration_s,
-            cost: self.cost,
+            distance_m: self.distance_m + self.access.distance_m,
+            duration_s: self.duration_s + self.access.duration_s,
+            cost: self.cost + self.access.cost,
         }
     }
 }
@@ -2522,6 +2587,12 @@ fn overlay_search(
                 // cost does not.
                 let approach = origin.map_or(0.0, |origin| origin_approach[origin])
                     + destination.map_or(0.0, |destination| destination_approach[destination]);
+                let access = origin
+                    .map(|origin| access_of(&origins[origin]))
+                    .unwrap_or_default()
+                    + destination
+                        .map(|destination| access_of(destinations[destination].1))
+                        .unwrap_or_default();
                 let path = OverlayPath {
                     steps: search.steps(finish),
                     origin,
@@ -2529,6 +2600,7 @@ fn overlay_search(
                     cost: finish.cost - approach,
                     duration_s: duration_s + finish.delay_s + arc.duration_s,
                     distance_m: distance_m + arc.distance_m,
+                    access,
                 };
                 let edge_ids = path
                     .steps
@@ -2876,20 +2948,24 @@ fn isochrone_pass(
         let Some((edge_cost, edge_duration)) = edge.costed else {
             continue;
         };
+        // A costed access stretch is travel: time and distance start
+        // after it.
+        let access = access_of(candidate);
+        let (start_s, start_m) = (offset_s + access.duration_s, access.distance_m);
         let remaining = (1.0 - candidate.fraction_along_edge).clamp(0.0, 1.0);
         let (cost, duration_s) = (
             approach + edge_cost * remaining,
-            offset_s + edge_duration * remaining,
+            start_s + edge_duration * remaining,
         );
-        let distance_m = edge.length() * remaining;
+        let distance_m = start_m + edge.length() * remaining;
         let raw = edge.record.raw_edge_index;
         cross(
             &mut crossings,
             raw,
             candidate.fraction_along_edge,
             (approach, cost),
-            (offset_s, duration_s),
-            (0.0, distance_m),
+            (start_s, duration_s),
+            (start_m, distance_m),
             origin,
         );
         push(

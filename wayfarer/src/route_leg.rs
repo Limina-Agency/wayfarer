@@ -140,7 +140,7 @@ pub(crate) fn build_route_result(
     let qualified_access = crate::sar::qualified_access(&pieces, profile, options);
     let sar = crate::sar::route_report(access, &pieces, profile, options);
 
-    Ok(LegResult {
+    let mut result = LegResult {
         status: RouteStatus::Routed,
         origin: route.origin,
         destination: route.destination,
@@ -160,7 +160,10 @@ pub(crate) fn build_route_result(
         diagnostics,
         qualified_access,
         sar,
-    })
+        off_network: None,
+    };
+    crate::access::add_access_stretches(&mut result);
+    Ok(result)
 }
 
 /// The package views leg building reads per edge, built once per leg.
@@ -286,6 +289,7 @@ fn build_route_result_from_steps(
                         connector_type: None,
                         source_chunk_ids: Vec::new(),
                         distance_meters: Some(attribution.distance_m),
+                        duration_seconds: None,
                         cost: Some(
                             attribution.cost_breakdown.edge_cost_without_turn()
                                 * traversed_fraction(*start_fraction, *end_fraction),
@@ -360,6 +364,7 @@ fn build_route_result_from_steps(
                         connector_type: Some(*connector_type),
                         source_chunk_ids: source_chunk_ids.clone(),
                         distance_meters: Some(*distance_m),
+                        duration_seconds: None,
                         cost: Some(*cost),
                         source_endpoint: *source_endpoint,
                         source_point: *source_point,
@@ -400,7 +405,7 @@ fn build_route_result_from_steps(
     let pieces = route_pieces(&records, &recost_steps);
     let qualified_access = crate::sar::qualified_access(&pieces, profile, options);
     let sar = crate::sar::route_report(access, &pieces, profile, options);
-    Ok(LegResult {
+    let mut result = LegResult {
         status: RouteStatus::Routed,
         origin: route.origin,
         destination: route.destination,
@@ -420,7 +425,10 @@ fn build_route_result_from_steps(
         diagnostics,
         qualified_access,
         sar,
-    })
+        off_network: None,
+    };
+    crate::access::add_access_stretches(&mut result);
+    Ok(result)
 }
 
 /// The attribution of one traversed piece (`start_fraction..end_fraction`) of
@@ -720,6 +728,8 @@ fn record_used_dynamic_overlay_segments(
                 diagnostics.ssvg_cross_country_connector_used_count += 1;
                 record_connector_distance_and_cost(diagnostics, dynamic_overlay);
             }
+            // Access stretches are added after the leg's diagnostics.
+            RouteShapeDynamicOverlayKind::AccessLeg => {}
         }
     }
 }
@@ -1508,6 +1518,7 @@ mod tests {
             score: 1.0,
             score_breakdown: Default::default(),
             confidence: 1.0,
+            access: None,
         }
     }
 

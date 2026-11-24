@@ -738,6 +738,45 @@
       },
       "additionalProperties": false
     },
+    "RouteOffNetworkOptions": {
+      "description": "Costed off-network access legs on a request (`RouteOptions::off_network`).\nEvery field is optional: `\"offNetwork\": {}` turns access legs on with the\nprofile's defaults.",
+      "type": "object",
+      "properties": {
+        "costFactor": {
+          "description": "Cost per second of access time, at least 1 and at most\n[`ACCESS_MAX_COST_FACTOR`]: above 1, roads stay preferred over open\nground at the same pace. Defaults to 2 for walkers and 1.5 for\nvehicles.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maxCandidates": {
+          "description": "Directed candidate edges per point, 1 to [`ACCESS_MAX_CANDIDATES`]\n(default [`ACCESS_DEFAULT_CANDIDATES`]). It replaces\n`candidateLimit`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "maxRadiusM": {
+          "description": "How far from a point to look for the road network, metres: finite,\nabove 0 and at most [`ACCESS_MAX_RADIUS_M`]. Defaults to\n[`ACCESS_DEFAULT_RADIUS_WALKING_M`] for walkers and\n[`ACCESS_DEFAULT_RADIUS_VEHICLE_M`] for vehicles. It replaces\n`maxCorrelationDistanceM` and its widening.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "paceMps": {
+          "description": "Pace across open ground, m/s: above 0 and at most\n[`ACCESS_MAX_PACE_MPS`]. Defaults to the profile's off-road pace (the\npace of direct legs).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
     "RouteOptions": {
       "type": "object",
       "properties": {
@@ -873,6 +912,17 @@
           "format": "uint",
           "default": null,
           "minimum": 0
+        },
+        "offNetwork": {
+          "description": "Costed off-network access legs (`crate::access`): every location's\ncandidates within the access radius are priced by a straight stretch\nfrom the point, which results include. Off when absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOffNetworkOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "openedEdgeIds": {
           "description": "Edges the request opens for its profile (an overlay `open`): costed\nlike an accessible edge of the profile even where legal access, a\ndestination-only rule or a conditional closure closes it. A block\nstill wins. Endpoints do not snap onto edges the profile cannot use.",
@@ -1241,6 +1291,10 @@
       "description": "R7.",
       "type": "object",
       "properties": {
+        "costed": {
+          "description": "X6: cost the leg (`crate::access`, at the profile's off-road pace and\na cost factor of 1). The join is then chosen by total time among the\ncandidates within `max_leg_m`, and the route's cost, duration,\ndistance, geometry and maneuvers include the leg; the report's\n`added_cost_s` is both the cost and the duration they add. Off by\ndefault: the leg is reported and left out of the totals.",
+          "type": "boolean"
+        },
         "maxLegM": {
           "type": "number",
           "format": "double",

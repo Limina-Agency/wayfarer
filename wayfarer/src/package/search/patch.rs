@@ -1852,11 +1852,13 @@ impl PatchRun<'_, '_, '_, '_, '_> {
     /// [`Self::push_label`], dominated by duration instead of cost when
     /// `by_duration` (fastest-time isochrones).
     #[inline]
-    fn push_label_by(&mut self, label: Label, priority: f64, by_duration: bool) {
+    /// Queues `label` unless its slot holds one at least as good; whether it
+    /// was queued.
+    fn push_label_by(&mut self, label: Label, priority: f64, by_duration: bool) -> bool {
         let (arc, state) = (label.arc, label.state);
         // The lower bound proves the destination unreachable from here.
         if !priority.is_finite() {
-            return;
+            return false;
         }
         let slot = self.slot(arc, state);
         if slot != NO_LABEL {
@@ -1867,7 +1869,7 @@ impl PatchRun<'_, '_, '_, '_, '_> {
                 existing.cost <= label.cost
             };
             if dominated {
-                return;
+                return false;
             }
         }
         let entry = label;
@@ -1887,6 +1889,7 @@ impl PatchRun<'_, '_, '_, '_, '_> {
             seq: self.seq,
             label,
         });
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3014,13 +3017,18 @@ pub(crate) fn isochrone(
         }
     };
     // The least key (cost, or duration when ordered by it) each edge was
-    // completed at in the root restriction state, for the dominance check
-    // where labels are settled.
-    let mut root_completed = FxHashMap::<u32, f64>::default();
-    let complete_in_root = |completed: &mut FxHashMap<u32, f64>, edge: u32, cost: f64| {
-        let entry = completed.entry(edge).or_insert(f64::INFINITY);
-        *entry = entry.min(cost);
-    };
+    // completed at in the root restriction state, with the least cost at
+    // that key, for the dominance check where labels are settled.
+    let mut root_completed = FxHashMap::<u32, (f64, f64)>::default();
+    let complete_in_root =
+        |completed: &mut FxHashMap<u32, (f64, f64)>, edge: u32, key: f64, cost: f64| {
+            let entry = completed
+                .entry(edge)
+                .or_insert((f64::INFINITY, f64::INFINITY));
+            if (key, cost) < *entry {
+                *entry = (key, cost);
+            }
+        };
     let span = |arc: &Arc| match arc.kind {
         ArcKind::Fragment { start, end, .. } | ArcKind::Finish { start, end, .. } => (start, end),
         _ => (0.0, 1.0),
@@ -3058,12 +3066,21 @@ pub(crate) fn isochrone(
             .get(*origin as usize)
             .copied()
             .unwrap_or(0.0);
+        // A costed access stretch (`crate::access`) is travel: time and
+        // distance start after it.
+        let access = query
+            .origins
+            .get(*origin as usize)
+            .map(crate::access::AccessTotals::of)
+            .unwrap_or_default();
         let offset_s = if *origin == u32::MAX {
             0.0
         } else {
-            seeding.offset_s(*origin as usize)
+            seeding.offset_s(*origin as usize) + access.duration_s
         };
         let duration_s = offset_s + info.duration_s;
+        let start_m = access.distance_m;
+        let distance_m = start_m + info.distance_m;
         let (start, end) = span(arcs.arc(*arc));
         cross(
             &mut outcome.crossings,
@@ -3072,7 +3089,7 @@ pub(crate) fn isochrone(
             (
                 (approach, info.cost),
                 (offset_s, duration_s),
-                (0.0, info.distance_m),
+                (start_m, distance_m),
             ),
             origin_of(*origin),
         );
@@ -3080,16 +3097,15 @@ pub(crate) fn isochrone(
         // then out of range too), and counts as traversing its edge.
         let seed_state = search.seed_state(&info, true);
         let key = seeding.key(info.cost, duration_s);
-        if seed_state == ROOT && patch.completes_range(info.edge, end) {
-            complete_in_root(&mut root_completed, info.edge, key);
-        }
-        search.push_label_by(
+        // Only a queued label completes its edge: one dominated in its slot
+        // is never settled.
+        let pushed = search.push_label_by(
             Label {
                 arc: id,
                 pred: NO_LABEL,
                 cost: info.cost,
                 duration_s,
-                distance_m: info.distance_m,
+                distance_m,
                 last_edge: info.edge,
                 traversed: true,
                 origin: *origin,
@@ -3100,12 +3116,15 @@ pub(crate) fn isochrone(
             key,
             seeding.by_duration,
         );
-        if within(info.cost, duration_s, info.distance_m) && patch.completes_range(info.edge, end) {
+        if pushed && seed_state == ROOT && patch.completes_range(info.edge, end) {
+            complete_in_root(&mut root_completed, info.edge, key, info.cost);
+        }
+        if within(info.cost, duration_s, distance_m) && patch.completes_range(info.edge, end) {
             reach(
                 &mut outcome.reached,
                 &mut reached_slot,
                 info.edge,
-                (info.cost, duration_s, info.distance_m),
+                (info.cost, duration_s, distance_m),
                 origin_of(*origin),
             );
         }
@@ -3124,13 +3143,21 @@ pub(crate) fn isochrone(
         // other way round). Where the edge was already completed more
         // cheaply, this arrival is the dominated one a plain graph never
         // settles: expanding it would report crossings on edges reached in
-        // full long before.
+        // full long before. Ordered by duration, an arrival tied on time but
+        // costlier is dominated too: the plain graph keeps the cheaper label
+        // in the edge's one slot (two candidates of a costed access origin
+        // can meet at a node at the same time, one of them through a turn).
         if label.state == ROOT
             && label.last_edge != NO_NODE
-            && root_completed.get(&label.last_edge).is_some_and(|key| {
-                let own = seeding.key(label.cost, label.duration_s);
-                *key < own - tie_window(own)
-            })
+            && root_completed
+                .get(&label.last_edge)
+                .is_some_and(|(key, cost)| {
+                    let own = seeding.key(label.cost, label.duration_s);
+                    *key < own - tie_window(own)
+                        || (seeding.by_duration
+                            && *key <= own + tie_window(own)
+                            && *cost < label.cost - tie_window(label.cost))
+                })
         {
             continue;
         }
@@ -3230,10 +3257,7 @@ pub(crate) fn isochrone(
             };
             let state = search.forward_state(&label, &info);
             let key = seeding.key(cost, duration_s);
-            if completes && state == ROOT {
-                complete_in_root(&mut root_completed, info.edge, key);
-            }
-            search.push_label_by(
+            let pushed = search.push_label_by(
                 Label {
                     arc: next,
                     pred: entry.label,
@@ -3250,6 +3274,9 @@ pub(crate) fn isochrone(
                 key,
                 seeding.by_duration,
             );
+            if pushed && completes && state == ROOT {
+                complete_in_root(&mut root_completed, info.edge, key, cost);
+            }
         }
     }
     outcome.counters.visited_edge_count = counters.visited_edge_count;

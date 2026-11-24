@@ -322,7 +322,8 @@ const NEAREST_ROAD_TOLERANCE_M: f64 = 0.01;
 /// Snaps every origin of `request` with `search`. `NoCandidate` for the
 /// origin endpoint when any origin has no candidate. Ordered by time, only
 /// each origin's nearest candidates are kept: time starts on the nearest
-/// road, as an approach penalty is no travel time.
+/// road, as an approach penalty is no travel time. Candidates with costed
+/// access stretches are all kept: each starts after its own stretch.
 pub(crate) fn origin_candidates(
     request: &RouteIsochroneRequest,
     mut search: impl FnMut(GeoPoint) -> Vec<CorrelatedLocation>,
@@ -339,7 +340,9 @@ pub(crate) fn origin_candidates(
             .first()
             .cloned()
             .ok_or(RouteError::NoCandidate { endpoint: "origin" })?;
-        if request.order == RouteIsochroneOrder::Time {
+        // Costed access stretches (`crate::access`) are travel time, so every
+        // candidate competes on time too.
+        if request.order == RouteIsochroneOrder::Time && nearest.access.is_none() {
             let snap = |candidate: &CorrelatedLocation| {
                 if candidate.distance_m.is_finite() {
                     candidate.distance_m.max(0.0)

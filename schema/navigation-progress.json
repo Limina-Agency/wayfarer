@@ -385,6 +385,14 @@
           ],
           "format": "double"
         },
+        "durationSeconds": {
+          "description": "Travel time, for access stretches (a connector's is its cost).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "kind": {
           "$ref": "#/$defs/RouteShapeDynamicOverlayKind"
         },
@@ -472,13 +480,22 @@
       ]
     },
     "RouteShapeDynamicOverlayKind": {
-      "type": "string",
-      "enum": [
-        "partial_edge_fragment",
-        "endpoint_connector",
-        "road_entry_connector",
-        "road_to_road_bypass_connector",
-        "cross_country_connector"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "partial_edge_fragment",
+            "endpoint_connector",
+            "road_entry_connector",
+            "road_to_road_bypass_connector",
+            "cross_country_connector"
+          ]
+        },
+        {
+          "description": "A costed off-network access stretch (`crate::access`).",
+          "type": "string",
+          "const": "access_leg"
+        }
       ]
     }
   }
