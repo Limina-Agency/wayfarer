@@ -135,6 +135,8 @@ impl Drop for WayfarerNavigationRoute {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct OpenOptions {
     memory_profile: RoutePackageMemoryProfile,
+    /// Start the background warm-up ([`RoutingPackage::warm_up_in_background`]).
+    warm_up: bool,
 }
 
 struct Failure {
@@ -388,8 +390,17 @@ pub extern "C" fn wayfarer_versions() -> *mut c_char {
 }
 
 /// Opens the routing package at `path` (UTF-8). `options_json` is null or
-/// `{"memoryProfile": "desktop" | "mobile"}`. On success `*package` is the new
-/// handle and `*out_json` (if `out_json` is not null) the package info.
+/// `{"memoryProfile": "desktop" | "mobile", "warmUp": bool}`. On success
+/// `*package` is the new handle and `*out_json` (if `out_json` is not null)
+/// the package info.
+///
+/// With `"warmUp": true` the call returns at once and a thread of the
+/// library's builds what a first drive needs (the CCH potentials, the drive
+/// cost column, a search state) and faults the file in: about 0.3 s on a
+/// regional package, the time the first route would otherwise take. A
+/// request that comes earlier waits only for the part it needs that is
+/// still being built. The thread holds the package until it ends, so a
+/// `wayfarer_close` during it frees the package only then.
 ///
 /// On Windows a C program's `argv` and the Win32 "A" functions use the ANSI
 /// code page, not UTF-8: convert with `WideCharToMultiByte(CP_UTF8, ...)`,
@@ -456,8 +467,13 @@ unsafe fn open_package(
     let opened = RoutingPackage::open_with_profile(path, options.memory_profile)
         .map_err(Failure::package)?;
     let info = package_info(&opened);
+    let opened = Arc::new(opened);
+    if options.warm_up {
+        // Dropping the handle lets the warm-up run on to its end.
+        let _ = opened.warm_up_in_background();
+    }
     let handle = Box::new(WayfarerPackage {
-        engine: RoutingEngine::from_package(Arc::new(opened)),
+        engine: RoutingEngine::from_package(opened),
     });
     // SAFETY: checked non-null; valid for one write per the contract.
     unsafe { *package = Box::into_raw(handle) };

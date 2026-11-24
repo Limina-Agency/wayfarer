@@ -9678,3 +9678,54 @@ fn matrix_isochrone_and_nearest_overlays_apply_as_on_a_route() {
         Err(crate::RouteError::InvalidRequest { .. })
     ));
 }
+
+/// The background warm-up returns at once; routes during it and after it are
+/// those of a package without it, and once it ends the potentials and the
+/// drive column's metric are built.
+#[test]
+fn a_background_warm_up_routes_as_without_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("grid.mrt");
+    let plain = persist(&grid_graph(), &path);
+    let points = [
+        GeoPoint::new(0.00005, 0.0008),
+        GeoPoint::new(0.0044, 0.0050),
+        GeoPoint::new(0.0023, 0.0035),
+    ];
+    let legs = |engine: &RoutingEngine| {
+        let mut costs = Vec::new();
+        for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+            for (origin, destination) in points.iter().zip(points.iter().rev()) {
+                costs.push(
+                    route(engine, *origin, *destination, profile, |_| {})
+                        .map(|leg| (leg.cost.to_bits(), leg.distance_m.to_bits())),
+                );
+            }
+        }
+        costs
+    };
+    let expected = legs(&RoutingEngine::from_package(plain.package.clone()));
+    assert!(expected.iter().any(Option::is_some));
+    for memory in [
+        RoutePackageMemoryProfile::Desktop,
+        RoutePackageMemoryProfile::Mobile,
+    ] {
+        // Routed while the warm-up runs.
+        let package = Arc::new(RoutingPackage::open_with_profile(&path, memory).unwrap());
+        let warm_up = package.warm_up_in_background().expect("a thread");
+        let engine = RoutingEngine::from_package(package.clone());
+        assert_eq!(legs(&engine), expected, "{memory:?}");
+        warm_up.wait();
+        // Waited for first.
+        let package = Arc::new(RoutingPackage::open_with_profile(&path, memory).unwrap());
+        package.warm_up_in_background().expect("a thread").wait();
+        let view = package.file.view();
+        let potentials = package.cch.prepare(&view).expect("potentials");
+        assert!(potentials.stats().column_count >= 1, "{memory:?}");
+        assert_eq!(
+            legs(&RoutingEngine::from_package(package.clone())),
+            expected,
+            "{memory:?}"
+        );
+    }
+}
