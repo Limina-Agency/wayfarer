@@ -39,14 +39,29 @@ details() { # <summary> <file> <language>
 }
 
 cmd_semver() {
-  local out status=0
+  local out status=0 root name manifest
+  local -a exclude=() added=()
   out="$(mktemp)"
+  # A crate the base does not have yet has no baseline to compare with, and
+  # semver-checks stops on it, so it is left out and named instead.
+  root="$(pwd)/"
+  while IFS=$'\t' read -r name manifest; do
+    if ! git cat-file -e "$base:${manifest#"$root"}" 2>/dev/null; then
+      exclude+=(--exclude "$name")
+      added+=("$name")
+    fi
+  done < <(cargo metadata --no-deps --format-version 1 |
+    jq -r '.packages[] | [.name, .manifest_path] | @tsv')
   # Patch-level rules: a 0.x minor release may break the API, but every break
   # should be on purpose and named in the changelog, so all of them are shown.
-  cargo semver-checks --workspace --baseline-rev "$base" --release-type patch \
-    --color never >"$out" 2>&1 || status=$?
+  cargo semver-checks --workspace "${exclude[@]}" --baseline-rev "$base" \
+    --release-type patch --color never >"$out" 2>&1 || status=$?
   echo "## Semver checks against $base_label"
   echo
+  if ((${#added[@]})); then
+    echo "New since $base_label, so not checked: $(printf '`%s` ' "${added[@]}")"
+    echo
+  fi
   if [[ $status == 0 ]]; then
     echo "No breaking change in the published library crates."
   elif grep -qE '^\s*(--- failure|Summary semver requires)' "$out"; then
