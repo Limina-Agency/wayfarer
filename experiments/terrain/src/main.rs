@@ -3,16 +3,21 @@
 //!   terrexp dem  <dem-dir> <blocks> <spacing-ticks> <out-dir> [--point] [--steep] [--threads N]
 //!   terrexp lc   <class-dir> <blocks> <spacing-ticks> <out-dir> [--threads N]
 //!   terrexp dump <dem-file> <row> <col> <n>
+//!   terrexp e10  <base-dir> <dem-dir> <out-dir>   (E10 layer contract, see src/e10.rs)
 //!
 //! Spacing in ticks of 1/120": 60 = 1/2", 120 = 1", 240 = 2", 360 = 3". Prints one JSON object.
 
 mod dem;
+mod e10;
 mod encode;
+mod fuse;
 mod landcover;
 mod lattice;
+mod layers;
 mod mosaic;
 mod osm;
 mod raster;
+mod voxel;
 
 use encode::{Pred, Units};
 use lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing};
@@ -382,6 +387,7 @@ fn main() {
         Some("osm") => cmd_osm(&args[2..]),
         Some("dump") => cmd_dump(&args[2..]),
         Some("bench") => cmd_bench(&args[2..]),
+        Some("e10") => e10::run(&args[2..]),
         _ => eprintln!("usage: terrexp dem|lc|dump ..."),
     }
 }

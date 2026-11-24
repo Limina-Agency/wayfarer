@@ -37,3 +37,22 @@ Spacing is in ticks of 1/120 arc-second (120 = 1", 360 = 3", 60 = 1/2").
 - `terrexp lc` also writes `posts_purity.u8` (majority count and valid pixels per post).
 - `scripts/e3/`: BDOT10k onto the lattice (reference), the independent OSM check, the evaluation
   against BDOT10k and the fused-layer sizes. Results: `off-road-sar/exp/E3/README.md`.
+
+## E10 (terrain layer contract)
+
+    python3 -I scripts/e10/base_e3.py <wc-dir> <osm-dir> <dem-dir> <base-dir>
+    target/release/terrexp e10 <base-dir> <dem-dir> <out-dir>
+    python3 -I scripts/e10/check_fusion.py <base-dir> <out-dir>
+    scripts/e10/identity.sh <base-dir> <dem-dir> <work-dir>
+
+The reference implementation of `docs/design/terrain-layers.md` (on branch `docs/terrain-layers`).
+- `src/layers.rs`: layer manifest, canonical content hash, the WTL0 file (plane codings raw, one
+  value, runs, zlib), the producer's quantiser and largest-remainder rounding.
+- `src/fuse.rs`: fusion of the base with class, hazard, level and feature layers and team overlay
+  items at an incident time, exact supercover of feature lines, the fusion record.
+- `src/voxel.rs`: the v0 voxel graph and its projection into a hazard and a feature layer.
+- `src/e10.rs`: synthetic layers on a real base, written, read back, fused and checked (input
+  order, threads, incremental re-fusion, zero confidence, expiry); a placeholder friction surface.
+- `scripts/e10/`: the E3-rule base builder, an independent Python implementation of the contract
+  that re-hashes every layer and re-fuses a sample, and the byte-identity run across targets.
+  Results: `off-road-sar/exp/E10/README.md`.
