@@ -1,0 +1,24 @@
+[package]
+name = "wayfarer-terrain-exp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Lane TERRX experiment E1: deterministic DEM and land-cover reader onto the format-3 global lattice. Not part of the workspace or any default build."
+
+[[bin]]
+name = "terrexp"
+path = "src/main.rs"
+
+# Own workspace: kept out of the main workspace, its Cargo.lock and its builds.
+[workspace]
+
+[dependencies]
+tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw"] }
+flate2 = { version = "1.1", features = ["zlib-rs"] }
+libm = "0.2.16"
+rayon = "1.10"
+blake3 = { version = "1.8", features = ["pure"] }
+
+[profile.release]
+debug = false
