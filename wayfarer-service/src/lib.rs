@@ -603,14 +603,7 @@ impl RoutingService {
         }
         // Fault the package in and pool a search state off the request path,
         // so the first route is not several times slower than the next ones.
-        {
-            let package = package.clone();
-            let _ = std::thread::Builder::new()
-                .name("routing-package-prefetch".into())
-                .spawn(move || {
-                    package.prefetch();
-                });
-        }
+        let _ = package.warm_up_in_background();
         let cached = Arc::new(CachedSource {
             descriptor: source.clone(),
             package,

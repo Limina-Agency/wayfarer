@@ -14,7 +14,9 @@
 //!
 //! With `DUMP_COLD_CASE=<label>` the example routes only that case, once per
 //! process start, and prints the first request's phase timings, then the warm
-//! median of `DUMP_WARM_REPEATS` (default 20) more.
+//! median of `DUMP_WARM_REPEATS` (default 20) more. `DUMP_PREFETCH=1`
+//! prefetches before the first request; `DUMP_WARM_UP=1` starts the
+//! background warm-up and routes at once, or after `DUMP_FIRST_DELAY_MS`.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -163,7 +165,11 @@ fn main() {
         eprintln!("prefetch {ms:.0} ms");
     }
     let open_ms = process_started.elapsed().as_secs_f64() * 1e3;
-    let engine = RoutingEngine::from_package(Arc::new(graph));
+    let graph = Arc::new(graph);
+    // DUMP_WARM_UP=1: start the opt-in background warm-up right after the
+    // open, as a host with `warmUp` does, and route at once.
+    let _warm_up = std::env::var_os("DUMP_WARM_UP").and_then(|_| graph.warm_up_in_background());
+    let engine = RoutingEngine::from_package(graph);
 
     let corpus: Vec<Value> =
         serde_json::from_str(&std::fs::read_to_string(corpus_path).expect("read corpus"))
@@ -285,6 +291,14 @@ fn main() {
             .iter()
             .find(|case| case.label == only)
             .expect("DUMP_COLD_CASE names a case");
+        // DUMP_FIRST_DELAY_MS: a host's idle time between the open and the
+        // first request (a user choosing a destination).
+        if let Some(ms) = std::env::var("DUMP_FIRST_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
         let started = Instant::now();
         let first = engine.route_leg(request(case));
         let first_ms = started.elapsed().as_secs_f64() * 1e3;

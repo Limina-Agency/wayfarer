@@ -124,7 +124,7 @@ pub use package::cch::PotentialStats;
 pub use package::{
     PackageCounts, PackageQuality, PackageQualityStatus, ROUTING_PACKAGE_FORMAT_VERSION,
     RoutePackageMemoryProfile, RoutingPackage, RoutingPackageError, RoutingPackageMetadata,
-    RoutingPackageSection, RoutingPackageVerification,
+    RoutingPackageSection, RoutingPackageVerification, WarmUp,
 };
 
 pub use cancellation::{CancelToken, RouteCancellation};
