@@ -43,8 +43,9 @@ LAT, LON = np.meshgrid(I*FT/TPD, J*FT/TPD, indexing='ij')
 T = truth_at(LAT, LON)
 print(f'{name}: fine posts {T.shape}, nan {np.isnan(T).mean():.4f}, height {np.nanmin(T):.0f}-{np.nanmax(T):.0f} m', file=sys.stderr)
 
-def lattice_from_fine(s):
-    """Cell-mean lattice at spacing s ticks from the fine truth (E1 rule), whole metres."""
+def lattice_from_fine(s, F=None):
+    """Cell-mean lattice at spacing s ticks from a fine grid (truth by default; E1 rule), whole metres."""
+    F = T if F is None else F
     k = s // FT; h = k // 2
     wt = np.array([min(2, max(0, k + 1 - 2*abs(d))) for d in range(-h, h + 1)], float)
     pi0 = -(-(i0*FT + h*FT) // s); pi1 = (i1*FT - h*FT) // s
@@ -54,7 +55,7 @@ def lattice_from_fine(s):
     W2 = np.outer(wt, wt)
     for a, pi in enumerate(PI):
         ci = pi*s//FT - i0
-        rows = T[ci - h:ci + h + 1]
+        rows = F[ci - h:ci + h + 1]
         for b, pj in enumerate(PJ):
             cj = pj*s//FT - j0
             win = rows[:, cj - h:cj + h + 1]
@@ -146,4 +147,23 @@ for src in ('glo30', 'srtm', 'nasadem'):
         G[(bi - bi0)*64:(bi - bi0 + 1)*64, (bj - bj0)*64:(bj - bj0 + 1)*64] = np.sign(v)*np.floor(np.abs(v)/10 + 0.5)
     PI = np.arange(bi0*64, (bi0 + nb_i)*64); PJ = np.arange(bj0*64, (bj0 + nb_j)*64)
     evaluate(f'{src}@1"', PI, PJ, G, 120, True)
+# GEM-15 DTM (15 m, UTM 34N, EGM96): bilinear at the fine posts, then the E1 lattice rule
+gem = []
+for p in sorted(glob.glob('/home/user/tiles/gem15/dtm_*.tif')):
+    with rasterio.open(p) as d:
+        gem.append((d.transform.c, d.transform.f, d.width, d.height, d.read(1).astype(np.float64)))
+if gem:
+    E, N = fwd(LAT, LON, 21.0, 0.9996, 500000.0, 0.0)
+    G = np.full(T.shape, np.nan)
+    for x0, y1, w, h, a in gem:
+        cx = (E - x0)/15 - 0.5; cy = (y1 - N)/15 - 0.5
+        c = np.floor(cx).astype(int); r = np.floor(cy).astype(int); fx = cx - c; fy = cy - r
+        ok = (c >= 0) & (r >= 0) & (c + 1 < w) & (r + 1 < h) & np.isnan(G)
+        cc = np.clip(c, 0, w - 2); rr = np.clip(r, 0, h - 2)
+        v = a[rr, cc]*(1-fx)*(1-fy) + a[rr, cc+1]*fx*(1-fy) + a[rr+1, cc]*(1-fx)*fy + a[rr+1, cc+1]*fx*fy
+        G = np.where(ok, v, G)
+    print(f'gem15 nan share {np.isnan(G).mean():.4f}', file=sys.stderr)
+    for s in (60, 120, 360):
+        PI, PJ, V = lattice_from_fine(s, G)
+        evaluate(f'gem15-dtm->{s}', PI, PJ, V, s, True)
 print(json.dumps(res, indent=1))
