@@ -9,6 +9,7 @@ AREAS = {  # name: (lat0, lon0, lat1, lon1)
  'gorce':         (49.48, 20.00, 49.64, 20.32),
  'niepolomice':   (49.98, 20.25, 50.13, 20.50),
  'ojcow':         (50.17, 19.76, 50.28, 19.88),
+ 'babia':         (49.55, 19.50, 49.60, 19.56),
 }
 def blocks_for(geom, st):
     pg = prep(geom)

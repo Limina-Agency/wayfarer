@@ -1,10 +1,11 @@
-# Terrain experiment E1 (lane TERRX)
+# Terrain experiments E1-E3 and E5 (lane TERRX)
 
 Throwaway experiment, not part of the workspace or any default build (it has its own
 `[workspace]`). It reads DEM and land-cover rasters, resamples them onto the format-3
 global arc-second lattice (docs/design/format-3.md section 9) with integer arithmetic only,
-and measures block encodings. Results and source URLs: `off-road-sar/exp/E1/README.md` in
-the project files.
+and measures block encodings (E1). E2 scores the DEM sources against GUGiK 1 m LiDAR
+(`scripts/run_e2.sh`, `scripts/gugik_lattice.py`). Results and source URLs:
+`off-road-sar/exp/E1/README.md` and `off-road-sar/exp/E2/README.md` in the project files.
 
     cargo build --release
     target/release/terrexp dem  <dem-dir> <blocks.txt> <spacing-ticks> <out-dir> [--steep] [--point] [--threads N]
@@ -25,7 +26,8 @@ Spacing is in ticks of 1/120 arc-second (120 = 1", 360 = 3", 60 = 1/2").
 - `src/encode.rs`: per-block zig-zag varint (delta, MED) and Rice-coded MED residuals; nibble
   layers packed or run-length coded.
 - `scripts/`: block lists from the OSM boundary, the run matrix, independent numpy/rasterio
-  checks, the byte-identity run across targets, and the GUGiK spacing study.
+  checks, the byte-identity run across targets, the GUGiK spacing study and the E2
+  DEM-source comparison.
 
 ## E3 (land cover)
 

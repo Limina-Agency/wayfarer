@@ -104,10 +104,11 @@ def climb(z):
 truth_climb = climb(truth_lines)
 
 inner = (slice(40, -40), slice(40, -40))
+CLIMB_MIN = 20.0 if np.median(truth_climb) > 40 else 3.0  # flat boxes: count lines with 3 m of climb
 fine_slope = horn_slope_deg(T, FT*m_per_tick_y, FT*m_per_tick_x)
 res = {'box': name, 'bounds': [lat0, lon0, lat1, lon1], 'fine_posts': list(T.shape),
        'truth_relief_m': [float(np.nanmin(T)), float(np.nanmax(T))],
-       'truth_climb_median_m_per_km': float(np.median(truth_climb)),
+       'truth_climb_median_m_per_km': float(np.median(truth_climb)), 'climb_min_m': CLIMB_MIN,
        'fine_slope_over30_pct': float(100*np.nanmean(fine_slope > 30)), 'rows': []}
 
 def evaluate(label, PI, PJ, V, s, bias_fix):
@@ -117,15 +118,15 @@ def evaluate(label, PI, PJ, V, s, bias_fix):
     err = err - bias
     lrec = bilinear_grid(PI, PJ, V, s, LL[:, 0], LL[:, 1]) - bias
     lc = climb(lrec)
-    ok = (truth_climb > 20) & ~np.isnan(truth_lines).any(axis=1) & ~np.isnan(lrec).any(axis=1)
+    ok = (truth_climb > CLIMB_MIN) & ~np.isnan(truth_lines).any(axis=1) & ~np.isnan(lrec).any(axis=1)
     rel = (lc[ok] - truth_climb[ok])/truth_climb[ok]
     sl = horn_slope_deg(V, s*m_per_tick_y, s*m_per_tick_x)
     row = {'grid': label, 'spacing_ticks': s, 'bias_removed_m': round(bias, 2),
            'rmse_m': round(float(np.sqrt(np.nanmean(err**2))), 2),
            'p95_abs_m': round(float(np.nanpercentile(np.abs(err), 95)), 2),
            'lines': int(ok.sum()),
-           'climb_err_median_pct': round(float(100*np.median(rel)), 1),
-           'climb_abs_err_p90_pct': round(float(100*np.percentile(np.abs(rel), 90)), 1),
+           'climb_err_median_pct': round(float(100*np.median(rel)), 1) if len(rel) else None,
+           'climb_abs_err_p90_pct': round(float(100*np.percentile(np.abs(rel), 90)), 1) if len(rel) else None,
            'slope_over30_pct': round(float(100*np.nanmean(sl > 30)), 2)}
     res['rows'].append(row)
     print(row, file=sys.stderr)
