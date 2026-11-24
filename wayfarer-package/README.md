@@ -70,14 +70,15 @@ compactly or derived from others, so read them through the accessors:
 Version 0.x: the API may change between minor releases. The file format is
 versioned separately:
 
-- `ROUTING_PACKAGE_FORMAT_VERSION` (2 today) changes whenever the layout or
-  the meaning of a section changes. A build opens the formats
-  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2; 0.2.0
+- `ROUTING_PACKAGE_FORMAT_VERSION` (3 since 0.5) changes whenever the layout
+  or the meaning of a section changes. A build opens the formats
+  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=3; 0.2.0
   dropped format 1, whose landmark sections are now reserved); a
   layout change keeps reading the previous format for at least one release,
-  and raising the minimum drops a format. Format 3 is being built behind a
-  compiler switch: its draft packages open only in a build of the same draft
-  revision (`FORMAT_3_DRAFT_REVISION`).
+  and raising the minimum drops a format. Format 3
+  (`docs/design/format-3.md`) adds optional sections without a new format:
+  an engine skips an unknown section unless it is marked REQUIRED. The
+  format-3 drafts that development builds wrote before 0.5 are refused.
 - A package records the costing model its stored costs were baked with. An
   engine re-costs a package of an older model from its stored costing inputs
   and refuses a newer one, so a change to stored costs ships the compiler and

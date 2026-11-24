@@ -51,7 +51,7 @@ the x86_64 target. Useful libFuzzer options after `--`: `-max_total_time=<s>`,
 `-jobs=<n>` to run several workers.
 
 `seeds/` holds valid starting inputs, each accepted by its target's code
-(the package is `fixtures/routing/short_road.mrt`); new corpus entries go to
+(the packages are `fixtures/routing/short_road.mrt` in each format); new corpus entries go to
 `corpus/` and crashes to `artifacts/`, both ignored by git. The dictionaries
 list every property name and enum value of `schema/*.json`; regenerate them
 when the schemas change. A crash reproduces with

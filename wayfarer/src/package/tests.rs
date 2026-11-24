@@ -305,7 +305,7 @@ fn package_round_trips_and_rejects_outdated_or_corrupt_bytes() {
     let (writer, report) = wayfarer_compiler::package_build::build_package(
         &road_graph,
         &metadata,
-        &PackageBuildOptions::default(),
+        &crate::test_support::test_options(),
     )
     .unwrap();
     let bytes = writer.finish();
@@ -329,7 +329,7 @@ fn package_round_trips_and_rejects_outdated_or_corrupt_bytes() {
     let (again, _) = wayfarer_compiler::package_build::build_package(
         &road_graph,
         &metadata,
-        &PackageBuildOptions::default(),
+        &crate::test_support::test_options(),
     )
     .unwrap();
     assert_eq!(again.finish(), bytes);
@@ -8651,7 +8651,7 @@ fn straight_line_and_potential_engines(
         let file = path.with_file_name(name);
         let options = PackageBuildOptions {
             cch_order,
-            ..PackageBuildOptions::default()
+            ..crate::test_support::test_options()
         };
         wayfarer_compiler::package_build::write_package(&fixture.graph, None, &file, &options)
             .unwrap();

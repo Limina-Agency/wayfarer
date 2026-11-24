@@ -56,11 +56,11 @@
 //! doc-hidden and not part of the supported API.
 //!
 //! Format 3 (`docs/design/format-3.md`: a tagged section table, an identity
-//! hash apart from the content hash, implied ids, `PackageParams`) is being
-//! built. A compile writes it only when asked
-//! ([`format::PackageFormat::V3`]); such packages carry a draft revision
-//! ([`format::FORMAT_3_DRAFT_REVISION`]) and open only in a build of the same
-//! revision ([`format::MAX_READ_FORMAT_VERSION`] is 3).
+//! hash apart from the content hash, implied ids numbered by CCH rank,
+//! `PackageParams`) is the format a 0.5 compile writes. This build still
+//! opens format 2, and writes it when asked ([`format::PackageFormat::V2`])
+//! for engines older than 0.5. The drafts of format 3 that development
+//! builds wrote are refused as `Outdated`.
 
 pub mod barrier;
 mod cancel;

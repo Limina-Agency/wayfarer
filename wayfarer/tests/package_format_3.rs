@@ -14,11 +14,11 @@ use wayfarer::{
 use wayfarer_compiler::{CancelToken, CompileRequest, compile};
 use wayfarer_package::cch_order::{CELL_TREE_ENTRY_BYTES, CellTreeEntry, NO_PARENT};
 use wayfarer_package::format::{
-    FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, LAYOUT_NODES_BY_RANK, LEG_ATTRS_REVISION,
-    NO_SLOT_COLUMN, NO_SOURCE_NODE_HIGH, NODE_OWNER_SECTION_ID, PARAM_MUST_UNDERSTAND,
-    PROFILE_SLOT_BYTES, PackageFile, PackageFormat, PackageParams, ProfileSlot,
-    REGION_HAS_NODE_OWNER, REGION_INFO_BYTES, RegionInfo, RoutingPackageError, SECTION_IDENTITY,
-    SECTION_REQUIRED, Section, param_key, profile_code,
+    HEADER_V3_LAYOUT_FLAGS, LAYOUT_NODES_BY_RANK, LEG_ATTRS_REVISION, NO_SLOT_COLUMN,
+    NO_SOURCE_NODE_HIGH, NODE_OWNER_SECTION_ID, PARAM_MUST_UNDERSTAND, PROFILE_SLOT_BYTES,
+    PackageFile, PackageFormat, PackageParams, ProfileSlot, REGION_HAS_NODE_OWNER,
+    REGION_INFO_BYTES, RegionInfo, RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED,
+    Section, param_key, profile_code,
 };
 use wayfarer_package::raw::{RawPackage, RawSection, resign};
 
@@ -501,7 +501,6 @@ fn format_3_drops_stored_ids_and_reserved_sections_and_states_its_params() {
         ));
     }
     let (pa, pb) = (v2.params(), v3.params());
-    assert_eq!(pb.draft_revision, Some(FORMAT_3_DRAFT_REVISION));
     // Components are numbered in node order, so the default one is the
     // same component under another id.
     assert_eq!(
@@ -510,7 +509,6 @@ fn format_3_drops_stored_ids_and_reserved_sections_and_states_its_params() {
     );
     assert_eq!(
         PackageParams {
-            draft_revision: None,
             default_component: pa.default_component,
             request_grid_spacing: None,
             ..*pb
@@ -799,25 +797,31 @@ fn with_params(edit: impl FnOnce(&mut Vec<(u32, u32, u64)>)) -> RawPackage {
 }
 
 #[test]
-fn package_params_are_checked_and_the_draft_revision_must_match() {
-    let set_draft = |revision: u64| {
-        with_params(|entries| {
-            for entry in entries.iter_mut() {
-                if entry.0 == param_key::DRAFT_REVISION {
-                    entry.2 = revision;
-                }
-            }
-        })
-    };
-    let newer = open(&set_draft(FORMAT_3_DRAFT_REVISION + 1).encode()).unwrap_err();
-    assert!(matches!(newer, RoutingPackageError::TooNew(_)), "{newer}");
-    let older = open(&set_draft(FORMAT_3_DRAFT_REVISION - 1).encode()).unwrap_err();
-    assert!(matches!(older, RoutingPackageError::Outdated(_)), "{older}");
-    // Without a draft revision it claims to be the released format 3.
-    let released =
-        with_params(|entries| entries.retain(|entry| entry.0 != param_key::DRAFT_REVISION));
-    let error = open(&released.encode()).unwrap_err();
-    assert!(matches!(error, RoutingPackageError::TooNew(_)), "{error}");
+fn package_params_are_checked_and_drafts_are_refused() {
+    // Released format 3 writes no draft revision.
+    assert!(
+        !with_params(|_| {}).sections.iter().any(|section| section.id
+            == Section::PackageParams.id()
+            && section.bytes.as_chunks::<16>().0.iter().any(|entry| {
+                u32::from_le_bytes(entry[0..4].try_into().unwrap()) == param_key::DRAFT_REVISION
+            }))
+    );
+    // A development build's draft, of any revision, is refused as outdated.
+    for revision in [1, 6, 7] {
+        let draft = with_params(|entries| {
+            let at = entries.partition_point(|entry| entry.0 < param_key::DRAFT_REVISION);
+            entries.insert(
+                at,
+                (param_key::DRAFT_REVISION, PARAM_MUST_UNDERSTAND, revision),
+            );
+        });
+        let error = open(&draft.encode()).unwrap_err();
+        assert!(
+            matches!(error, RoutingPackageError::Outdated(_))
+                && error.to_string().contains("draft"),
+            "{error}"
+        );
+    }
 
     // An unknown key is skipped unless it must be understood.
     let skipped = with_params(|entries| entries.push((40, 0, 9)));

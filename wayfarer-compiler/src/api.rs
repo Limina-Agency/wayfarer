@@ -82,9 +82,9 @@ pub struct CompileRequest {
     /// bytes. Default: `["wheeled", "on_foot"]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiles: Option<Vec<MobilityProfile>>,
-    /// The package format: format 2 unless set. Format 3 is a draft that
-    /// only a build of the same draft revision opens; it is not part of the
-    /// JSON request until it is released.
+    /// The package format: format 3 unless set. Format 2 is for engines
+    /// older than 0.5, which don't open format 3; it is not part of the JSON
+    /// request.
     #[doc(hidden)]
     #[serde(skip)]
     pub package_format: PackageFormat,
@@ -102,7 +102,7 @@ impl CompileRequest {
             memory: MemoryProfile::default(),
             threads: None,
             profiles: None,
-            package_format: PackageFormat::V2,
+            package_format: PackageFormat::V3,
         }
     }
 

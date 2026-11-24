@@ -1,14 +1,17 @@
 # Package format 3
 
-Status: being built behind an off-by-default compiler switch (decision F1
-of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: steps 1 to 6 of section 12 (the tagged
-table, both hashes, `PackageParams`, retired reserved sections, implied ids;
-`ProfileSlots` and the u16 masks; versioned attribute-class records;
-`RegionInfo`, `NodeSourceId` and `contentHash` on the wire; node id = CCH
-rank with chains per cell and `CchCellTree`; u64 byte offsets, the lattice
-request grid and u32 cost tuple rows), draft revision 6. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
-before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
+Status: released in 0.5 (Anton, 2026-11-24): a compile writes format 3 by
+default, and the engine reads formats 2 and 3. All seven steps of section 12
+are done (the tagged table, both hashes, `PackageParams`, retired reserved
+sections, implied ids; `ProfileSlots` and the u16 masks; versioned
+attribute-class records; `RegionInfo`, `NodeSourceId` and `contentHash` on
+the wire; node id = CCH rank with chains per cell and `CchCellTree`; u64
+byte offsets, the lattice request grid and u32 cost tuple rows; the release).
+The draft revisions 1 to 6 that development builds wrote are refused.
+Off-road terrain stays out of format 3 (`format-4.md`). Written against
+`main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one
+package-format bump before 1.0 (roadmap 7.12; it shipped earlier than the
+0.12 to 0.39 window first planned) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
 
@@ -451,7 +454,7 @@ Scalars a query depends on, as sorted 16-byte entries `key u32, flags u32
 | 7 | reach cap that `NodeReachSaturated` answers for (from `RequestMeta`) | yes |
 | 8 | package time zone, as a string id (W0, COMP 2's `--time-zone`) | yes, once W0 reads it |
 | 9 | ISO country code, as a string id | no |
-| 10 | draft revision (only while format 3 is being built on `main`, section 12) | yes |
+| 10 | retired: the draft revision development builds wrote before the release (section 12); a package with it is refused as `Outdated` | yes |
 | 11 | request grid spacing in lattice ticks: latitude in the low 32 bits, longitude in the high 32; each must divide a degree (432,000 ticks, section 9) | yes |
 
 An unknown key with bit 0 set refuses the package (`TooNew`); others are
@@ -932,6 +935,20 @@ need rebinding (stable references survive), and route dumps may change at
 ties, as they did with tile-ready ids. Monaco info, the Kraków and the
 Małopolskie baselines are re-recorded once, in the release that ships the
 bump.
+
+*As built (0.5).* A compile, the C ABI's compile and the JSON compile
+request write format 3. The library can still write format 2
+(`PackageFormat::V2`, and the hidden `wayfarer compile --package-format 2`)
+for apps whose engines are older than 0.5; nothing else does, and the tests
+that name the road graph's own ids build format 2. The package build
+renumbers a graph that a compile hasn't put in package order
+(`has_package_order_ids`), so a format-3 package of any road graph builds
+in memory, with new ids. The CCH order runs at the start of a format-3
+build, so its progress reports as the build's start and the `cch_order`
+stage completes at once. `fixtures/routing/format-3/` holds the frozen
+format-3 fixture. Monaco info, the Kraków centre baseline and the
+Małopolskie baseline are re-recorded: the same routes and costs, other ids
+and a few visited edges.
 
 **Building it on `main`.** Format 3 is several PRs, and packages written by
 `main` between them must not be mistaken for the final format. Until

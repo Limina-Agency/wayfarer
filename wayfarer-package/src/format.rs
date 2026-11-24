@@ -23,24 +23,22 @@ pub const MAGIC: &[u8; 8] = b"MRRPKG\0\x01";
 /// landmark sections are [`Section::Reserved1`] to [`Section::Reserved12`],
 /// as a package without landmarks wrote them.
 ///
-/// Format 3 (`docs/design/format-3.md`) is being built: a compile writes it
-/// only when asked ([`PackageFormat::V3`]), and those packages carry a draft
-/// revision ([`FORMAT_3_DRAFT_REVISION`]) that only a build of the same
-/// revision reads.
-pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 2;
+/// Format 3 (`docs/design/format-3.md`, 0.5) has a tagged section table
+/// after the sections, an identity hash apart from the content hash,
+/// implied ids numbered by CCH rank, [`Section::PackageParams`] and
+/// [`Section::ProfileSlots`]. A compile writes it by default; format 2 is
+/// still written when asked ([`PackageFormat::V2`]), for engines older than
+/// 0.5. The drafts of format 3 that development builds wrote (with
+/// [`param_key::DRAFT_REVISION`]) are refused.
+pub const ROUTING_PACKAGE_FORMAT_VERSION: u32 = 3;
 /// The oldest format this build still opens. A layout change bumps
 /// [`ROUTING_PACKAGE_FORMAT_VERSION`] and keeps reading the previous format
 /// for at least one release once packages are in use; raising this drops a
 /// format, which the release notes must say. Format 1 (landmark distances,
 /// no CCH order) is no longer read.
 pub const MIN_READ_FORMAT_VERSION: u32 = 2;
-/// The newest format this build opens: format 3, of its own draft revision
-/// only, while format 3 is being built.
-pub const MAX_READ_FORMAT_VERSION: u32 = 3;
-/// The draft revision of format 3 this build writes and reads
-/// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
-/// its release raises it; the release removes the key.
-pub const FORMAT_3_DRAFT_REVISION: u64 = 6;
+/// The newest format this build opens ([`ROUTING_PACKAGE_FORMAT_VERSION`]).
+pub const MAX_READ_FORMAT_VERSION: u32 = ROUTING_PACKAGE_FORMAT_VERSION;
 /// The revision of the attribute-class records ([`Section::AttrClassBytes`])
 /// this build writes, as that section's table `param` in format 3. Each
 /// revision only appends fields to the one before (design section 5.3), so a
@@ -69,11 +67,12 @@ pub const IDENTITY_HASH_TAG: &[u8] = b"wayfarer.package.identity.3";
 /// The package format a writer produces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum PackageFormat {
-    /// Format 2: a positional section table after the header (the default).
-    #[default]
+    /// Format 2: a positional section table after the header, for engines
+    /// older than 0.5.
     V2,
-    /// Format 3, draft [`FORMAT_3_DRAFT_REVISION`]: a tagged section table
-    /// after the sections, implied ids, [`Section::PackageParams`].
+    /// Format 3 (the default): a tagged section table after the sections,
+    /// implied ids, [`Section::PackageParams`].
+    #[default]
     V3,
 }
 
@@ -981,8 +980,9 @@ pub mod param_key {
     pub const DEFAULT_COMPONENT: u32 = 6;
     /// The reach cap `NodeReachSaturated` answers for. Must understand.
     pub const REACH_CAP: u32 = 7;
-    /// The draft revision of format 3, only while format 3 is being built
-    /// ([`super::FORMAT_3_DRAFT_REVISION`]). Must understand.
+    /// Retired: the draft revision that development builds wrote while
+    /// format 3 was being built. A package that has it is a draft and is
+    /// refused (`Outdated`); the key is never reused.
     pub const DRAFT_REVISION: u32 = 10;
     /// The request grid's cell spacing on the global lattice, in
     /// [`super::LATTICE_TICKS_PER_DEGREE`] ticks: latitude in the low 32
@@ -1037,9 +1037,6 @@ pub struct PackageParams {
     pub default_component: u32,
     /// The reach cap `NodeReachSaturated` answers for.
     pub reach_cap: u64,
-    /// Format 3's draft revision; `None` in format 2 (and in released
-    /// format 3).
-    pub draft_revision: Option<u64>,
     /// Format 3's request grid spacing in lattice ticks, (latitude,
     /// longitude); `None` in format 2, whose dense grid states its own.
     pub request_grid_spacing: Option<[u32; 2]>,
@@ -1085,9 +1082,6 @@ impl PackageParams {
             (DEFAULT_COMPONENT, u64::from(self.default_component)),
             (REACH_CAP, self.reach_cap),
         ];
-        if let Some(revision) = self.draft_revision {
-            entries.push((DRAFT_REVISION, revision));
-        }
         if let Some([lat, lng]) = self.request_grid_spacing {
             entries.push((
                 REQUEST_GRID_SPACING,
@@ -1104,10 +1098,10 @@ impl PackageParams {
     }
 
     /// Reads a [`Section::PackageParams`] section: entries sorted by key,
-    /// known keys with their flags, every known key but the draft revision
-    /// present, an unknown must-understand key `TooNew`, the draft revision
-    /// this build's ([`FORMAT_3_DRAFT_REVISION`]), and a request grid
-    /// spacing that divides a degree of the lattice in both axes.
+    /// known keys with their flags and present, an unknown must-understand
+    /// key `TooNew`, no draft revision (a draft is `Outdated`), and a
+    /// request grid spacing that divides a degree of the lattice in both
+    /// axes.
     pub fn from_section(bytes: &[u8]) -> Result<Self, RoutingPackageError> {
         use param_key::*;
         let invalid = |message: String| RoutingPackageError::Invalid(message);
@@ -1146,25 +1140,12 @@ impl PackageParams {
                 None => {}
             }
         }
-        // A released format 3 has no draft revision: it is newer than any
-        // draft.
-        match values.get(&DRAFT_REVISION) {
-            Some(revision) if *revision < FORMAT_3_DRAFT_REVISION => {
-                return Err(RoutingPackageError::Outdated(format!(
-                    "format 3 draft revision {revision}, this build reads draft revision {FORMAT_3_DRAFT_REVISION}"
-                )));
-            }
-            Some(revision) if *revision > FORMAT_3_DRAFT_REVISION => {
-                return Err(RoutingPackageError::TooNew(format!(
-                    "format 3 draft revision {revision}, this build reads draft revision {FORMAT_3_DRAFT_REVISION}"
-                )));
-            }
-            Some(_) => {}
-            None => {
-                return Err(RoutingPackageError::TooNew(format!(
-                    "released format 3, this build reads format 3 draft revision {FORMAT_3_DRAFT_REVISION} only"
-                )));
-            }
+        // Development builds wrote drafts of format 3 with a draft revision;
+        // released format 3 has none.
+        if let Some(revision) = values.get(&DRAFT_REVISION) {
+            return Err(RoutingPackageError::Outdated(format!(
+                "a draft of format 3 (draft revision {revision}) from a development build; recompile it"
+            )));
         }
         let get = |key: u32| {
             values
@@ -1186,7 +1167,6 @@ impl PackageParams {
             mode_mask_union: get_u32(MODE_MASK_UNION)?,
             default_component: get_u32(DEFAULT_COMPONENT)?,
             reach_cap: get(REACH_CAP)?,
-            draft_revision: values.get(&DRAFT_REVISION).copied(),
             request_grid_spacing: Some({
                 let value = get(REQUEST_GRID_SPACING)?;
                 let spacing = [value as u32, (value >> 32) as u32];
@@ -2261,7 +2241,6 @@ impl PackageFile {
                     RoutingPackageError::Invalid("request sections are inconsistent".into())
                 })?,
                 reach_cap: word(5).unwrap_or_default(),
-                draft_revision: None,
                 request_grid_spacing: None,
             }
         };
