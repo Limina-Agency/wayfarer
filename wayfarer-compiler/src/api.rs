@@ -273,8 +273,12 @@ pub struct CompileResult {
     /// The package's path (the request's `output`).
     pub package: PathBuf,
     pub byte_len: u64,
-    /// The package's root checksum.
+    /// The package's dataset hash: what overlay sets and results bind to.
+    /// In format 3 the identity hash; in format 2 the root checksum, as
+    /// [`Self::content_hash`].
     pub dataset_hash: String,
+    /// The package's root checksum, over every byte of the file.
+    pub content_hash: String,
     /// The package layout version (`ROUTING_PACKAGE_FORMAT_VERSION`).
     pub format_version: u32,
     /// The costing model the package's costs were baked with.
@@ -432,6 +436,7 @@ pub(crate) fn compile_reporting(
         package: request.output.clone(),
         byte_len: written.byte_len,
         dataset_hash: written.dataset_hash,
+        content_hash: written.content_hash,
         format_version: written.format_version,
         costing_model_version: written.costing_model_version,
         graph_id,

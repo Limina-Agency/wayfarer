@@ -40,7 +40,7 @@ pub const MAX_READ_FORMAT_VERSION: u32 = 3;
 /// The draft revision of format 3 this build writes and reads
 /// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
 /// its release raises it; the release removes the key.
-pub const FORMAT_3_DRAFT_REVISION: u64 = 3;
+pub const FORMAT_3_DRAFT_REVISION: u64 = 4;
 /// The revision of the attribute-class records ([`Section::AttrClassBytes`])
 /// this build writes, as that section's table `param` in format 3. Each
 /// revision only appends fields to the one before (design section 5.3), so a
@@ -327,11 +327,20 @@ pub enum Section {
     /// Format 3 (id 134), replacing [`Section::NodeReachSaturated`]: u16
     /// slot bits.
     NodeReachSaturated16,
+    /// Format 3 (id 140): per node the low 32 bits of its OSM node id
+    /// ([`Sections::osm_node_id`]).
+    NodeSourceIdLow,
+    /// Format 3 (id 141): per node the high 16 bits of its OSM node id,
+    /// [`NO_SOURCE_NODE_HIGH`] for a node with no OSM node.
+    NodeSourceIdHigh,
+    /// Format 3 (id 256): one 96-byte [`RegionInfo`], the package's place in
+    /// a bundle of regions (a stand-alone package is a bundle of one).
+    RegionInfo,
 }
 
 /// Every section this build knows, of any format; the internal index of
 /// [`Section`] (not its format-3 id, see [`Section::id`]).
-pub const SECTION_COUNT: usize = Section::NodeReachSaturated16 as usize + 1;
+pub const SECTION_COUNT: usize = Section::RegionInfo as usize + 1;
 /// The sections a format-2 table lists, in slot order: `Metadata` to
 /// `CchRank`.
 pub const FORMAT2_SECTION_COUNT: usize = Section::CchRank as usize + 1;
@@ -439,6 +448,9 @@ pub const SECTIONS: [Section; SECTION_COUNT] = [
     Section::ComplexMask16,
     Section::BarrierAccess32,
     Section::NodeReachSaturated16,
+    Section::NodeSourceIdLow,
+    Section::NodeSourceIdHigh,
+    Section::RegionInfo,
 ];
 
 /// Whether a section is in format-3 packages.
@@ -471,6 +483,9 @@ impl Section {
             Self::ComplexMask16 => 132,
             Self::BarrierAccess32 => 133,
             Self::NodeReachSaturated16 => 134,
+            Self::NodeSourceIdLow => 140,
+            Self::NodeSourceIdHigh => 141,
+            Self::RegionInfo => 256,
             other => other as u32,
         }
     }
@@ -485,6 +500,9 @@ impl Section {
             132 => Some(Self::ComplexMask16),
             133 => Some(Self::BarrierAccess32),
             134 => Some(Self::NodeReachSaturated16),
+            140 => Some(Self::NodeSourceIdLow),
+            141 => Some(Self::NodeSourceIdHigh),
+            256 => Some(Self::RegionInfo),
             id if (id as usize) < FORMAT2_SECTION_COUNT => Self::from_index(id as usize),
             _ => None,
         }
@@ -600,23 +618,23 @@ pub mod junction {
 }
 
 pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
-    1,  // Metadata (JSON)
-    4,  // NodeFirstOut
-    4,  // NodeLatE7 (empty when derived from NodeXyzFixed, see `PackageLayout`)
-    4,  // NodeLngE7 (likewise)
-    8,  // NodeLatLng: (lat, lng) f64 pairs of the NodeLatLngNodes
-    4,  // EdgeTarget
-    4,  // EdgeId: edge id - base (the header's edge id base)
-    4,  // EdgeLength
-    4,  // EdgeSharedInfo
-    2,  // EdgeHeadingStart
-    1,  // EdgeFlags
-    1,  // EdgeRoadRank
-    4,  // EdgeCost (f32, column-major)
-    4,  // EdgeDuration (f32, column-major)
-    4,  // SharedInfoWay: way id, or WAY_ID_WIDE
-    4,  // SharedInfoName: name token per attribute class
-    4,  // SharedInfoRef: ref token, likewise
+    1,                 // Metadata (JSON)
+    4,                 // NodeFirstOut
+    4,                 // NodeLatE7 (empty when derived from NodeXyzFixed, see `PackageLayout`)
+    4,                 // NodeLngE7 (likewise)
+    8,                 // NodeLatLng: (lat, lng) f64 pairs of the NodeLatLngNodes
+    4,                 // EdgeTarget
+    4,                 // EdgeId: edge id - base (the header's edge id base)
+    4,                 // EdgeLength
+    4,                 // EdgeSharedInfo
+    2,                 // EdgeHeadingStart
+    1,                 // EdgeFlags
+    1,                 // EdgeRoadRank
+    4,                 // EdgeCost (f32, column-major)
+    4,                 // EdgeDuration (f32, column-major)
+    4,                 // SharedInfoWay: way id, or WAY_ID_WIDE
+    4,                 // SharedInfoName: name token per attribute class
+    4,                 // SharedInfoRef: ref token, likewise
     4,  // SharedInfoRouteRefStart: offsets into SharedInfoRouteRefPool per attribute class + 1
     4,  // SharedInfoRouteRefPool
     4,  // SimpleFrom
@@ -701,6 +719,9 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     2, // ComplexMask16 (format 3)
     4, // BarrierAccess32: closed u16, gate u16 (format 3)
     2, // NodeReachSaturated16 (format 3)
+    4, // NodeSourceIdLow: low 32 bits of each node's OSM id (format 3)
+    2, // NodeSourceIdHigh: high 16 bits, NO_SOURCE_NODE_HIGH for none (format 3)
+    REGION_INFO_BYTES, // RegionInfo: one RegionInfo (format 3)
 ];
 
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
@@ -805,6 +826,9 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "ComplexMask16",
     "BarrierAccess32",
     "NodeReachSaturated16",
+    "NodeSourceIdLow",
+    "NodeSourceIdHigh",
+    "RegionInfo",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1183,6 +1207,11 @@ pub struct PackageFile {
     pub(crate) format_version: u32,
     /// The edge id lookup, built on first use (see [`Sections::edge_for_id`]).
     pub(crate) edge_id_lookup: OnceLock<Vec<u32>>,
+    /// Format 3's [`Section::RegionInfo`]; `None` for format 2.
+    pub(crate) region: Option<RegionInfo>,
+    /// The nodes with an OSM id, sorted by it (then by node), built on first
+    /// use (see [`Sections::nodes_with_osm_id`]).
+    pub(crate) osm_node_lookup: OnceLock<Vec<u32>>,
 }
 
 impl std::fmt::Debug for PackageFile {
@@ -1283,6 +1312,136 @@ impl ProfileSlot {
             heuristic_cost_per_m: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
         })
     }
+}
+
+/// The bytes of [`Section::RegionInfo`].
+pub const REGION_INFO_BYTES: usize = 96;
+/// [`RegionInfo::flags`] bit 0: the package holds foreign-owned stub nodes,
+/// listed in a `NodeOwner` section (id [`NODE_OWNER_SECTION_ID`]).
+pub const REGION_HAS_NODE_OWNER: u32 = 1 << 0;
+/// The format-3 id reserved for `NodeOwner` (`docs/design/format-3.md`,
+/// section 6), which this build doesn't read.
+pub const NODE_OWNER_SECTION_ID: u32 = 258;
+/// [`Section::NodeSourceIdHigh`] of a node with no OSM node (a crossing the
+/// compiler inserted, or a plaza centre); its low part is zero.
+pub const NO_SOURCE_NODE_HIGH: u16 = u16::MAX;
+/// The largest OSM node id [`Section::NodeSourceIdLow`] and
+/// [`Section::NodeSourceIdHigh`] hold: a high part of
+/// [`NO_SOURCE_NODE_HIGH`] means none.
+pub const MAX_SOURCE_NODE_ID: i64 = ((NO_SOURCE_NODE_HIGH as i64) << 32) - 1;
+
+/// [`RegionInfo::cut_rule`] values: how a bundle cut the region from its
+/// neighbours. A reader keeps a rule it doesn't know; only region code acts
+/// on it.
+pub mod cut_rule {
+    /// A stand-alone package, or no rule.
+    pub const NONE: u32 = 0;
+    /// Cut along a boundary polygon.
+    pub const POLYGON: u32 = 1;
+    /// A minimum cut within a band ([`super::RegionInfo::cut_param`] is the
+    /// band width in metres).
+    pub const BANDED_MIN_CUT: u32 = 2;
+    /// A dissection cell ([`super::RegionInfo::cut_param`] is its level).
+    pub const DISSECTION_CELL: u32 = 3;
+}
+
+/// [`Section::RegionInfo`]: where the package sits in a bundle of regions
+/// (`docs/design/format-3.md`, section 5.5). A stand-alone package is a
+/// bundle of one: zero ids, hash, halo, rule and flags, and the extent of its
+/// nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegionInfo {
+    /// Assigned by the bundle; zero for a stand-alone package.
+    pub region_id: [u8; 16],
+    pub bundle_id: [u8; 16],
+    /// The owned nodes' bounding box in E7: min lat, min lng, max lat, max
+    /// lng. All zero for a package without nodes.
+    pub extent_e7: [i32; 4],
+    /// FEAT-D2's canonical polygon hash of the region's boundary (the clip
+    /// polygon's for a stand-alone package), or zero.
+    pub boundary_hash: [u8; 32],
+    pub halo_m: u32,
+    /// One of [`cut_rule`], or a later rule.
+    pub cut_rule: u32,
+    /// The band width in metres, or the cell level, by [`Self::cut_rule`].
+    pub cut_param: u32,
+    /// [`REGION_HAS_NODE_OWNER`]; other bits are for later formats.
+    pub flags: u32,
+}
+
+impl RegionInfo {
+    /// The region info of a stand-alone package whose nodes span
+    /// `extent_e7` (min lat, min lng, max lat, max lng).
+    pub fn stand_alone(extent_e7: [i32; 4]) -> Self {
+        Self {
+            extent_e7,
+            ..Self::default()
+        }
+    }
+
+    pub fn to_bytes(self) -> [u8; REGION_INFO_BYTES] {
+        let mut bytes = [0u8; REGION_INFO_BYTES];
+        bytes[0..16].copy_from_slice(&self.region_id);
+        bytes[16..32].copy_from_slice(&self.bundle_id);
+        for (at, value) in self.extent_e7.iter().enumerate() {
+            bytes[32 + at * 4..36 + at * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[48..80].copy_from_slice(&self.boundary_hash);
+        bytes[80..84].copy_from_slice(&self.halo_m.to_le_bytes());
+        bytes[84..88].copy_from_slice(&self.cut_rule.to_le_bytes());
+        bytes[88..92].copy_from_slice(&self.cut_param.to_le_bytes());
+        bytes[92..96].copy_from_slice(&self.flags.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8; REGION_INFO_BYTES]) -> Self {
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        Self {
+            region_id: bytes[0..16].try_into().unwrap(),
+            bundle_id: bytes[16..32].try_into().unwrap(),
+            extent_e7: std::array::from_fn(|at| u32_at(32 + at * 4) as i32),
+            boundary_hash: bytes[48..80].try_into().unwrap(),
+            halo_m: u32_at(80),
+            cut_rule: u32_at(84),
+            cut_param: u32_at(88),
+            flags: u32_at(92),
+        }
+    }
+
+    /// Whether the extent is a box on the globe (min not above max, inside
+    /// ±90° and ±180°) or, for a package without nodes, all zero.
+    pub fn extent_is_valid(&self, node_count: usize) -> bool {
+        let [min_lat, min_lng, max_lat, max_lng] = self.extent_e7;
+        if node_count == 0 {
+            return self.extent_e7 == [0; 4];
+        }
+        const LAT: i32 = 900_000_000;
+        const LNG: i32 = 1_800_000_000;
+        min_lat <= max_lat
+            && min_lng <= max_lng
+            && min_lat >= -LAT
+            && max_lat <= LAT
+            && min_lng >= -LNG
+            && max_lng <= LNG
+    }
+}
+
+/// The [`Section::NodeSourceIdLow`] and [`Section::NodeSourceIdHigh`]
+/// values of an OSM node id, `None` for no OSM node; `Err` for a negative
+/// id or one above [`MAX_SOURCE_NODE_ID`].
+pub fn split_source_node_id(id: Option<i64>) -> Result<(u32, u16), i64> {
+    match id {
+        None => Ok((0, NO_SOURCE_NODE_HIGH)),
+        Some(id) if (0..=MAX_SOURCE_NODE_ID).contains(&id) => Ok((id as u32, (id >> 32) as u16)),
+        Some(id) => Err(id),
+    }
+}
+
+/// The OSM node id of a node's [`Section::NodeSourceIdLow`] and
+/// [`Section::NodeSourceIdHigh`] values; `None` for no OSM node.
+#[inline]
+pub fn join_source_node_id(low: u32, high: u16) -> Option<i64> {
+    (high != NO_SOURCE_NODE_HIGH).then(|| (i64::from(high) << 32) | i64::from(low))
 }
 
 /// The format-3 slots of a compile's format-2 header columns and bounds
@@ -1868,6 +2027,36 @@ impl PackageFile {
         } else {
             ProfileMap::format_2(header.profile_columns, header.heuristic_cost_per_m)
         };
+        let region = if header.version >= 3 {
+            let bytes = section_bytes(Section::RegionInfo);
+            let bytes = <&[u8; REGION_INFO_BYTES]>::try_from(bytes).map_err(|_| {
+                RoutingPackageError::Invalid("a format-3 package holds one region info".into())
+            })?;
+            let region = RegionInfo::from_bytes(bytes);
+            let unknown_flags = region.flags & !REGION_HAS_NODE_OWNER;
+            if unknown_flags != 0 {
+                return Err(RoutingPackageError::TooNew(format!(
+                    "the package needs region flags {unknown_flags:#x}, which this build doesn't read"
+                )));
+            }
+            let has_node_owner = header
+                .unknown_sections
+                .iter()
+                .any(|section| section.id == NODE_OWNER_SECTION_ID);
+            if (region.flags & REGION_HAS_NODE_OWNER != 0) != has_node_owner {
+                return Err(RoutingPackageError::Invalid(
+                    "region info and the node owner section disagree".into(),
+                ));
+            }
+            if !region.extent_is_valid(header.counts.node_count) {
+                return Err(RoutingPackageError::Invalid(
+                    "region extent is invalid".into(),
+                ));
+            }
+            Some(region)
+        } else {
+            None
+        };
         let graph = Self {
             storage,
             counts: header.counts,
@@ -1882,6 +2071,8 @@ impl PackageFile {
             profiles,
             format_version: header.version,
             edge_id_lookup: OnceLock::new(),
+            region,
+            osm_node_lookup: OnceLock::new(),
         };
         graph.validate()?;
         graph.validate_request_sections()?;
@@ -1938,6 +2129,7 @@ impl PackageFile {
             c.column_count.checked_mul(c.node_count.div_ceil(64))
         };
         let stored_edge_ids = if format_3 { 0 } else { c.edge_count };
+        let source_ids = if format_3 { c.node_count } else { 0 };
         let (simple_mask, complex_mask, edge_access) = if format_3 {
             (
                 Section::SimpleMask16,
@@ -2006,6 +2198,9 @@ impl PackageFile {
             (Section::SharedInfoCostTuple, Some(c.shared_info_count)),
             (Section::SharedInfoLegalReason, Some(c.shared_info_count)),
             (Section::EdgeJunction, Some(c.edge_count)),
+            (Section::NodeSourceIdLow, Some(source_ids)),
+            (Section::NodeSourceIdHigh, Some(source_ids)),
+            (Section::RegionInfo, Some(usize::from(format_3))),
         ];
         if fixed
             .iter()
@@ -2077,6 +2272,14 @@ impl PackageFile {
             })
         {
             return invalid("barrier nodes are invalid");
+        }
+        if self
+            .slice::<u16>(Section::NodeSourceIdHigh)
+            .iter()
+            .zip(self.slice::<u32>(Section::NodeSourceIdLow))
+            .any(|(high, low)| *high == NO_SOURCE_NODE_HIGH && *low != 0)
+        {
+            return invalid("node source ids are invalid");
         }
         if self.slice::<u8>(Section::EdgeJunction).iter().any(|byte| {
             byte & !(junction::CONTROL_MASK | junction::MINOR_APPROACH) != 0
@@ -2421,6 +2624,17 @@ impl PackageFile {
         &self.content_hash
     }
 
+    /// Where the package sits in a bundle of regions (format 3); `None` for
+    /// format 2.
+    pub fn region_info(&self) -> Option<&RegionInfo> {
+        self.region.as_ref()
+    }
+
+    /// Whether the package states every node's OSM node id (format 3).
+    pub fn has_osm_node_ids(&self) -> bool {
+        self.format_version >= 3
+    }
+
     /// The format a writer would write this package in.
     pub fn package_format(&self) -> PackageFormat {
         PackageFormat::from_version(self.format_version).unwrap_or_default()
@@ -2528,6 +2742,9 @@ impl PackageFile {
             edge_ids_implied: self.format_version >= 3,
             built_edge_id_lookup: &self.edge_id_lookup,
             edge_id_base: self.layout.edge_id_base,
+            node_source_low: self.slice(Section::NodeSourceIdLow),
+            node_source_high: self.slice(Section::NodeSourceIdHigh),
+            built_osm_node_lookup: &self.osm_node_lookup,
             edge_length: self.slice(Section::EdgeLength),
             edge_shared_info: self.slice(Section::EdgeSharedInfo),
             heading_start: self.slice(Section::EdgeHeadingStart),
@@ -3051,6 +3268,13 @@ pub struct Sections<'g> {
     /// The id lookup, built on first use (see [`Self::edge_id_lookup`]).
     pub built_edge_id_lookup: &'g OnceLock<Vec<u32>>,
     pub edge_id_base: u64,
+    /// Per node the low 32 and high 16 bits of its OSM node id (format 3;
+    /// empty in format 2); read through [`Self::osm_node_id`].
+    pub node_source_low: &'g [u32],
+    pub node_source_high: &'g [u16],
+    /// The reverse lookup, built on first use (see
+    /// [`Self::nodes_with_osm_id`]).
+    pub built_osm_node_lookup: &'g OnceLock<Vec<u32>>,
     pub edge_length: &'g [f32],
     pub edge_shared_info: &'g [u32],
     pub heading_start: &'g [u16],
@@ -3632,6 +3856,44 @@ impl<'g> Sections<'g> {
             .get(usize::try_from(slot).ok()?)
             .copied()
             .filter(|edge| *edge != u32::MAX)
+    }
+
+    /// The OSM node id of compact node `node`: `None` for a node with no OSM
+    /// node, or in a format-2 package, which doesn't store them.
+    #[inline]
+    pub fn osm_node_id(&self, node: u32) -> Option<i64> {
+        let at = node as usize;
+        join_source_node_id(
+            *self.node_source_low.get(at)?,
+            *self.node_source_high.get(at)?,
+        )
+    }
+
+    /// The compact nodes of OSM node `osm_id`, in node order: usually one,
+    /// none in a format-2 package. The lookup is built on first use (one
+    /// sort of the nodes, under a lock that other threads wait on).
+    pub fn nodes_with_osm_id(&self, osm_id: i64) -> &'g [u32] {
+        if self.node_source_low.is_empty() {
+            return &[];
+        }
+        let low = self.node_source_low;
+        let high = self.node_source_high;
+        let key =
+            |node: u32| (u64::from(high[node as usize]) << 32) | u64::from(low[node as usize]);
+        let sorted = self.built_osm_node_lookup.get_or_init(|| {
+            let mut nodes = (0..low.len() as u32)
+                .filter(|node| high[*node as usize] != NO_SOURCE_NODE_HIGH)
+                .collect::<Vec<_>>();
+            nodes.sort_unstable_by_key(|node| (key(*node), *node));
+            nodes
+        });
+        let Ok((wanted_low, wanted_high)) = split_source_node_id(Some(osm_id)) else {
+            return &[];
+        };
+        let wanted = (u64::from(wanted_high) << 32) | u64::from(wanted_low);
+        let start = sorted.partition_point(|node| key(*node) < wanted);
+        let end = start + sorted[start..].partition_point(|node| key(*node) == wanted);
+        &sorted[start..end]
     }
 
     /// The compact edge per (edge id - base), `u32::MAX` for none: built
@@ -4770,5 +5032,55 @@ mod replace_tests {
         let mut kept = kept.map(str::to_string).to_vec();
         kept.sort();
         assert_eq!(names(dir.path()), kept);
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn source_node_ids_split_and_join() {
+        for id in [
+            0,
+            1,
+            4_294_967_295,
+            4_294_967_296,
+            14_392_565_185,
+            MAX_SOURCE_NODE_ID,
+        ] {
+            let (low, high) = split_source_node_id(Some(id)).unwrap();
+            assert_ne!(high, NO_SOURCE_NODE_HIGH);
+            assert_eq!(join_source_node_id(low, high), Some(id));
+        }
+        assert_eq!(split_source_node_id(None), Ok((0, NO_SOURCE_NODE_HIGH)));
+        assert_eq!(join_source_node_id(0, NO_SOURCE_NODE_HIGH), None);
+        for id in [-1, MAX_SOURCE_NODE_ID + 1, i64::MAX] {
+            assert_eq!(split_source_node_id(Some(id)), Err(id));
+        }
+    }
+
+    #[test]
+    fn region_info_round_trips() {
+        let region = RegionInfo {
+            region_id: [1; 16],
+            bundle_id: [2; 16],
+            extent_e7: [-10, -2_000, 30, 1_800_000_000],
+            boundary_hash: [3; 32],
+            halo_m: 4,
+            cut_rule: cut_rule::DISSECTION_CELL,
+            cut_param: 6,
+            flags: REGION_HAS_NODE_OWNER,
+        };
+        let bytes = region.to_bytes();
+        assert_eq!(RegionInfo::from_bytes(&bytes), region);
+        assert_eq!(&bytes[32..36], &(-10i32).to_le_bytes());
+        assert!(region.extent_is_valid(1));
+        assert!(!region.extent_is_valid(0));
+        assert!(RegionInfo::default().extent_is_valid(0));
+        assert_eq!(
+            RegionInfo::stand_alone([1, 2, 3, 4]).to_bytes()[..32],
+            [0; 32]
+        );
     }
 }

@@ -187,9 +187,17 @@ impl RoutingPackage {
         self.file.counts()
     }
 
-    /// The package's root checksum, in hex: identifies its content.
+    /// The package's dataset hash, in hex: what overlay sets and results
+    /// bind to. In format 3 the identity hash, which adding or moving a
+    /// section outside the identity keeps; in format 2 the root checksum.
     pub fn dataset_hash(&self) -> &str {
         self.file.dataset_hash()
+    }
+
+    /// The package's root checksum, in hex: covers every byte of the file.
+    /// Equals [`Self::dataset_hash`] in format 2.
+    pub fn content_hash(&self) -> &str {
+        self.file.content_hash()
     }
 
     /// What the compiler recorded: graph id, country, costing model, quality,

@@ -168,6 +168,7 @@ pub(crate) fn run(source: &Path, parent_stdin: bool, cancel: &CancelToken) -> Re
                 "directedEdgeCount": result.graph_manifest.directed_edge_count,
                 "packageBytes": result.byte_len,
                 "packageDatasetHash": result.dataset_hash,
+                "packageContentHash": result.content_hash,
             }));
             Ok(())
         }

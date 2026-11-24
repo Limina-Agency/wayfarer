@@ -72,6 +72,7 @@ fn a_job_compiles_the_fixture_and_reports_progress() {
     )
     .unwrap();
     assert_eq!(result["datasetHash"], fixture["datasetHash"]);
+    assert_eq!(result["contentHash"], fixture["contentHash"]);
     assert!(output.exists());
     // Waiting again returns the same outcome.
     let mut out = ptr::null_mut();

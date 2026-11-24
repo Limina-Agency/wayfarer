@@ -1,7 +1,8 @@
 //! Format 3's section table and profile slots (`docs/design/format-3.md`,
 //! sections 2 to 5 and 7): a format-3 compile routes as format 2 does, the
 //! identity and content hashes, the slot table and u16 masks, versioned
-//! attribute-class records, and the checks against hostile packages.
+//! attribute-class records, the region info and OSM node ids, and the
+//! checks against hostile packages.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -12,9 +13,10 @@ use wayfarer::{
 use wayfarer_compiler::{CancelToken, CompileRequest, compile};
 use wayfarer_package::format::{
     FORMAT_3_DRAFT_REVISION, HEADER_V3_LAYOUT_FLAGS, LEG_ATTRS_REVISION, NO_SLOT_COLUMN,
-    PARAM_MUST_UNDERSTAND, PROFILE_SLOT_BYTES, PackageFile, PackageFormat, PackageParams,
-    ProfileSlot, RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED, Section, param_key,
-    profile_code,
+    NO_SOURCE_NODE_HIGH, NODE_OWNER_SECTION_ID, PARAM_MUST_UNDERSTAND, PROFILE_SLOT_BYTES,
+    PackageFile, PackageFormat, PackageParams, ProfileSlot, REGION_HAS_NODE_OWNER,
+    REGION_INFO_BYTES, RegionInfo, RoutingPackageError, SECTION_IDENTITY, SECTION_REQUIRED,
+    Section, param_key, profile_code,
 };
 use wayfarer_package::raw::{RawPackage, RawSection, resign};
 
@@ -831,4 +833,138 @@ fn attribute_class_records_carry_their_revision() {
     newer.sections[at].param = LEG_ATTRS_REVISION;
     let file = open(&newer.encode()).unwrap();
     assert!(file.request_view().unwrap().leg_shared_info(0).is_none());
+}
+
+/// Every node states its OSM node id, the reverse lookup finds it, and the
+/// region info is a stand-alone package's over the nodes' extent.
+#[test]
+fn format_3_states_osm_node_ids_and_a_stand_alone_region() {
+    let file = open(&monaco().1).unwrap();
+    let view = file.view();
+    let mut with_id = 0;
+    let mut extent = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for node in 0..view.node_count as u32 {
+        if let Some(id) = view.osm_node_id(node) {
+            with_id += 1;
+            assert!(id > 0);
+            assert!(view.nodes_with_osm_id(id).contains(&node), "node {node}");
+        }
+        let (lat, lng) = view.node_e7(node);
+        extent = [
+            extent[0].min(lat),
+            extent[1].min(lng),
+            extent[2].max(lat),
+            extent[3].max(lng),
+        ];
+    }
+    // Monaco's only nodes without one are crossings the compiler inserted.
+    assert!(with_id * 100 >= view.node_count * 99, "{with_id}");
+    assert_eq!(file.region_info(), Some(&RegionInfo::stand_alone(extent)));
+    let v2 = open(&monaco().0).unwrap();
+    assert_eq!(v2.region_info(), None);
+    assert!(
+        v2.view()
+            .nodes_with_osm_id(view.osm_node_id(0).unwrap())
+            .is_empty()
+    );
+    for section in [
+        Section::RegionInfo,
+        Section::NodeSourceIdLow,
+        Section::NodeSourceIdHigh,
+    ] {
+        assert_eq!(
+            section.format_3_flags(),
+            SECTION_REQUIRED | SECTION_IDENTITY
+        );
+        assert!(!v2.has_section(section));
+    }
+}
+
+/// The format-3 package with its region info replaced by `edit`'s.
+fn with_region(edit: impl FnOnce(&mut RegionInfo)) -> RawPackage {
+    let mut raw = format_3();
+    let at = raw.position(Section::RegionInfo.id()).unwrap();
+    let mut region = RegionInfo::from_bytes(raw.sections[at].bytes.as_slice().try_into().unwrap());
+    edit(&mut region);
+    raw.sections[at].bytes = region.to_bytes().to_vec();
+    raw
+}
+
+#[test]
+fn region_info_is_checked() {
+    // A bundle member's ids, boundary, halo and an unknown cut rule are kept.
+    let raw = with_region(|region| {
+        region.region_id = [7; 16];
+        region.bundle_id = [9; 16];
+        region.boundary_hash = [3; 32];
+        region.halo_m = 2_000;
+        region.cut_rule = 99;
+        region.cut_param = 12;
+    });
+    let file = open(&raw.encode()).unwrap();
+    let region = file.region_info().unwrap();
+    assert_eq!((region.region_id, region.cut_rule), ([7; 16], 99));
+    // Its identity changes with them.
+    assert_ne!(
+        file.dataset_hash(),
+        open(&monaco().1).unwrap().dataset_hash()
+    );
+    // A flag this build doesn't know needs a newer build.
+    let error = open(&with_region(|region| region.flags = 1 << 4).encode()).unwrap_err();
+    assert!(matches!(error, RoutingPackageError::TooNew(_)), "{error}");
+    // Stub nodes without the `NodeOwner` section that lists them.
+    let error = open_error(&with_region(|region| region.flags = REGION_HAS_NODE_OWNER));
+    assert!(error.contains("node owner"), "{error}");
+    let mut owner = format_3();
+    owner.sections.push(RawSection {
+        id: NODE_OWNER_SECTION_ID,
+        param: 0,
+        flags: SECTION_IDENTITY,
+        element_bytes: 8,
+        bytes: vec![0; 8],
+    });
+    owner.sections.sort_by_key(|section| section.id);
+    let error = open_error(&owner);
+    assert!(error.contains("node owner"), "{error}");
+    let at = owner.position(Section::RegionInfo.id()).unwrap();
+    owner.sections[at].bytes[92] = REGION_HAS_NODE_OWNER as u8;
+    assert!(open(&owner.encode()).is_ok());
+    // The extent is a box on the globe.
+    type Edit = fn(&mut RegionInfo);
+    let cases: [Edit; 3] = [
+        |region| region.extent_e7.swap(0, 2),
+        |region| region.extent_e7[2] = 900_000_001,
+        |region| region.extent_e7[1] = -1_800_000_001,
+    ];
+    for edit in cases {
+        assert!(open_error(&with_region(edit)).contains("region extent"));
+    }
+    // Exactly one region info.
+    let mut raw = format_3();
+    let at = raw.position(Section::RegionInfo.id()).unwrap();
+    raw.sections[at].bytes.extend([0; REGION_INFO_BYTES]);
+    assert!(open_error(&raw).contains("one region info"));
+}
+
+#[test]
+fn osm_node_ids_are_checked() {
+    // A node without an OSM node has a zero low part.
+    let mut raw = format_3();
+    let high = raw.position(Section::NodeSourceIdHigh.id()).unwrap();
+    raw.sections[high].bytes[0..2].copy_from_slice(&NO_SOURCE_NODE_HIGH.to_le_bytes());
+    let low = raw.position(Section::NodeSourceIdLow.id()).unwrap();
+    raw.sections[low].bytes[0..4].copy_from_slice(&5u32.to_le_bytes());
+    assert!(open_error(&raw).contains("node source ids"));
+    raw.sections[low].bytes[0..4].fill(0);
+    let file = open(&raw.encode()).unwrap();
+    assert_eq!(file.view().osm_node_id(0), None);
+    // One id per node.
+    for section in [Section::NodeSourceIdLow, Section::NodeSourceIdHigh] {
+        let mut raw = format_3();
+        let at = raw.position(section.id()).unwrap();
+        let element = raw.sections[at].element_bytes as usize;
+        let len = raw.sections[at].bytes.len();
+        raw.sections[at].bytes.truncate(len - element);
+        assert!(open_error(&raw).contains("header counts"), "{section:?}");
+    }
 }

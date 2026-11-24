@@ -347,6 +347,7 @@ fn package_info(package: &RoutingPackage) -> Value {
         "graphId": metadata.graph_id,
         "countryCode": metadata.country_code,
         "datasetHash": package.dataset_hash(),
+        "contentHash": package.content_hash(),
         "byteLen": package.byte_len(),
         "nodeCount": counts.node_count,
         "edgeCount": counts.edge_count,
@@ -527,6 +528,7 @@ fn verify_package(path: &Path) -> Result<Value, Failure> {
     let verification = RoutingPackage::verify(path).map_err(Failure::package)?;
     Ok(json!({
         "datasetHash": verification.dataset_hash,
+        "contentHash": verification.content_hash,
         "byteLen": verification.byte_len,
         "sections": verification.sections.iter().map(|section| json!({
             "name": section.name,

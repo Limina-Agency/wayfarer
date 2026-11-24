@@ -146,15 +146,18 @@ int32_t wayfarer_open_w(const wchar_t *path,
 /* Closes a handle. NULL is ignored. */
 void wayfarer_close(WayfarerPackage *package);
 
-/* The package's info: format and costing versions, counts, dataset hash,
+/* The package's info: format and costing versions, counts, "datasetHash"
+ * (what overlay sets and results bind to: the identity hash in format 3,
+ * the root checksum in format 2), "contentHash" (the root checksum),
  * quality, and "sarCapability" (the SAR relaxations "available" and
  * "unavailable" on it, and on a package with SAR data the least
  * "legalAccessMinFactor", "wrongWayMinFactor" and
  * "vehicleOnPathsMinFactor" a request may set). */
 int32_t wayfarer_info(const WayfarerPackage *package, char **out_json);
 
-/* Checks a package file end to end (every section against its checksum).
- * `path` is UTF-8. */
+/* Checks a package file end to end (every section against its checksum):
+ * "datasetHash", "contentHash", "byteLen" and the sections. `path` is
+ * UTF-8. */
 int32_t wayfarer_verify(const char *path, char **out_json);
 
 #ifdef _WIN32
@@ -325,7 +328,7 @@ int32_t wayfarer_compile_progress(const WayfarerCompileJob *job,
 int32_t wayfarer_compile_is_finished(const WayfarerCompileJob *job);
 
 /* Waits for the job to end. On success `*out_json` is the CompileResult
- * ({"package", "byteLen", "datasetHash", "formatVersion",
+ * ({"package", "byteLen", "datasetHash", "contentHash", "formatVersion",
  * "costingModelVersion", "graphId", "country", "nodeCount", "edgeCount",
  * "report"}); otherwise an error with WAYFARER_CANCELLED,
  * WAYFARER_INVALID_ARGUMENT or WAYFARER_COMPILE_ERROR.
