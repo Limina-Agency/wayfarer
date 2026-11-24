@@ -5,7 +5,7 @@ of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
 --package-format 3`, hidden). Done: steps 1 to 3 of section 12 (the tagged
 table, both hashes, `PackageParams`, retired reserved sections, implied ids;
 `ProfileSlots` and the u16 masks; versioned attribute-class records), draft
-revision 3. Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
+revision 3. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -30,10 +30,11 @@ they are taken from.
 1. **A tagged section table.** Each entry carries a stable id, a parameter,
    REQUIRED and IDENTITY flags, an element size, offset, length and blake3.
    A reader skips an unknown section unless it is REQUIRED. New optional
-   sections (elevation, DEM grid, barrier lines, land cover, portals, cell
-   directory, stored potentials) then land in 1.x releases without a format
-   bump. The table may sit after the sections, so the compiler can stream
-   sections straight into the file.
+   sections (portals, cell directory, stored potentials, feature content)
+   then land in 1.x releases without a format bump. Off-road terrain is not
+   in format 3; its layouts are drafted in `format-4.md`. The table may
+   sit after the sections, so the compiler can stream sections straight
+   into the file.
 2. **Two hashes.** The *identity hash* covers the header and the entries
    flagged IDENTITY (not their offsets) and is what overlay sets, results
    and bundle indexes bind to; it keeps the name `datasetHash`. The *content
@@ -64,9 +65,10 @@ they are taken from.
    numbering that makes the dissection, and so the final ids, independent of
    build order; a tiled compile forces its tile borders to the top of the
    dissection (section 8).
-5. **A global lattice** in ticks of 1/120″ anchored at 0°, 0° for the DEM grid,
-   land cover, any raster and the request grid, so two regions' grids tile
-   exactly and ties break on global cell indexes (section 9).
+5. **A global lattice** in ticks of 1/120″ anchored at 0°, 0° for the
+   request grid and any later raster (the terrain grids of `format-4.md`),
+   so two regions' grids tile exactly and ties break on global cell indexes
+   (section 9).
 6. **Reserved ids** with layouts sketched for portals, node ownership,
    cliques, bounds, component portals, region neighbours, the cell tree, the
    cell directory and stored potentials, and for the feature lane's content
@@ -539,7 +541,7 @@ road-covered land, so it changes little there; it matters for continents).
 | 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridCellStart` (block-relative u32), 140/141 `NodeSourceId` | mandatory |
 | 256–319 | Regions: 256 `RegionInfo` (mandatory); reserved: 257 `RegionNeighbours`, 258 `NodeOwner`, 259 `PortalEdge`, 260 `PortalRef`, 261 `PortalClique` (param = column), 262 `PortalBound` (param = column), 263 `ComponentPortal` | optional |
 | 320–383 | Cells and stored potentials: 320 `CchCellTree` (written from format 3 on); reserved: 321 `CellDirectory`, 322 `CchFirstUp`, 323 `CchUpHead`, 324 `CchMetric` (param = column), 325 `InEdgeIndex` (SC-4) | optional |
-| 512–639 | Feature content: reserved 512 `SegmentElevation` (T1), 513 `ElevationProfile` (T1), 514 `DemGrid` (T4), 515 `BarrierLines` (X2, linear features, section 6.1), 516 `LandCover` (X3a), 517 `DirectionalDestinations` (G4b), 518 `ConditionalTurnRestrictions` (W4), 519 `SharedInfoLimits` (P2), 520 `SteepnessMax` (T4, section 6.1) | optional |
+| 512–639 | Feature content: reserved 517 `DirectionalDestinations` (G4b), 518 `ConditionalTurnRestrictions` (W4), 519 `SharedInfoLimits` (P2); 512–516 and 520 are terrain, kept out of format 3 (`format-4.md`) | optional |
 | `0x8000_0000`+ | Experimental | never REQUIRED |
 
 Reserved layouts, so that the format-3 spec fixes their shape before anyone
@@ -562,104 +564,6 @@ in the release that first writes it):
 
 `CchFirstUp` is u64 because arc counts reach 2^31 between Europe and the
 planet (section 10); the engine's in-memory `UP_BIT` packing is its own business.
-
-### 6.1 Terrain and linear features (512–639)
-
-The off-road plan (`off-road-sar/PLAN.md`, sections 6 to 9) stores terrain
-on the global lattice (section 9) and hasn't decided where: in the routing
-package, or in a separate terrain file built from DEM and land-cover sources
-and reused across OSM refreshes. The ids and layouts below are the same in
-both, so the choice changes no id:
-
-- A terrain file, if chosen, is a format-3 container: the same header,
-  section table, flags and hashes, holding `Metadata`, `PackageParams` and
-  only sections from this range. Its identity hash covers its own sections
-  (the source tile hashes and spacing are in its `PackageParams`), and a
-  package that is used with it keeps its own identity. How a container says
-  which kind it is (a `PackageParams` key) is settled with that decision.
-- In either container these sections are IDENTITY, since they change
-  answers, and not REQUIRED: an engine that doesn't know them routes on the
-  road graph only, and a request that needs them fails as unsupported.
-- Nothing in a terrain section refers to profile slot bits, which only a
-  routing package has. Rules are keyed by profile code (section 5.1), and a
-  reader maps codes to its own profiles.
-- Grids (`DemGrid` 514, `LandCover` 516, `SteepnessMax` 520) share one
-  layout. Element size 1, `param` = `s_lat << 16 | s_lon` in lattice ticks
-  (1/120″, section 9.1), so one container can hold the same kind of grid at
-  two spacings. The section holds a block count `n` (u64), `n` sorted block
-  keys (u64: `(i_block + 2^31) << 32 | (j_block + 2^31)`, so the order of
-  the keys is the order of the signed block indexes), `n + 1` u64 byte
-  offsets into the payload, and the payload. `GridBlocks` (138) uses the same
-  key.
-- Each block's payload is a tag byte and the block's data, posts row by row
-  from the south-west (`i`, then `j`). Bit 7 of the tag says a 512-byte
-  presence bitmap (one bit per post, 1 = has data) follows the tag. It is
-  written only when some post has no data, and the values of absent posts
-  are skipped. The low bits pick the coding:
-  - 0: the values uncompressed (i16 for `DemGrid`, two 4-bit values per byte
-    with the lower `j` in the low nibble for the others).
-  - 1: one value for the whole block.
-  - 2 (`DemGrid`): Rice-coded residuals of the MED (LOCO-I) predictor over
-    the block's posts, one 4-bit Rice parameter per 64-post row, and an
-    escape to the raw value at quotient 24.
-  - 3 (4-bit grids): runs along the rows, each a varint
-    `(length - 1) << 4 | value`.
-  A writer picks the smallest coding per block; the choice is deterministic,
-  so rebuilds stay byte-identical. The terrain lane's E1 measured these on
-  Małopolskie (GLO-30, whole metres; `off-road-sar/exp/E1`): `DemGrid` at
-  1″ is 9.3 MB with Rice against 26.1 MB with the zig-zag varint planned
-  before (a varint costs at least a byte a post), 2.9 MB at 2″ and 1.6 MB at
-  3″. `LandCover` in runs is 4.3 MB at 1″, a third of packed nibbles.
-
-`SteepnessMax` (520, T4) is 4 bits per post, at the spacing and on the blocks
-of the `DemGrid` it accompanies. Each value is the steepest slope in the full
-resolution source within the post's cell (the source pixels whose centres
-fall in `[p − s/2, p + s/2)` in both axes), as a class with upper bounds 2,
-5, 8, 11, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 and 70° (classes 0 to 14),
-and 15 for anything steeper. Slopes are Horn's on the source's own grid, with
-the thresholds compared exactly in integers. Posts the `DemGrid` has no data
-for are absent here too. It lets exit legality and the incident surface catch
-embankments and cliffs that a coarse DEM averages away (plan section 8): at
-3″ on Małopolskie, 3.25 % of cells hold a source pixel steeper than 30°, but
-only 0.66 % look that steep from the 3″ grid itself (E1). It is written
-beside a `DemGrid` coarser than its source and left out when the spacing
-equals the source's, where it adds nothing. About 1.5 MB in runs on
-Małopolskie at 3″ and 3.0 MB at 2″ (E1).
-
-`BarrierLines` (515, X2) holds linear features of any kind: streams, rivers
-and shorelines, ridges, cliffs and embankments, power lines and cutlines,
-fences, walls, hedges, guard rails, railways and fenced roads, and
-optionally building outlines. Element size 1, `param` 0. The section holds:
-
-- A 64-byte header: class rule count u32, line count u32, index spacing
-  u32 (lattice ticks, 1,440 = 12″ as the request grid), index block count
-  u32, then zero.
-- Class rules, 8 bytes each, sorted by (class, profile code): class u8,
-  zero u8, profile code u16 (0 = any profile not listed), crossing u8
-  (0 free, 1 at a cost, 2 not crossable, 3 only from the left of the
-  line's direction, for cliffs and drops), along u8 (0 no effect, 1 a
-  corridor that is faster to follow), cost u16 (seconds to cross when
-  crossing is 1, or the corridor's speed factor in 1/256 when along is 1).
-  The rules come with the data, so a class this build doesn't know still
-  has rules. A class with no rule for a profile, and none for code 0, is
-  crossed freely.
-- Line starts: `line count + 1` u64 byte offsets into the line bytes.
-- Line bytes, per line: class u8 and flags u8 (bit 0: a closed ring), the
-  source OSM way id as a varint (0 for a derived line, such as a ridge from
-  the DEM), a point count of at least 2 (varint), then the first point's
-  E7 latitude and longitude as zig-zag varints and each next point as
-  zig-zag varint deltas.
-- A lattice cell index, the request grid's shape (section 9.3): block keys
-  and bases (16 bytes each), 4,096 + 1 block-relative u32 starts per block,
-  then u32 line indexes, sorted, for every line that touches the cell.
-
-The class codes are: 1 stream, 2 river or canal, 3 shoreline (lake or
-coast), 4 ridge, 5 cliff, 6 embankment or cutting, 7 power line, 8 cutline
-or firebreak, 9 fence, 10 wall, 11 hedge, 12 guard rail, 13 railway, 14
-fenced road (motorway or motorroad), 15 building outline, and 16 pipeline
-above ground. 0 is invalid, 17 to 127 are for later versions, and 128 and
-up are private. Like the grids, each of these sections gets its full spec
-in the release that first writes it, and this shape is fixed at the freeze.
 
 ## 7. Profile slots and masks: what the engine changes
 
@@ -796,7 +700,7 @@ Every gridded section uses one angular lattice: posts at
 with `i`, `j` signed 32-bit integers and `s_lat`, `s_lon` whole divisors of
 432,000 ticks, a degree (so whole degrees are post lines, where DEM source
 tiles meet). 1″ is 120 ticks, 3″ is 360, and ½″ (60) stays possible for a
-15 m source such as GEM-15 without a format 4; GLO-30's 1.5″ columns above
+15 m source such as GEM-15 without another lattice; GLO-30's 1.5″ columns above
 50° N (180) and WorldCover's 0.3″ (36) are whole ticks too, so resampling is
 exact integer arithmetic. Post indexes still fit an i32 at ½″ (2.6 M posts
 around the globe). A grid section states its `(s_lat, s_lon)` and stores
@@ -814,15 +718,11 @@ its members; the 1.0 compiler uses `s_lon = s_lat` everywhere.
 
 | Grid | Spacing | Values |
 |---|---|---|
-| DEM (`DemGrid`, T4) | 3″ default, 1″ or 6″, ½″ possible | i16 whole metres, absent posts in the block's presence bitmap; Rice-coded MED residuals per block (section 6.1) |
-| Steepness (`SteepnessMax`, T4) | the DEM's, when coarser than its source | 4-bit classes of the steepest full-resolution slope, in runs (section 6.1) |
-| Land cover (`LandCover`, X3a) | 1″ or 2″ (25–50 m) | 4-bit classes (1–11 WorldCover's, 12–15 for OSM-only classes), in runs |
-| X4 friction raster | built per request at 1″ | not stored |
 | Request grid (section 9.3) | 12″ | edge lists |
 
-DEM sources (SRTM, NASADEM, GLO-30) are resampled onto the posts with
-integer arithmetic (the T1 reader's rules); a source with a different
-longitude spacing at high latitude (GLO-30) is resampled like any other.
+The terrain grids (DEM, steepness, land cover) are not in format 3. They are
+drafted on this lattice in `format-4.md`, which is why the ticks allow ½″,
+GLO-30's 1.5″ and WorldCover's 0.3″.
 
 ### 9.3 The request grid
 
@@ -860,8 +760,10 @@ count (edges, shared infos, restrictions) and stays u32.
 
 ## 11. What stays out of the bump
 
-- **Content sections** (elevation, DEM grid, barrier lines, land cover,
-  directional destinations, conditional turn restrictions, truck limits) and
+- **Off-road terrain** (elevation, DEM grid, steepness, barrier lines, land
+  cover): kept for format 4 (`format-4.md`, Anton, 2026-11-24).
+- **Content sections** (directional destinations, conditional turn
+  restrictions, truck limits) and
   **stored potentials and the cell directory**: optional sections, one
   release at a time after the bump, on reserved ids.
 - **Portals, cliques, bounds, owner bits, neighbours**: not written before
