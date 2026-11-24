@@ -25,14 +25,29 @@ pub fn mobility_mode_bit(category: MobilityCategory) -> ModeMask {
     }
 }
 
+/// The mobility modes an edge with these OSM modes admits:
+///
+/// - `Wheeled` and `Tracked`: motor vehicles. Bus, HGV and emergency access
+///   alone (a `highway=busway`) does not open a way to them.
+/// - `Emergency`: motor vehicles, buses or HGVs, so emergency vehicles keep
+///   busways.
+/// - `OnFoot`: foot. Bicycle access alone (a `highway=cycleway` with
+///   `foot=no`) does not open a way to walkers.
+/// - `Legged`: foot or bicycle. Teams on foot (SAR) keep the bikeable ways
+///   `foot=no` closes to ordinary walkers (decision D2).
 pub fn mobility_mode_mask_from_osm(osm_mode_mask: ModeMask) -> ModeMask {
     let mut mask = 0u32;
-    if osm_mode_mask & (OsmMode::MOTOR_VEHICLE | OsmMode::BUS | OsmMode::HGV) != 0 {
+    if osm_mode_mask & OsmMode::MOTOR_VEHICLE != 0 {
         mask |= mobility_mode_bit(MobilityCategory::Wheeled);
         mask |= mobility_mode_bit(MobilityCategory::Tracked);
     }
-    if osm_mode_mask & (OsmMode::FOOT | OsmMode::BICYCLE) != 0 {
+    if osm_mode_mask & (OsmMode::MOTOR_VEHICLE | OsmMode::BUS | OsmMode::HGV) != 0 {
+        mask |= MobilityMode::EMERGENCY;
+    }
+    if osm_mode_mask & OsmMode::FOOT != 0 {
         mask |= mobility_mode_bit(MobilityCategory::OnFoot);
+    }
+    if osm_mode_mask & (OsmMode::FOOT | OsmMode::BICYCLE) != 0 {
         mask |= mobility_mode_bit(MobilityCategory::Legged);
     }
     mask

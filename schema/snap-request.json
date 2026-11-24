@@ -105,7 +105,7 @@
           "const": "tracked"
         },
         {
-          "description": "An emergency vehicle: wheeled and tracked access, and not confined to\nthrough roads (it may cross private and destination-only roads).",
+          "description": "An emergency vehicle: the roads cars may use and busways, and not\nconfined to through roads (it may cross private and destination-only\nroads).",
           "type": "string",
           "const": "emergency"
         },
@@ -115,7 +115,7 @@
           "const": "on_foot"
         },
         {
-          "description": "Travel on foot that keeps to tracks and paths: the same ways as\n`OnFoot`, but tracks and paths cost half as much as streets, main roads\nare avoided more strongly, and the pace on tracks and paths is faster\n(6–6.5 km/h).",
+          "description": "Travel on foot that keeps to tracks and paths: the ways `OnFoot` may\nuse, and bikeable ways `foot=no` closes to it (a cycleway with\n`foot=no`, a track with `access=no, bicycle=yes`). Tracks and paths cost\nhalf as much as streets, main roads are avoided more strongly, and the\npace on tracks and paths is faster (6–6.5 km/h).",
           "type": "string",
           "const": "legged"
         }

@@ -1167,6 +1167,90 @@ fn derives_expected_osm_and_mobility_masks() {
 }
 
 #[test]
+fn mobility_modes_follow_their_own_osm_modes() {
+    use wayfarer_package::MobilityProfile;
+    let (wheeled, tracked, emergency, on_foot, legged) = (
+        MobilityMode::WHEELED,
+        MobilityMode::TRACKED,
+        MobilityMode::EMERGENCY,
+        MobilityMode::ON_FOOT,
+        MobilityMode::LEGGED,
+    );
+    let modes = |tags: &[(&str, &str)]| {
+        let tag = |key: &str| {
+            tags.iter()
+                .find(|(tag_key, _)| *tag_key == key)
+                .map(|(_, value)| *value)
+        };
+        mobility_mode_mask_from_osm(derive_osm_mode_mask(
+            tag("highway"),
+            tag("access"),
+            tag("vehicle"),
+            tag("motor_vehicle"),
+            tag("motorcar"),
+            tag("bicycle"),
+            tag("foot"),
+            tag("motorroad"),
+        ))
+    };
+    assert_eq!(
+        modes(&[("highway", "residential")]),
+        wheeled | tracked | emergency | on_foot | legged
+    );
+    // P0a: bicycle access alone opens a way to Legged (D2), not to OnFoot.
+    assert_eq!(modes(&[("highway", "cycleway"), ("foot", "no")]), legged);
+    assert_eq!(
+        modes(&[("highway", "track"), ("access", "no"), ("bicycle", "yes")]),
+        legged
+    );
+    assert_eq!(
+        modes(&[("highway", "residential"), ("foot", "no")]),
+        wheeled | tracked | emergency | legged
+    );
+    assert_eq!(modes(&[("highway", "cycleway")]), on_foot | legged);
+    assert_eq!(modes(&[("highway", "footway")]), on_foot | legged);
+    // P0d: bus access alone opens a way to emergency vehicles, not to cars.
+    assert_eq!(modes(&[("highway", "busway")]), emergency);
+    assert_eq!(
+        modes(&[("highway", "motorway")]),
+        wheeled | tracked | emergency
+    );
+    assert_eq!(
+        modes(&[("highway", "residential"), ("motor_vehicle", "no")]),
+        on_foot | legged
+    );
+    // Every profile that admitted an edge before still does, but walkers
+    // and cars only on their own modes.
+    for (osm, profiles) in [
+        (OsmMode::BICYCLE, &[MobilityProfile::Legged][..]),
+        (OsmMode::BUS, &[MobilityProfile::Emergency]),
+        (OsmMode::HGV, &[MobilityProfile::Emergency]),
+        (
+            OsmMode::MOTOR_VEHICLE,
+            &[
+                MobilityProfile::Default,
+                MobilityProfile::Wheeled,
+                MobilityProfile::Tracked,
+                MobilityProfile::Emergency,
+            ],
+        ),
+        (
+            OsmMode::FOOT,
+            &[MobilityProfile::OnFoot, MobilityProfile::Legged],
+        ),
+    ] {
+        let mask = mobility_mode_mask_from_osm(osm);
+        for profile in wayfarer_package::request::PROFILES {
+            assert_eq!(
+                mask & profile.mobility_mode_mask() != 0,
+                profiles.contains(&profile),
+                "{osm:#b} {profile:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn motorways_exclude_foot_and_bicycle_by_default() {
     let motorway = derive_osm_mode_mask(Some("motorway"), None, None, None, None, None, None, None);
     assert_ne!(motorway & OsmMode::MOTOR_VEHICLE, 0);

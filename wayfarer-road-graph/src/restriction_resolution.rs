@@ -117,10 +117,10 @@ pub fn resolve_turn_restrictions_with_report(
         );
         let osm_mode_mask =
             restriction_osm_mode_mask(&restriction.modes, &restriction.except_modes);
-        // The mobility modes have no bicycle, bus or truck profile: bicycles
-        // share the on-foot modes, which no vehicle's restriction binds, and
-        // the wheeled modes are cars. So only the motorcar and foot bits reach
-        // the mobility modes.
+        // The mobility modes have no bicycle, bus or truck profile: the
+        // wheeled modes are cars and the on-foot modes walkers (Legged also
+        // walks bikeable ways, but a bicycle's restriction does not bind it).
+        // So only the motorcar and foot bits reach the mobility modes.
         let mobility_mode_mask =
             mobility_mode_mask_from_osm(osm_mode_mask & (OsmMode::MOTOR_VEHICLE | OsmMode::FOOT));
         // A restriction that binds none of them (`restriction:hgv`, `:bus`,
