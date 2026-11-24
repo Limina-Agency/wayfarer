@@ -40,7 +40,7 @@ pub const MAX_READ_FORMAT_VERSION: u32 = 3;
 /// The draft revision of format 3 this build writes and reads
 /// ([`param_key::DRAFT_REVISION`]). Every change to format 3's bytes before
 /// its release raises it; the release removes the key.
-pub const FORMAT_3_DRAFT_REVISION: u64 = 5;
+pub const FORMAT_3_DRAFT_REVISION: u64 = 6;
 /// The revision of the attribute-class records ([`Section::AttrClassBytes`])
 /// this build writes, as that section's table `param` in format 3. Each
 /// revision only appends fields to the one before (design section 5.3), so a
@@ -129,6 +129,9 @@ pub fn reverse_heading(heading: u16) -> u16 {
 pub const WAY_ID_WIDE: u32 = u32::MAX;
 /// Distinct costing tuples a package can index ([`Section::SharedInfoCostTuple`]).
 pub const MAX_COST_TUPLES: usize = u16::MAX as usize + 1;
+/// Distinct costing tuples a format-3 package can index
+/// ([`Section::SharedInfoCostTuple32`]).
+pub const MAX_COST_TUPLES_3: usize = u32::MAX as usize;
 /// [`Section::ShapeStart`] stores the byte offset of shapes `0, k, 2k, …`
 /// (k = this) and the end of `ShapeBytes`: the shapes between are found by
 /// skipping their encodings ([`skip_shape`]).
@@ -341,11 +344,35 @@ pub enum Section {
     /// one 20-byte [`crate::cch_order::CellTreeEntry`] per cell in
     /// post-order. Every cell is one range of ranks, so of node ids.
     CchCellTree,
+    /// Format 3 (id 135), replacing [`Section::ShapeStart`]: u64 byte
+    /// offsets ([`ByteOffsets`]).
+    ShapeStart64,
+    /// Format 3 (id 136), replacing [`Section::AttrClassStart`]: u64 byte
+    /// offsets.
+    AttrClassStart64,
+    /// Format 3 (id 137), replacing [`Section::StringStart`]: u64 byte
+    /// offsets.
+    StringStart64,
+    /// Format 3 (id 138), with [`Section::GridBlockCellStart`] replacing
+    /// [`Section::RequestGrid`] and [`Section::GridCellStart`]: the request
+    /// grid's covered blocks of [`GRID_BLOCK_CELLS`]² lattice cells, sorted,
+    /// as 16-byte entries `key u64` ([`grid_block_key`]), `base u64` (the
+    /// block's first [`Section::GridEntries`] index). The cell spacing is
+    /// [`param_key::REQUEST_GRID_SPACING`] (`docs/design/format-3.md`,
+    /// section 9.3).
+    GridBlocks,
+    /// Format 3 (id 139): per covered block, its `GRID_BLOCK_CELLS²` + 1
+    /// cell starts relative to the block's base, cells row-major
+    /// (latitude, then longitude).
+    GridBlockCellStart,
+    /// Format 3 (id 142), replacing [`Section::SharedInfoCostTuple`]: u32
+    /// costing tuple rows ([`CostTuples`]).
+    SharedInfoCostTuple32,
 }
 
 /// Every section this build knows, of any format; the internal index of
 /// [`Section`] (not its format-3 id, see [`Section::id`]).
-pub const SECTION_COUNT: usize = Section::CchCellTree as usize + 1;
+pub const SECTION_COUNT: usize = Section::SharedInfoCostTuple32 as usize + 1;
 /// The sections a format-2 table lists, in slot order: `Metadata` to
 /// `CchRank`.
 pub const FORMAT2_SECTION_COUNT: usize = Section::CchRank as usize + 1;
@@ -457,6 +484,12 @@ pub const SECTIONS: [Section; SECTION_COUNT] = [
     Section::NodeSourceIdHigh,
     Section::RegionInfo,
     Section::CchCellTree,
+    Section::ShapeStart64,
+    Section::AttrClassStart64,
+    Section::StringStart64,
+    Section::GridBlocks,
+    Section::GridBlockCellStart,
+    Section::SharedInfoCostTuple32,
 ];
 
 /// Whether a section is in format-3 packages.
@@ -493,6 +526,12 @@ impl Section {
             Self::NodeSourceIdHigh => 141,
             Self::RegionInfo => 256,
             Self::CchCellTree => 320,
+            Self::ShapeStart64 => 135,
+            Self::AttrClassStart64 => 136,
+            Self::StringStart64 => 137,
+            Self::GridBlocks => 138,
+            Self::GridBlockCellStart => 139,
+            Self::SharedInfoCostTuple32 => 142,
             other => other as u32,
         }
     }
@@ -511,6 +550,12 @@ impl Section {
             141 => Some(Self::NodeSourceIdHigh),
             256 => Some(Self::RegionInfo),
             320 => Some(Self::CchCellTree),
+            135 => Some(Self::ShapeStart64),
+            136 => Some(Self::AttrClassStart64),
+            137 => Some(Self::StringStart64),
+            138 => Some(Self::GridBlocks),
+            139 => Some(Self::GridBlockCellStart),
+            142 => Some(Self::SharedInfoCostTuple32),
             id if (id as usize) < FORMAT2_SECTION_COUNT => Self::from_index(id as usize),
             _ => None,
         }
@@ -554,7 +599,13 @@ impl Section {
             | Self::ComplexMask
             | Self::BarrierAccess
             | Self::NodeReachSaturated
-            | Self::CchRank => Presence::Retired,
+            | Self::CchRank
+            | Self::ShapeStart
+            | Self::AttrClassStart
+            | Self::StringStart
+            | Self::RequestGrid
+            | Self::GridCellStart
+            | Self::SharedInfoCostTuple => Presence::Retired,
             Self::NodeLatE7 | Self::NodeLngE7 | Self::CchCellTree => Presence::Conditional,
             _ => Presence::Mandatory,
         }
@@ -739,6 +790,12 @@ pub const SECTION_ELEMENT_BYTES: [usize; SECTION_COUNT] = [
     2, // NodeSourceIdHigh: high 16 bits, NO_SOURCE_NODE_HIGH for none (format 3)
     REGION_INFO_BYTES, // RegionInfo: one RegionInfo (format 3)
     crate::cch_order::CELL_TREE_ENTRY_BYTES, // CchCellTree: one CellTreeEntry per cell (format 3)
+    8, // ShapeStart64 (format 3)
+    8, // AttrClassStart64 (format 3)
+    8, // StringStart64 (format 3)
+    16, // GridBlocks: (key u64, base u64) per covered block (format 3)
+    4, // GridBlockCellStart: block-relative cell starts (format 3)
+    4, // SharedInfoCostTuple32 (format 3)
 ];
 
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
@@ -847,6 +904,12 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "NodeSourceIdHigh",
     "RegionInfo",
     "CchCellTree",
+    "ShapeStart64",
+    "AttrClassStart64",
+    "StringStart64",
+    "GridBlocks",
+    "GridBlockCellStart",
+    "SharedInfoCostTuple32",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -921,6 +984,41 @@ pub mod param_key {
     /// The draft revision of format 3, only while format 3 is being built
     /// ([`super::FORMAT_3_DRAFT_REVISION`]). Must understand.
     pub const DRAFT_REVISION: u32 = 10;
+    /// The request grid's cell spacing on the global lattice, in
+    /// [`super::LATTICE_TICKS_PER_DEGREE`] ticks: latitude in the low 32
+    /// bits, longitude in the high 32. Format 3; must understand.
+    pub const REQUEST_GRID_SPACING: u32 = 11;
+}
+
+/// Ticks of the global lattice per degree (a tick is 1/120″;
+/// `docs/design/format-3.md`, section 9.1). Every grid spacing divides it.
+pub const LATTICE_TICKS_PER_DEGREE: u32 = 432_000;
+/// Format 3's request grid spacing: 12″ in both axes.
+pub const REQUEST_GRID_SPACING_TICKS: u32 = 1_440;
+/// Cells per side of a request grid block ([`Section::GridBlocks`]).
+pub const GRID_BLOCK_CELLS: usize = 64;
+/// Cell starts a block holds in [`Section::GridBlockCellStart`].
+pub const GRID_BLOCK_STARTS: usize = GRID_BLOCK_CELLS * GRID_BLOCK_CELLS + 1;
+
+/// The [`Section::GridBlocks`] key of block `(block_lat, block_lng)`
+/// (lattice cell `(i, j)` is in block `(i.div_euclid(64), j.div_euclid(64))`):
+/// each index offset by 2^31, latitude in the high half, so keys sort as
+/// the blocks do, latitude first.
+pub const fn grid_block_key(block_lat: i32, block_lng: i32) -> u64 {
+    (((block_lat as u32) ^ (1 << 31)) as u64) << 32 | ((block_lng as u32) ^ (1 << 31)) as u64
+}
+
+/// The lattice cell index of `degrees` (a latitude or longitude, clamped to
+/// ±180°) for cells of `spacing` ticks: `floor(degrees × ticks per degree /
+/// spacing)`. The compiler and the engine both place points with it.
+pub fn lattice_cell(degrees: f64, spacing: u32) -> i32 {
+    let per_degree = f64::from(LATTICE_TICKS_PER_DEGREE / spacing.max(1));
+    let degrees = if degrees.is_nan() {
+        0.0
+    } else {
+        degrees.clamp(-180.0, 180.0)
+    };
+    (degrees * per_degree).floor() as i32
 }
 
 /// [`Section::PackageParams`] entry flag: an engine that doesn't know the
@@ -942,6 +1040,9 @@ pub struct PackageParams {
     /// Format 3's draft revision; `None` in format 2 (and in released
     /// format 3).
     pub draft_revision: Option<u64>,
+    /// Format 3's request grid spacing in lattice ticks, (latitude,
+    /// longitude); `None` in format 2, whose dense grid states its own.
+    pub request_grid_spacing: Option<[u32; 2]>,
 }
 
 impl PackageParams {
@@ -955,7 +1056,8 @@ impl PackageParams {
             | SAR_VEHICLE_ON_PATHS_MIN_FACTOR
             | DEFAULT_COMPONENT
             | REACH_CAP
-            | DRAFT_REVISION => Some(PARAM_MUST_UNDERSTAND),
+            | DRAFT_REVISION
+            | REQUEST_GRID_SPACING => Some(PARAM_MUST_UNDERSTAND),
             MODE_MASK_UNION => Some(0),
             _ => None,
         }
@@ -986,6 +1088,12 @@ impl PackageParams {
         if let Some(revision) = self.draft_revision {
             entries.push((DRAFT_REVISION, revision));
         }
+        if let Some([lat, lng]) = self.request_grid_spacing {
+            entries.push((
+                REQUEST_GRID_SPACING,
+                u64::from(lat) | (u64::from(lng) << 32),
+            ));
+        }
         entries
             .into_iter()
             .flat_map(|(key, value)| {
@@ -997,8 +1105,9 @@ impl PackageParams {
 
     /// Reads a [`Section::PackageParams`] section: entries sorted by key,
     /// known keys with their flags, every known key but the draft revision
-    /// present, an unknown must-understand key `TooNew`, and the draft
-    /// revision this build's ([`FORMAT_3_DRAFT_REVISION`]).
+    /// present, an unknown must-understand key `TooNew`, the draft revision
+    /// this build's ([`FORMAT_3_DRAFT_REVISION`]), and a request grid
+    /// spacing that divides a degree of the lattice in both axes.
     pub fn from_section(bytes: &[u8]) -> Result<Self, RoutingPackageError> {
         use param_key::*;
         let invalid = |message: String| RoutingPackageError::Invalid(message);
@@ -1078,6 +1187,19 @@ impl PackageParams {
             default_component: get_u32(DEFAULT_COMPONENT)?,
             reach_cap: get(REACH_CAP)?,
             draft_revision: values.get(&DRAFT_REVISION).copied(),
+            request_grid_spacing: Some({
+                let value = get(REQUEST_GRID_SPACING)?;
+                let spacing = [value as u32, (value >> 32) as u32];
+                if spacing
+                    .iter()
+                    .any(|ticks| *ticks == 0 || !LATTICE_TICKS_PER_DEGREE.is_multiple_of(*ticks))
+                {
+                    return Err(invalid(
+                        "the request grid spacing doesn't divide a degree".into(),
+                    ));
+                }
+                spacing
+            }),
         })
     }
 }
@@ -1131,7 +1253,7 @@ macro_rules! pod {
         impl Pod for $t {}
     )*};
 }
-pod!(u8, u16, u32, i32, u64, i64, f32, f64);
+pod!(u8, u16, u32, i32, u64, i64, f32, f64, [u64; 2]);
 
 pub(crate) enum Storage {
     Mapped(Mmap),
@@ -1649,6 +1771,107 @@ impl ProfileMasks<'_> {
     }
 }
 
+/// Byte offsets into a byte pool: format 2's u32 sections, format 3's u64
+/// ones ([`Section::ShapeStart64`], [`Section::AttrClassStart64`],
+/// [`Section::StringStart64`]).
+#[derive(Clone, Copy)]
+pub enum ByteOffsets<'g> {
+    Narrow(&'g [u32]),
+    Wide(&'g [u64]),
+}
+
+impl Default for ByteOffsets<'_> {
+    fn default() -> Self {
+        Self::Narrow(&[])
+    }
+}
+
+impl ByteOffsets<'_> {
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<u64> {
+        match self {
+            Self::Narrow(offsets) => offsets.get(index).map(|offset| u64::from(*offset)),
+            Self::Wide(offsets) => offsets.get(index).copied(),
+        }
+    }
+
+    /// The bytes `[offsets[index], offsets[index + 1])` of `pool`, if both
+    /// offsets are there and in order inside it.
+    #[inline]
+    pub fn range(&self, index: usize) -> Option<std::ops::Range<usize>> {
+        let start = usize::try_from(self.get(index)?).ok()?;
+        let end = usize::try_from(self.get(index.checked_add(1)?)?).ok()?;
+        (start <= end).then_some(start..end)
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Narrow(offsets) => offsets.len(),
+            Self::Wide(offsets) => offsets.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every offset, widened.
+    pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        (0..self.len()).filter_map(|index| self.get(index))
+    }
+
+    /// Whether the offsets start at 0, never decrease and end at `len`
+    /// (none at all is valid only when `allow_empty`).
+    pub fn bound(&self, len: usize, allow_empty: bool) -> bool {
+        if self.is_empty() {
+            return allow_empty;
+        }
+        self.get(0) == Some(0)
+            && self.iter().zip(self.iter().skip(1)).all(|(a, b)| a <= b)
+            && self.get(self.len() - 1) == Some(len as u64)
+    }
+}
+
+/// Each shared info's costing tuple row: format 2's u16
+/// [`Section::SharedInfoCostTuple`], format 3's u32
+/// [`Section::SharedInfoCostTuple32`].
+#[derive(Clone, Copy)]
+pub enum CostTuples<'g> {
+    Narrow(&'g [u16]),
+    Wide(&'g [u32]),
+}
+
+impl Default for CostTuples<'_> {
+    fn default() -> Self {
+        Self::Narrow(&[])
+    }
+}
+
+impl CostTuples<'_> {
+    #[inline]
+    pub fn get(&self, shared: usize) -> usize {
+        match self {
+            Self::Narrow(rows) => usize::from(rows[shared]),
+            Self::Wide(rows) => rows[shared] as usize,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Narrow(rows) => rows.len(),
+            Self::Wide(rows) => rows.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.len()).map(|shared| self.get(shared))
+    }
+}
+
 /// Per edge its profile bits and SAR bits: [`Section::EdgeProfileAccess`]
 /// (format 2: slot bits 0-5, SAR bits 6-7) or [`Section::EdgeAccess`]
 /// (format 3: slot bits 0-13, SAR bits 14-15).
@@ -2039,6 +2262,7 @@ impl PackageFile {
                 })?,
                 reach_cap: word(5).unwrap_or_default(),
                 draft_revision: None,
+                request_grid_spacing: None,
             }
         };
         let profiles = if header.version >= 3 {
@@ -2144,7 +2368,7 @@ impl PackageFile {
         // Name and ref tokens per attribute class (classes are checked
         // against the shared infos with the request sections).
         let token_rows = self
-            .slice::<u32>(Section::AttrClassStart)
+            .byte_offsets(Section::AttrClassStart, Section::AttrClassStart64)
             .len()
             .saturating_sub(1);
         // Format 3 implies the edge ids and drops format 1's reserved slots.
@@ -2214,14 +2438,25 @@ impl PackageFile {
             (Section::ComplexFirst, Some(c.complex_restriction_count)),
             (Section::ComplexByFirst, Some(c.complex_restriction_count)),
             (
-                Section::ShapeStart,
+                if format_3 {
+                    Section::ShapeStart64
+                } else {
+                    Section::ShapeStart
+                },
                 plus_one(c.shared_info_count.div_ceil(SHAPE_START_STRIDE)),
             ),
             (Section::SharedInfoCostFlags, Some(cost_rows)),
             (Section::SharedInfoCostClasses, Some(cost_rows)),
             (Section::SharedInfoSpeeds, mul(cost_rows, 3)),
             (Section::EdgeInferredSpeed, Some(c.edge_count)),
-            (Section::SharedInfoCostTuple, Some(c.shared_info_count)),
+            (
+                if format_3 {
+                    Section::SharedInfoCostTuple32
+                } else {
+                    Section::SharedInfoCostTuple
+                },
+                Some(c.shared_info_count),
+            ),
             (Section::SharedInfoLegalReason, Some(c.shared_info_count)),
             (Section::EdgeJunction, Some(c.edge_count)),
             (Section::NodeSourceIdLow, Some(source_ids)),
@@ -2252,12 +2487,16 @@ impl PackageFile {
             return invalid("exact node positions are invalid");
         }
         let tuples = cost_rows;
-        if tuples > MAX_COST_TUPLES
-            || (c.shared_info_count > 0 && tuples == 0)
-            || !all_of(self.slice::<u16>(Section::SharedInfoCostTuple), |tuple| {
-                usize::from(*tuple) < tuples
-            })
-        {
+        let max_tuples = if format_3 {
+            MAX_COST_TUPLES_3
+        } else {
+            MAX_COST_TUPLES
+        };
+        let rows_ok = match self.cost_tuples() {
+            CostTuples::Narrow(rows) => all_of(rows, |row| usize::from(*row) < tuples),
+            CostTuples::Wide(rows) => all_of(rows, |row| (*row as usize) < tuples),
+        };
+        if tuples > max_tuples || (c.shared_info_count > 0 && tuples == 0) || !rows_ok {
             return invalid("costing tuples are invalid");
         }
         let wide_shared = self.slice::<u32>(Section::SharedInfoWayWideShared);
@@ -2437,13 +2676,22 @@ impl PackageFile {
         {
             return invalid("conditional tag lists are invalid");
         }
-        let shape_starts = self.slice::<u32>(Section::ShapeStart);
-        if shape_starts.first().is_some_and(|first| *first != 0)
-            || shape_starts.windows(2).any(|pair| pair[0] > pair[1])
-            || shape_starts
-                .last()
-                .is_some_and(|last| *last as usize != self.sections[Section::ShapeBytes as usize].1)
-        {
+        let shape_bytes = self.sections[Section::ShapeBytes as usize].1;
+        let shapes_ok = match self.byte_offsets(Section::ShapeStart, Section::ShapeStart64) {
+            ByteOffsets::Narrow(starts) => {
+                starts.first().is_none_or(|first| *first == 0)
+                    && ascending(starts)
+                    && starts
+                        .last()
+                        .is_none_or(|last| *last as usize == shape_bytes)
+            }
+            ByteOffsets::Wide(starts) => {
+                starts.first().is_none_or(|first| *first == 0)
+                    && ascending(starts)
+                    && starts.last().is_none_or(|last| *last == shape_bytes as u64)
+            }
+        };
+        if !shapes_ok {
             return invalid("shape offsets are invalid");
         }
         let exact_shared = self.slice::<u32>(Section::ExactShapeShared);
@@ -2724,6 +2972,25 @@ impl PackageFile {
         }
     }
 
+    /// The byte offsets of format 2's `narrow` section or format 3's `wide`
+    /// one.
+    pub fn byte_offsets(&self, narrow: Section, wide: Section) -> ByteOffsets<'_> {
+        if self.format_version >= 3 {
+            ByteOffsets::Wide(self.slice(wide))
+        } else {
+            ByteOffsets::Narrow(self.slice(narrow))
+        }
+    }
+
+    /// Each shared info's costing tuple row.
+    pub fn cost_tuples(&self) -> CostTuples<'_> {
+        if self.format_version >= 3 {
+            CostTuples::Wide(self.slice(Section::SharedInfoCostTuple32))
+        } else {
+            CostTuples::Narrow(self.slice(Section::SharedInfoCostTuple))
+        }
+    }
+
     fn barrier_accesses(&self) -> BarrierAccesses<'_> {
         if self.format_version >= 3 {
             BarrierAccesses::Wide(self.slice(Section::BarrierAccess32))
@@ -2812,7 +3079,7 @@ impl PackageFile {
             edge_access: EdgeAccess(
                 self.profile_masks(Section::EdgeProfileAccess, Section::EdgeAccess),
             ),
-            shape_start: self.slice(Section::ShapeStart),
+            shape_start: self.byte_offsets(Section::ShapeStart, Section::ShapeStart64),
             shape_bytes: self.slice(Section::ShapeBytes),
             exact_shape_shared: self.slice(Section::ExactShapeShared),
             exact_shape_start: self.slice(Section::ExactShapeStart),
@@ -2820,7 +3087,7 @@ impl PackageFile {
             si_cost_flags: self.slice(Section::SharedInfoCostFlags),
             si_cost_classes: self.slice(Section::SharedInfoCostClasses),
             si_speeds: self.slice(Section::SharedInfoSpeeds),
-            si_cost_tuple: self.slice(Section::SharedInfoCostTuple),
+            si_cost_tuple: self.cost_tuples(),
             si_legal_reason: self.slice(Section::SharedInfoLegalReason),
             barrier_node: self.slice(Section::BarrierNode),
             barrier_class: self.slice(Section::BarrierClass),
@@ -2837,7 +3104,7 @@ impl PackageFile {
             conditional_shared: self.slice(Section::ConditionalShared),
             conditional_start: self.slice(Section::ConditionalStart),
             conditional_pool: self.slice(Section::ConditionalPool),
-            string_start: self.slice(Section::StringStart),
+            string_start: self.byte_offsets(Section::StringStart, Section::StringStart64),
             string_bytes: self.slice(Section::StringBytes),
             node_count: self.counts.node_count,
             edge_count: self.counts.edge_count,
@@ -3348,7 +3615,7 @@ pub struct Sections<'g> {
     pub edge_access: EdgeAccess<'g>,
     /// Byte offsets of every [`SHAPE_START_STRIDE`]th shape in
     /// `shape_bytes`, then its length.
-    pub shape_start: &'g [u32],
+    pub shape_start: ByteOffsets<'g>,
     pub shape_bytes: &'g [u8],
     pub exact_shape_shared: &'g [u32],
     pub exact_shape_start: &'g [u32],
@@ -3359,7 +3626,7 @@ pub struct Sections<'g> {
     pub si_cost_classes: &'g [u32],
     pub si_speeds: &'g [f32],
     /// Each shared info's costing tuple.
-    pub si_cost_tuple: &'g [u16],
+    pub si_cost_tuple: CostTuples<'g>,
     /// Each shared info's [`crate::sar::LegalReason`] byte.
     pub si_legal_reason: &'g [u8],
     /// The sorted barrier nodes, their SAR classes and their access in
@@ -3378,7 +3645,7 @@ pub struct Sections<'g> {
     pub conditional_shared: &'g [u32],
     pub conditional_start: &'g [u32],
     pub conditional_pool: &'g [u32],
-    pub string_start: &'g [u32],
+    pub string_start: ByteOffsets<'g>,
     pub string_bytes: &'g [u8],
     pub node_count: usize,
     pub edge_count: usize,
@@ -3706,7 +3973,7 @@ pub(crate) fn all_of<T: Sync>(values: &[T], ok: impl Fn(&T) -> bool + Sync) -> b
 }
 
 /// Whether `values` never decrease, checked in parallel.
-pub(crate) fn ascending(values: &[u32]) -> bool {
+pub(crate) fn ascending<T: PartialOrd + Sync>(values: &[T]) -> bool {
     use rayon::prelude::*;
     values
         .par_windows(2)
@@ -4016,7 +4283,7 @@ impl<'g> Sections<'g> {
     /// `si_cost_classes`, `si_speeds`).
     #[inline]
     pub fn cost_tuple(&self, shared: usize) -> usize {
-        usize::from(self.si_cost_tuple[shared])
+        self.si_cost_tuple.get(shared)
     }
 
     /// The node's position in E7 (rounded when it is not an exact E7 value;
@@ -4062,12 +4329,11 @@ impl<'g> Sections<'g> {
 
     /// String `id` of the package's string table.
     pub fn string(&self, id: u32) -> Option<&'g str> {
-        let id = id as usize;
-        let (start, end) = (
-            *self.string_start.get(id)? as usize,
-            *self.string_start.get(id + 1)? as usize,
-        );
-        std::str::from_utf8(self.string_bytes.get(start..end)?).ok()
+        std::str::from_utf8(
+            self.string_bytes
+                .get(self.string_start.range(id as usize)?)?,
+        )
+        .ok()
     }
 
     /// The `*:conditional` tags of shared info `shared` (empty for most).
@@ -4115,12 +4381,11 @@ impl<'g> Sections<'g> {
         }
         let shared = shared as usize;
         let block = shared / SHAPE_START_STRIDE;
-        let (Some(start), Some(end)) =
-            (self.shape_start.get(block), self.shape_start.get(block + 1))
+        let Some(bytes) = self
+            .shape_start
+            .range(block)
+            .and_then(|range| self.shape_bytes.get(range))
         else {
-            return;
-        };
-        let Some(bytes) = self.shape_bytes.get(*start as usize..*end as usize) else {
             return;
         };
         // The shapes before it in its block.
@@ -4656,6 +4921,56 @@ impl PackageWriter {
                 self.put(wide, wide_masks);
             }
         }
+    }
+
+    /// Puts byte offsets: format 2's u32 `narrow` section (refusing offsets
+    /// past 4 GiB) or format 3's u64 `wide` one.
+    pub fn put_byte_offsets(
+        &mut self,
+        narrow: Section,
+        wide: Section,
+        offsets: Vec<u64>,
+    ) -> Result<(), RoutingPackageError> {
+        match self.format {
+            PackageFormat::V2 => {
+                let narrow_offsets = offsets
+                    .into_iter()
+                    .map(u32::try_from)
+                    .collect::<Result<Vec<u32>, _>>()
+                    .map_err(|_| {
+                        RoutingPackageError::Unsupported(format!(
+                            "{} exceeds 4 GiB, which format 2 can't address",
+                            narrow.name()
+                        ))
+                    })?;
+                self.put(narrow, narrow_offsets);
+            }
+            PackageFormat::V3 => self.put(wide, offsets),
+        }
+        Ok(())
+    }
+
+    /// Puts each shared info's costing tuple row: format 2's u16
+    /// [`Section::SharedInfoCostTuple`] (refusing rows past
+    /// [`MAX_COST_TUPLES`]) or format 3's u32
+    /// [`Section::SharedInfoCostTuple32`].
+    pub fn put_cost_tuples(&mut self, rows: Vec<u32>) -> Result<(), RoutingPackageError> {
+        match self.format {
+            PackageFormat::V2 => {
+                let narrow = rows
+                    .into_iter()
+                    .map(u16::try_from)
+                    .collect::<Result<Vec<u16>, _>>()
+                    .map_err(|_| {
+                        RoutingPackageError::Unsupported(format!(
+                            "more than {MAX_COST_TUPLES} distinct costing tuples, which format 2 can't index"
+                        ))
+                    })?;
+                self.put(Section::SharedInfoCostTuple, narrow);
+            }
+            PackageFormat::V3 => self.put(Section::SharedInfoCostTuple32, rows),
+        }
+        Ok(())
     }
 
     /// Puts format 2's [`Section::EdgeProfileAccess`] bytes, or format 3's
@@ -5213,7 +5528,7 @@ mod check_tests {
                 assert!(ascending(&values));
                 assert!(distinct_below(&values, n));
                 assert!(all_of::<u32>(&[], |_| false));
-                assert!(ascending(&[]));
+                assert!(ascending::<u32>(&[]));
                 assert!(distinct_below(&[], 0));
                 for at in [0, CHECK_CHUNK - 1, CHECK_CHUNK, 2 * CHECK_CHUNK + 5, n - 1] {
                     assert!(!all_of(&values, |v| *v as usize != at), "{at}");
@@ -5231,5 +5546,51 @@ mod check_tests {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    /// Format 2 refuses offsets and tuple rows past its widths; format 3
+    /// writes them in its wide sections.
+    #[test]
+    fn the_writer_narrows_for_format_2_and_widens_for_format_3() {
+        let mut v2 = PackageWriter::in_memory();
+        let error = v2
+            .put_byte_offsets(Section::ShapeStart, Section::ShapeStart64, vec![0, 1 << 32])
+            .unwrap_err();
+        assert!(error.to_string().contains("4 GiB"), "{error}");
+        v2.put_byte_offsets(Section::StringStart, Section::StringStart64, vec![0, 7])
+            .unwrap();
+        let error = v2.put_cost_tuples(vec![0, 1 << 16]).unwrap_err();
+        assert!(error.to_string().contains("costing tuples"), "{error}");
+        v2.put_cost_tuples(vec![0, u32::from(u16::MAX)]).unwrap();
+        assert!(v2.sections[Section::StringStart as usize].is_some());
+        assert!(v2.sections[Section::StringStart64 as usize].is_none());
+        assert!(v2.sections[Section::SharedInfoCostTuple as usize].is_some());
+
+        let mut v3 = PackageWriter::in_memory().with_format(PackageFormat::V3);
+        v3.put_byte_offsets(Section::ShapeStart, Section::ShapeStart64, vec![0, 1 << 32])
+            .unwrap();
+        v3.put_cost_tuples(vec![0, 1 << 16]).unwrap();
+        assert!(v3.sections[Section::ShapeStart as usize].is_none());
+        assert!(v3.sections[Section::ShapeStart64 as usize].is_some());
+        assert!(v3.sections[Section::SharedInfoCostTuple as usize].is_none());
+        assert!(v3.sections[Section::SharedInfoCostTuple32 as usize].is_some());
+    }
+
+    #[test]
+    fn lattice_cells_and_block_keys_sort_south_to_north_then_west_to_east() {
+        assert_eq!(lattice_cell(0.0, REQUEST_GRID_SPACING_TICKS), 0);
+        assert_eq!(lattice_cell(-0.0001, REQUEST_GRID_SPACING_TICKS), -1);
+        assert_eq!(lattice_cell(1.0, REQUEST_GRID_SPACING_TICKS), 300);
+        assert_eq!(lattice_cell(-180.0, REQUEST_GRID_SPACING_TICKS), -54_000);
+        assert_eq!(lattice_cell(400.0, REQUEST_GRID_SPACING_TICKS), 54_000);
+        assert_eq!(lattice_cell(f64::NAN, REQUEST_GRID_SPACING_TICKS), 0);
+        let keys = [(-2, 5), (-1, -3), (-1, 0), (0, -1), (0, 0), (1, -9)]
+            .map(|(lat, lng)| grid_block_key(lat, lng));
+        assert!(keys.is_sorted() && keys.windows(2).all(|pair| pair[0] != pair[1]));
     }
 }

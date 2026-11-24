@@ -2,11 +2,12 @@
 
 Status: being built behind an off-by-default compiler switch (decision F1
 of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: steps 1 to 5 of section 12 (the tagged
+--package-format 3`, hidden). Done: steps 1 to 6 of section 12 (the tagged
 table, both hashes, `PackageParams`, retired reserved sections, implied ids;
 `ProfileSlots` and the u16 masks; versioned attribute-class records;
 `RegionInfo`, `NodeSourceId` and `contentHash` on the wire; node id = CCH
-rank with chains per cell and `CchCellTree`), draft revision 5. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
+rank with chains per cell and `CchCellTree`; u64 byte offsets, the lattice
+request grid and u32 cost tuple rows), draft revision 6. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
 before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
@@ -451,6 +452,7 @@ Scalars a query depends on, as sorted 16-byte entries `key u32, flags u32
 | 8 | package time zone, as a string id (W0, COMP 2's `--time-zone`) | yes, once W0 reads it |
 | 9 | ISO country code, as a string id | no |
 | 10 | draft revision (only while format 3 is being built on `main`, section 12) | yes |
+| 11 | request grid spacing in lattice ticks: latitude in the low 32 bits, longitude in the high 32; each must divide a degree (432,000 ticks, section 9) | yes |
 
 An unknown key with bit 0 set refuses the package (`TooNew`); others are
 skipped. `RequestMeta` (id 47) is retired: its node and shared-info id bases
@@ -541,6 +543,15 @@ by any 1.x engine.
 global lattice (ids 138 and 139, section 9.3); `GridEntries` (50) keeps its layout. `SharedInfoCostTuple` becomes u32 under a new id (+2.6 MB on
 Małopolskie; section 13).
 
+*As built (draft revision 6).* The wide sections are `ShapeStart64` (135),
+`AttrClassStart64` (136), `StringStart64` (137) and `SharedInfoCostTuple32`
+(142); 34, 56, 58 and 73 are retired in format 3. The reader takes either
+width behind one accessor, so the engine above the format crate sees no
+difference. Format 2 keeps u32 offsets and u16 rows, and its writer now
+refuses offsets past 4 GiB for every pool, not only the shapes (string and
+class offsets used to be cut to u32 silently). A format-3 package opens
+whatever its offsets' width needs, so the checks run on u64 values.
+
 ### 5.9 Net size
 
 On Małopolskie (*measured* section sizes, 184,954,112 bytes today):
@@ -554,19 +565,24 @@ On Małopolskie (*measured* section sizes, 184,954,112 bytes today):
 | u64 offsets | +596,340 |
 | `NodeSourceId` | +6,415,962 |
 | `CchCellTree` (20 B × 15,748 tree nodes) | +314,960 |
+| u32 cost tuple rows | +2,575,706 |
+| Lattice request grid (67 blocks; starts −387,344, entries −208,044) | −595,388 |
 | `ProfileSlots`, `PackageParams`, `RegionInfo`, table growth | under 10,000 |
-| **Total** | **−9.0 MB (−4.9 %)**; −4.8 MB (−2.6 %) if `CchRank` stays |
+| **Total** | **−7.1 MB (−3.8 %)**; −2.8 MB (−1.5 %) if `CchRank` stays |
 
-The sparse request grid isn't counted (Małopolskie's bounding box is mostly
-road-covered land, so it changes little there; it matters for continents).
+As built (draft revision 6) the format-3 package is 177,901,824 bytes,
+7,052,864 below format 2. The lattice grid changes little on Małopolskie,
+whose bounding box is mostly road-covered land; it matters for continents.
+Its 12″ cells are a little larger than format 2's 0.003° ones, so an entry
+meets fewer of them (1,724,113 entries against 1,776,124).
 
 ## 6. Section id registry
 
 | Ids | What | Presence |
 |---|---|---|
 | 0–93 | Format 2's slot numbers, for the sections that survive unchanged: `Metadata` 0, the graph, costs, restrictions, shapes, costing tuples, request sections, attribute classes, strings, junctions, barriers, `NodeXyzFixed`, piece bits, twins, lone in-edges | as today's checks |
-| retired | 6, 22, 24, 27, 28–31, 34, 47–49, 51, 52, 56, 58, 66, 70, 71, 79–85, 93 | never reused |
-| 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridCellStart` (block-relative u32), 140/141 `NodeSourceId` | mandatory |
+| retired | 6, 22, 24, 27, 28–31, 34, 47–49, 51, 52, 56, 58, 66, 70, 71, 73, 79–85, 93 | never reused |
+| 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridBlockCellStart` (block-relative u32), 140/141 `NodeSourceId`, 142 `SharedInfoCostTuple` (u32) | mandatory |
 | 256–319 | Regions: 256 `RegionInfo` (mandatory); reserved: 257 `RegionNeighbours`, 258 `NodeOwner`, 259 `PortalEdge`, 260 `PortalRef`, 261 `PortalClique` (param = column), 262 `PortalBound` (param = column), 263 `ComponentPortal` | optional |
 | 320–383 | Cells and stored potentials: 320 `CchCellTree` (written from format 3 on); reserved: 321 `CellDirectory`, 322 `CchFirstUp`, 323 `CchUpHead`, 324 `CchMetric` (param = column), 325 `InEdgeIndex` (SC-4) | optional |
 | 512–639 | Feature content: reserved 517 `DirectionalDestinations` (G4b), 518 `ConditionalTurnRestrictions` (W4), 519 `SharedInfoLimits` (P2); 512–516 and 520 are terrain, kept out of format 3 (`format-4.md`) | optional |
@@ -838,6 +854,23 @@ covered block. Memory follows the road network, not the bounding box, and a
 cell directory can page blocks with cells. Candidate order must not depend on
 the cell size. If it turns out to, the change shows in the baselines the bump
 re-records anyway (section 12).
+
+*As built (draft revision 6).* `PackageParams` key 11 states the spacing
+(1,440 ticks both ways), so a later build can change it without a new
+section. A block's key is its (row, column) block index, each half's sign
+bit flipped and the row in the high 32 bits, so keys sort south to north
+and then west to east; `GridBlocks` holds `key u64, base u64` per covered
+block, sorted by key without repeats, and `GridBlockCellStart` (139) holds
+4,097 block-relative u32 starts per block, cells in row-major order. A
+cell's entries are `GridEntries[base + start[c] .. base + start[c + 1]]`;
+the bases run from 0 without gaps, and the last block ends at the entry
+count. A lookup binary-searches the blocks a box meets. Both the compiler and
+the engine place a coordinate with `lattice_cell`, the floor of its degrees
+times the cells per degree. An entry covers the cells its shape segments'
+boxes meet, as in format 2. The open checks refuse unsorted or repeated
+keys, bases with gaps, starts that fall, don't start at 0 or don't come
+4,097 to a block, a last block that misses the entry count, and a spacing
+that is missing or doesn't divide a degree.
 
 ## 10. Width limits found at scale
 
