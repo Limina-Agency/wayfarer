@@ -15,6 +15,11 @@ terrain lane's brief (`off-road-sar/LANE-TERRX.md`) and its experiments
 (`off-road-sar/exp/`). Like the analyses format-3.md cites, these are project
 notes kept outside the repository.
 
+Newer data that models or hosts make after compile time (flood, rubble or
+land-cover rasters, voxel-graph projections) is not stored in these sections.
+It arrives as terrain layers on the same lattice and is fused with them per
+incident: see `terrain-layers.md`.
+
 ## 1. What it builds on from format 3
 
 - **The container.** The tagged section table, the REQUIRED and IDENTITY
