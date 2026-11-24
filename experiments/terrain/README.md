@@ -26,3 +26,10 @@ Spacing is in ticks of 1/120 arc-second (120 = 1", 360 = 3", 60 = 1/2").
   layers packed or run-length coded.
 - `scripts/`: block lists from the OSM boundary, the run matrix, independent numpy/rasterio
   checks, the byte-identity run across targets, and the GUGiK spacing study.
+
+## E4: pace models against OSM GPS traces
+
+`scripts/e4/`: fetch OSM public trackpoints (`fetch_traces.py`), OSM highway ways near the test areas
+(`osm_ways.py`, `coverage.py`), clean walking tracks into 50/100 m segments sampled on the `terrexp`
+lattices (`segments.py`), GUGiK LiDAR slopes in the E1 boxes (`lidar.py`), and the model comparison and
+fits (`fit.py`). `run_e4.sh` runs the whole thing. Results: `off-road-sar/exp/E4/README.md` in the project files.
