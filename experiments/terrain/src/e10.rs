@@ -422,7 +422,7 @@ pub fn run(args: &[String]) {
         loaded.push(back);
     }
     let t_files = tw.elapsed().as_secs_f64();
-    let all: Vec<&Layer> = loaded.iter().collect();
+    let all: Vec<(&Layer, [u8; 32])> = loaded.iter().map(|l| (l, l.content_hash())).collect();
     let prm = |t: i64, research: bool| Params { t, allow_research: research, feature_min_conf: 128, level_min_w: 128, spacing: SP };
 
     // ---- fusion and checks -----------------------------------------------------------------
@@ -442,7 +442,7 @@ pub fn run(args: &[String]) {
 
     // incremental: fuse without the drone layers, then re-fuse only the blocks they touch
     let drone: Vec<&Layer> = vec![&loaded[4], &loaded[5], &loaded[6]];
-    let without: Vec<&Layer> = all.iter().copied().filter(|l| !drone.iter().any(|d| std::ptr::eq(*d, *l))).collect();
+    let without: Vec<(&Layer, [u8; 32])> = all.iter().copied().filter(|l| !drone.iter().any(|d| std::ptr::eq(*d, l.0))).collect();
     let (mut inc, _) = fuse::fuse(&base, &without, &overlay, &prm(T, false), None);
     let mut touched: BTreeSet<BlockId> = BTreeSet::new();
     for d in &drone {
@@ -459,14 +459,14 @@ pub fn run(args: &[String]) {
     let incremental_ok = fuse::hash_blocks(&inc) == rec.fused;
 
     // zero-confidence layer is a no-op on the fused state
-    let no_zero: Vec<&Layer> = all.iter().copied().filter(|l| !std::ptr::eq(*l, &loaded[9])).collect();
+    let no_zero: Vec<(&Layer, [u8; 32])> = all.iter().copied().filter(|l| !std::ptr::eq(l.0, &loaded[9])).collect();
     let (_, rec_nz) = fuse::fuse(&base, &no_zero, &overlay, &prm(T, false), None);
     let zero_ok = rec_nz.fused == rec.fused;
 
     // after the flood window closes, the flood layers change nothing
     let t_late = 1_796_601_600; // 2026-12-07
     let (_, rec_late) = fuse::fuse(&base, &all, &overlay, &prm(t_late, false), None);
-    let no_flood: Vec<&Layer> = all.iter().copied().filter(|l| l.m.model_id != "m2-s1-flood" && l.m.model_id != "m2-s1-flood-depth").collect();
+    let no_flood: Vec<(&Layer, [u8; 32])> = all.iter().copied().filter(|l| l.0.m.model_id != "m2-s1-flood" && l.0.m.model_id != "m2-s1-flood-depth").collect();
     let (_, rec_late_nf) = fuse::fuse(&base, &no_flood, &overlay, &prm(t_late, false), None);
     let expiry_ok = rec_late.fused == rec_late_nf.fused && rec_late.fused != rec.fused;
     let t_fade = 1_795_629_600; // 2026-11-25 18:00, inside the flood's fade

@@ -271,13 +271,13 @@ fn contributes(l: &Layer, prm: &Params) -> bool {
 }
 
 /// Fuse `only` (a subset of the base blocks, or all when None). Returns blocks in base order.
-pub fn fuse(base: &Base, layers_in: &[&Layer], overlay: &[OverlayItem], prm: &Params, only: Option<&[BlockId]>)
+/// Each layer comes with its content hash (`Layer::content_hash`, checked when it was read).
+pub fn fuse(base: &Base, layers_in: &[(&Layer, [u8; 32])], overlay: &[OverlayItem], prm: &Params, only: Option<&[BlockId]>)
     -> (Vec<(BlockId, FusedBlock)>, Record) {
     // Which layers apply, in fusion order.
     let mut active: Vec<(i64, [u8; 32], &Layer)> = Vec::new();
     let mut ignored = Vec::new();
-    for l in layers_in {
-        let h = l.content_hash();
+    for &(l, h) in layers_in {
         let m = &l.m;
         let why = if !(m.valid_from <= prm.t && prm.t < m.valid_until) {
             Some("outside its validity window at T")
