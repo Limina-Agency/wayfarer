@@ -1,7 +1,12 @@
 # Wayfarer roadmap to 1.0
 
 Status: proposal, written against 0.1.3 (2026-11-17), updated on
-2026-11-19 after the 0.2.0 release and on 2026-11-23 after 0.4.0. Section
+2026-11-19 after the 0.2.0 release, on 2026-11-23 after 0.4.0 and on
+2026-11-24 with the plan to 0.7: format 3 ships in 0.7, the work to it runs
+as three tranches (0.5, 0.6, 0.7, section 7.13), off-road terrain goes to
+format 4 (`docs/design/format-4.md`), and the search-and-rescue planning
+crate stays on its own branch until the next major release is prepared
+(3.2). Section
 2.1 says what 0.2.0 shipped, 2.2 what 0.3.0 and 0.4.0 shipped and what is
 on `main` for 0.5; items in section 7 that are done say so and name their
 pull requests. The API-0 decisions (`docs/design/api-0-decisions.md`) and
@@ -147,7 +152,15 @@ table behind an off-by-default compiler switch (#82), two-phase snapping
 multi-origin isochrones (FEAT-A2 core, #85), parallel customization (#86),
 structured guidance with modifiers, exit numbers and signs (FEAT-G0,
 FEAT-G4a, #87), path-order sums (#90), and fastest-time isochrones as an
-option (FEAT-A10, #91).
+option (FEAT-A10, #91). Since then (2026-11-24): format 3 profile slots,
+versioned attribute-class records, region info and identity, and
+cell-major numbering, all behind the compiler switch (FMT 2 to FMT 5, #88,
+#92, #96, #101); approach offsets in the CCH potentials (QW-3, #93);
+discounted matrices bounded by the request's own costs (M4, M5, #94);
+bicycle-only ways closed to walkers and busways to cars (FEAT-P0a, P0d,
+#97); the first-route work's parallel CCH topology build and parallel
+checks at open (#98, #102); a walking pace model with team GPX calibration
+(#99); and the terrain layouts moved to a format 4 draft (#95).
 
 ## 3. Gap analysis
 
@@ -203,6 +216,17 @@ These are where Wayfarer can lead rather than catch up:
 - **Terrain-aware walking.** `OnFoot`/`Legged` would gain the most from
   elevation (Tobler-style hiking speed).
 
+**How this work is organised (2026-11-24).** Search-and-rescue planning
+(reach prediction, team plans and coverage in a `wayfarer-sar` crate, with
+CLI commands and C entry points) is developed on its own branch,
+`feat/sar-reach-and-coverage`, kept rebased on `main`, and is not merged
+into `main` until the next major release is being prepared. Off-road
+terrain (DEM, land cover, linear features, cost surfaces) is explored by a
+terrain lane on open data (`exp/terrain-*` branches, sidecar terrain
+files) and lands in package format 4 (7.2). What `main` gains in the
+meantime is what both build on: costed access legs (FEAT-X1), the walking
+pace model (#99) and the analysis tools (FEAT-A).
+
 ## 4. The 1.0 stability contract
 
 | Surface | 0.1 today | At 1.0 | Rule within 1.x |
@@ -210,7 +234,7 @@ These are where Wayfarer can lead rather than catch up:
 | Rust API | 9 crates, all 0.x, wide re-exports | A named set of public crates (proposal below); the rest internal | semver; `cargo-semver-checks` in CI |
 | JSON wire format | Follows the engine crate; no version field | `apiVersion` in requests/results; schemas published per version | Additive only: new optional fields, new enum values (clients must tolerate unknowns) |
 | C ABI | ABI 1 | ABI 2, designed once (FFI-4) | Additive only: new functions, never changed signatures |
-| Package format | Format 1, reads N-1 for one release (format 2 on `main`, reads only 2) | Format 3 frozen at 1.0, with an optional-section table and region identity so regions and cells come in 1.x without a new format (6.7) | Every 1.x engine reads every package a 1.x compiler wrote |
+| Package format | Format 1, reads N-1 for one release (format 2 on `main`, reads only 2) | The format current at the 0.90 freeze, frozen at 1.0: format 3 (0.7), with an optional-section table and region identity so regions and cells come in 1.x without a new format (6.7), and format 4 once the terrain sections land (7.2) | Every 1.x engine reads every package a 1.x compiler wrote |
 | Costing model | Model 1; older models re-costed | Versioned separately | A model change never needs a new engine to open old packages |
 | Determinism | Same bytes on every platform | Same | Same |
 
@@ -474,9 +498,9 @@ it. The plan grows it in stages, each usable on its own:
    motorroads come first and need no new data (X2-lite: derived from edges
    already in the package through the request grid). The rest needs new
    data, because the compiler keeps only highway and ferry ways: a compact
-   barrier-line index as a format-3 optional section; candidates whose
+   barrier-line index, one of format 4's terrain sections; candidates whose
    straight line crosses a barrier are dropped.
-3. **X3, terrain-aware pace (P1 for SAR, format 3).** Access legs are priced
+3. **X3, terrain-aware pace (P1 for SAR, format 4).** Access legs are priced
    by slope (Tobler) on a coarse DEM grid in the package (FEAT-T4) and by
    land cover read from the same PBF (wood, scrub, wetland, scree). Land
    cover is its own item (X3a, L): the compiler assembles no polygons today,
@@ -497,7 +521,11 @@ it. The plan grows it in stages, each usable on its own:
 X1 is additive and can land any time. R7 then becomes X1 with SAR reporting
 (FEAT-X6): a `costed` opt-in with X1, then the default flips inside the API
 window with a migration note. X2 proper, X3a and the DEM grid need sections
-and land as format-3 optional sections. Nothing here needs the regions work,
+and land in format 4 (`docs/design/format-4.md`); format 3 freezes without
+them. Until then the terrain lane reads terrain from sidecar files on the
+global lattice, so X3 and X4 can be tried without a format change, and it
+measures sources, encodings and cost surfaces on open data before format
+4's layouts are fixed. Nothing here needs the regions work,
 and the regions work doesn't need it, but two hooks must be in the 1.0
 formats: connectors and endpoint candidates are region-qualified on the
 wire, and the DEM and raster grids use one global lattice (fixed arc-second
@@ -688,8 +716,10 @@ of **gates** at fixed versions says when breaking changes stop.
   minor bumps; patches (`0.x.y`) are fixes only.
 - **Breaking items carry a migration note** and, where possible, deprecate in
   one release and remove in the next.
-- **At most one package-format bump per ten versions**, and the engine keeps
-  reading the previous format (section 4).
+- **Package-format bumps.** The earlier rule of at most one bump per ten
+  versions is relaxed for 0.x (2026-11-23): format 3 ships in 0.7 and
+  format 4 (terrain) follows when it is ready. The engine keeps reading the
+  previous format for at least one release (format 2 through 0.8).
 - **Lanes don't block each other** except where a dependency is written down
   (7.12).
 
@@ -700,7 +730,8 @@ of **gates** at fixed versions says when breaking changes stop.
 | Tooling on | by 0.5 | Semver, schema and C header diffs run on every PR (informational) |
 | API redesign window | 0.10 – 0.39 | The API lane's breaking items land here, one area per release |
 | Breaking cut-off | 0.80 | After this, only the hardening review may break anything |
-| Format 3 | one release, 0.12 – 0.39 | The only package-format bump left before 1.0 (format 2 shipped in 0.2). It carries the changes to existing layouts and the optional-section table; content sections (elevation, barriers, land cover, bicycle data, cells) follow as optional sections without another bump (7.12) |
+| Format 3 | 0.7 | Built behind an off-by-default compiler switch through 0.5 and 0.6, then the default in 0.7, with stored potentials so the first route costs about one search. It carries the changes to existing layouts and the optional-section table; non-terrain content sections (bicycle data, truck limits, directional destinations, conditional turns, cells) follow as optional sections without another bump (7.12) |
+| Format 4 | after the terrain experiments, before 0.80 | Terrain: road elevation, the DEM grid, land cover, linear features and steepness (`docs/design/format-4.md`), with layouts set from the terrain lane's measurements. Whether it is a version bump or optional sections added to format 3 is still open; the layouts are the same either way |
 | Freeze | 0.90 | API, wire format, C ABI, package format and costing model frozen; diffs become blocking; releases are candidates |
 | 1.0 | — | Stability contract (section 4) published and enforced |
 
@@ -803,7 +834,7 @@ Sub-lanes run independently of each other.
 | Id | Item | Pri | Depends on |
 |---|---|---|---|
 | FEAT-T0 | Incline costing scaffold on OSM `incline` (format 2, opt-in), plumbing for T2; `incline_percent` in edge attributes. `inclinePercent` in edge attributes since 0.4 (#71); costing open | P2 | — |
-| FEAT-T1 | DEM ingest at compile time (SRTM HGT, GeoTIFF; integer sampling), per-segment climb, descent and Tobler factor (about 6 % of the package). Reader and sampler behind `experimental-elevation` first; storage as a format-3 optional section | P1 | REG-3 for storage |
+| FEAT-T1 | DEM ingest at compile time (SRTM HGT, GeoTIFF; integer sampling), per-segment climb, descent and Tobler factor (about 6 % of the package). Reader and sampler behind `experimental-elevation` first (the terrain lane's reader, `exp/terrain-reader`); storage in format 4 | P1 | format 4 for storage |
 | FEAT-T2 | Elevation costing on foot (Tobler) for `OnFoot` and `Legged` (costing model 2 only in packages with elevation); elevation profile in results | P1 | FEAT-T1 |
 | FEAT-T3 | Vehicle grade costing | P2 | FEAT-T1 |
 | FEAT-T4 | Coarse DEM grid (3″, global lattice) in the package for off-network legs | P1 | FEAT-T1, REG-3, REG-11 |
@@ -816,8 +847,8 @@ Sub-lanes run independently of each other.
 | FEAT-X1 | Costed access legs (M): endpoint `offNetwork` option on the existing candidate seeds, a cost factor on top of time, access costs as potential offsets, the stretch counted in totals; walkers too; matrix and isochrone origins | P1 | approach offsets (QW-3), two-phase snapping (QW-2) |
 | FEAT-X1b | Automatic choice between a direct and a routed leg | P1 | FEAT-X1 |
 | FEAT-X2a | X2-lite: access legs don't cross motorways and trunk motorroads, derived from package edges (no format change) | P1 | FEAT-X1 |
-| FEAT-X2 | Access legs don't cross water, rail or fences, from a barrier-line optional section (M–L) | P1 | REG-3 |
-| FEAT-X3a | Land cover: polygons and multipolygons assembled in the compiler, rasterized into an optional section (L) | P1 | REG-3, REG-11 |
+| FEAT-X2 | Access legs don't cross water, rail or fences, from a linear-features section in format 4 (M–L) | P1 | format 4 |
+| FEAT-X3a | Land cover: WorldCover with OSM on top (the terrain lane's E3), rasterized onto the global lattice, in format 4 (L) | P1 | format 4, REG-11 |
 | FEAT-X3 | Terrain-aware access pace: Tobler on the coarse DEM grid, land cover (M) | P1 | FEAT-T4, FEAT-X3a |
 | FEAT-X4 | Least-cost access paths over a local friction raster, fed as candidate seeds (L) | P2 | FEAT-X3 |
 | FEAT-X5a | Isochrones spreading off the network (L) | P2 | FEAT-X4 |
@@ -971,16 +1002,20 @@ The ones that decide ordering:
   format and the wire are frozen.
 - **EXP-5b → REG-3.** A seam is prototyped before format 3's region sections
   are fixed.
-- **One format-3 bump, layout changes only.** Format 2 cannot carry an
-  optional section (exact section count, strict `LegAttrs`), so the bump
+- **One format-3 bump, layout changes only, in 0.7.** Format 2 cannot carry
+  an optional section (exact section count, strict `LegAttrs`), so the bump
   carries REG-3's section table and `RegionInfo`, the profile slot table
   and u16 access and restriction masks (FEAT-P1's prerequisite), a versioned
-  `LegAttrs`, and REG-13's cell-major numbering. Content sections (FEAT-T1
-  and T4, FEAT-X2, X3a, FEAT-G4b, FEAT-W4, truck limits, REG-10 and REG-13's
-  directory) follow as optional sections, one release at a time. Format 2
-  shipped in 0.2, so the bump lands no earlier than 0.12.
+  `LegAttrs`, REG-13's cell-major numbering, and the stored CCH topology and
+  metrics that remove customization from the first route. Non-terrain
+  content sections (FEAT-G4b, FEAT-W4, truck limits, REG-10 and REG-13's
+  directory) follow as optional sections, one release at a time.
+- **Terrain goes to format 4.** FEAT-T1 and T4, FEAT-X2, X3a and the
+  steepness layer are format 4's sections (`docs/design/format-4.md`),
+  designed from the terrain lane's measurements; until then terrain is read
+  from sidecar files on the global lattice.
 - **FEAT-T4, FEAT-X3a → FEAT-X3.** Terrain-aware access legs need the DEM
-  grid and land cover.
+  grid and land cover (format 4, or the sidecar files before it).
 - **QW-3, QW-2 → FEAT-X1.** Access costs as potential offsets, and snapping
   that doesn't grow with the radius squared.
 
@@ -993,11 +1028,14 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.2 | Released 2026-11-19: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
-| 0.5 | Under way: format 3 behind an off-by-default switch (FMT 1 on `main`), FEAT-A2 core, FEAT-A10, FEAT-G0 and G4a, two-phase snapping (QW-2), parallel customization, matrix and compile speed-ups (all on `main`); then FEAT-D2 (clip), approach offsets (QW-3), the route request options, lean leg records; FEAT-P0a, P0d and W0 (decisions D2 and D3 taken); FEAT-X1 after QW-2 and QW-3 |
-| 0.6 – 0.9 | FEAT-X1 if not in 0.5, X2a, X1b, A1, A3, A8, A5, D3, G5a; FEAT-T1 reader behind `experimental-elevation`; API-0b (builders, `apiVersion` and `warnings`, one release tag); QA-2 and QA-3 scheduled; QA-4 |
+| 0.5 | Tranche 1, under way: first route roughly halved without a format change (parallel CCH topology #98, parallel checks at open #102, then an opt-in background warm-up); FEAT-X1 costed access legs with the X6 `costed` flag after QW-2 and QW-3 (#83, #93); FEAT-A10 (#91) and A1 polygons; the route request options; FEAT-D2 (clip); FEAT-P0a and P0d (#97); format 3 built behind the switch (FMT 1 to FMT 5 on `main`); also on `main`: FEAT-A2 core, FEAT-G0 and G4a, parallel customization, matrix and compile speed-ups, the walking pace model (#99) |
+| 0.6 | Tranche 2: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D3 (several extracts); lean leg records; stored potentials and the last format-3 layouts behind the switch; API-0b (builders, `apiVersion` and `warnings`, one release tag) |
+| 0.7 | Tranche 3: format 3 as the default, with stored CCH topology and metrics (the first route costs about one search); format 2 still read through 0.8 |
+| 0.8 – 0.9 | Format-3 optional sections as each is ready (FEAT-P1, P2 extras, G4b, W4); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
-| 0.12 – 0.2x | API-3, API-4, API-5; format 3 (layout changes only); FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
-| After the bump | Optional sections as each is ready: FEAT-T1/T2/T4/T5, X2, X3a then X3, P1, P2 extras, G4b, W4 |
+| 0.12 – 0.2x | API-3, API-4, API-5; FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), with the default isochrone order (cost or fastest time), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
+| Format 4 | Terrain, once the terrain lane's measurements are in and before 0.80: FEAT-T1/T2/T4/T5, X2, X3a then X3, then X4 and X5a on the incident cost surface |
+| Next major release | The search-and-rescue planning crate (`wayfarer-sar`: reach, team plans, coverage) merges from its branch when that release is prepared |
 | … | further items as they are ready |
 
 After the API window closes, releases carry PERF, FFI, FEAT and QA items until
@@ -1016,6 +1054,9 @@ functions. One thread per lane, one PR in flight per lane.
 | Profiles, access, time | road-graph tags, types and restriction resolution, `wayfarer-costing`, restriction masks in the compiler and `graph_access.rs` | FEAT-P0c, then P0b and the parser fixes; P0a/P0d; W0 | 0.3, 0.4 |
 | Legs, guidance, output | `guidance.rs`, `route_leg.rs`, `navigation.rs`, result assembly in `trip.rs`, polyline code | FEAT-G3 and multi-leg maneuvers; PERF-13; FFI-6 with `include`; G0 and G4a | 0.3, 0.4 |
 | Search core and memory | `package/search.rs`, `search/patch.rs`, `package/cch.rs`, `package/mod.rs` open path, `reference.rs` | REG-12; PERF-14 to PERF-16; approach offsets; FEAT-X1 | 0.4, 0.5 |
+| First route | the CCH topology build, open-time checks, warm-up, stored potentials | parallel topology (#98) and checks (#102); background warm-up; stored topology and metrics in format 3 | 0.5 – 0.7 |
+| Terrain (exploration) | `exp/terrain-*` branches, sidecar terrain files, experiment notes | DEM and land-cover readers, pace calibration, cost surfaces, switching rules, the ML layer contract | until format 4 |
+| Search and rescue planning | `wayfarer-sar` on `feat/sar-reach-and-coverage`, kept rebased on `main` | reach prediction, team plans, coverage, CLI and C entry points | merges at the next major release |
 | Analysis tools | `isochrone.rs`, `types/analysis.rs`, new trip and polygon modules | FEAT-A4, A9, A11, A7; A2; A10, A1, A3, A8, A5 | 0.4 – 0.8 |
 | Compiler options and data | compiler way collection, `CompileRequest`, CLI compile | input fixes; `#[non_exhaustive]` and baked profiles; D2; D3 | 0.4 – 0.7 |
 | Regions and scale | new `regions` module behind `experimental-regions`, `cch_order.rs`, design docs | EXP-5b step 1; REG-2; the format-3 design; EXP-5b step 2 | 0.5 – 0.11 |
@@ -1087,9 +1128,10 @@ entries are collected in the release PR.
     vehicles), default radius and candidate count for FEAT-X1.
 18. ~~Format 3 shape.~~ Answered (format-3 decision D5): optional sections
     with a per-section REQUIRED flag, u16 profile access with a slot table.
-19. **Elevation data.** SRTM/NASADEM (public domain) or Copernicus GLO-30
-    (attribution, a surface model) as the default DEM? Wait for format 3
-    (proposal) or bend format 2's `Reserved12`?
+19. **Elevation data.** Partly answered (2026-11-24): terrain storage waits
+    for format 4, with sidecar files until then. The default DEM (GEM-15,
+    CC BY 4.0; Copernicus GLO-30; SRTM/NASADEM) is chosen from the terrain
+    lane's measurements.
 20. **Isochrone semantics.** Keep cost-ordered time contours or move to
     fastest-time (FEAT-A10)? Proposal: an option now, the default in API-7.
 21. **Guidance rendering.** Hybrid (keys are the contract, bundled
