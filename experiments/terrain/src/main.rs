@@ -11,6 +11,7 @@ mod encode;
 mod landcover;
 mod lattice;
 mod mosaic;
+mod osm;
 mod raster;
 
 use encode::{Pred, Units};
@@ -255,10 +256,15 @@ fn cmd_lc(args: &[String]) {
     let mut pix = 0u64;
     let mut stored = Vec::new();
     let mut raw = std::io::BufWriter::new(std::fs::File::create(format!("{out}/posts_class.u8")).unwrap());
+    // E3: purity per post as two u8 (majority count, valid pixels); at most 9 x 9 pixels at 3".
+    let mut pur = std::io::BufWriter::new(std::fs::File::create(format!("{out}/posts_purity.u8")).unwrap());
     let mut bl = std::io::BufWriter::new(std::fs::File::create(format!("{out}/blocks.txt")).unwrap());
     for (b, r) in &res {
         writeln!(bl, "{} {}", b.bi, b.bj).unwrap();
         raw.write_all(&r.class).unwrap();
+        for p in 0..BLOCK_POSTS {
+            pur.write_all(&[r.maj[p].min(255) as u8, r.total[p].min(255) as u8]).unwrap();
+        }
         for p in 0..BLOCK_POSTS {
             hist[r.class[p] as usize] += 1;
             pix += r.total[p] as u64;
@@ -280,6 +286,7 @@ fn cmd_lc(args: &[String]) {
         stored.push((*b, rn));
     }
     raw.flush().unwrap();
+    pur.flush().unwrap();
     let (fsz, fh) = write_container(&format!("{out}/lc_runs.wte"), 3, 2, s, &stored);
     println!("{{");
     println!("  \"cmd\": \"lc\", \"dir\": \"{dir}\", \"blocks_file\": \"{bfile}\", \"spacing_ticks\": {st}, \"tiles\": {names:?},");
@@ -289,6 +296,42 @@ fn cmd_lc(args: &[String]) {
     println!("  \"packed_bytes\": {packed}, \"runs_bytes\": {runs}, \"packed_zlib_bytes\": {zp}, \"runs_zlib_bytes\": {zr}, \"index_bytes\": {},", stored.len() * 16);
     println!("  \"file_runs\": {{\"bytes\": {fsz}, \"blake3\": \"{fh}\"}},");
     println!("  \"threads\": {}, \"t_read_s\": {t_read:.2}, \"t_resample_s\": {t_res:.2}, \"t_total_s\": {:.2}", rayon::current_num_threads(), t0.elapsed().as_secs_f64());
+    println!("}}");
+}
+
+/// E3: OSM land-cover areas onto the lattice. Writes `posts_fine.u8` (fine OSM class per
+/// post), `posts_cov.u8` (covered samples 0-16) and `blocks.txt`, in block-list order.
+fn cmd_osm(args: &[String]) {
+    let (pbf, bfile, st, out) = (&args[0], &args[1], args[2].parse::<i64>().unwrap(), &args[3]);
+    let s = Spacing::new(st).unwrap();
+    let blocks = lattice::read_blocks(bfile).unwrap();
+    std::fs::create_dir_all(out).unwrap();
+    let t0 = Instant::now();
+    let (res, stats) = osm::rasterize(pbf, s, &blocks);
+    let mut fine = std::io::BufWriter::new(std::fs::File::create(format!("{out}/posts_fine.u8")).unwrap());
+    let mut cov = std::io::BufWriter::new(std::fs::File::create(format!("{out}/posts_cov.u8")).unwrap());
+    let mut bl = std::io::BufWriter::new(std::fs::File::create(format!("{out}/blocks.txt")).unwrap());
+    let mut hist = [0u64; 32];
+    let mut covh = [0u64; 17];
+    let mut h = blake3::Hasher::new();
+    for (b, r) in &res {
+        writeln!(bl, "{} {}", b.bi, b.bj).unwrap();
+        fine.write_all(&r.class).unwrap();
+        cov.write_all(&r.cov).unwrap();
+        h.update(&r.class);
+        h.update(&r.cov);
+        for p in 0..BLOCK_POSTS {
+            hist[r.class[p] as usize] += 1;
+            covh[r.cov[p] as usize] += 1;
+        }
+    }
+    println!("{{");
+    println!("  \"cmd\": \"osm\", \"pbf\": \"{pbf}\", \"blocks_file\": \"{bfile}\", \"spacing_ticks\": {st}, \"blocks\": {},", res.len());
+    println!("  \"stats\": \"{stats:?}\",");
+    println!("  \"fine_hist\": {{{}}},", osm::FINE_NAMES.iter().zip(hist.iter()).map(|(n, c)| format!("\"{n}\": {c}")).collect::<Vec<_>>().join(", "));
+    println!("  \"cov_hist\": {covh:?},");
+    println!("  \"blake3\": \"{}\",", h.finalize().to_hex());
+    println!("  \"threads\": {}, \"t_total_s\": {:.2}", rayon::current_num_threads(), t0.elapsed().as_secs_f64());
     println!("}}");
 }
 
@@ -336,6 +379,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("dem") => cmd_dem(&args[2..]),
         Some("lc") => cmd_lc(&args[2..]),
+        Some("osm") => cmd_osm(&args[2..]),
         Some("dump") => cmd_dump(&args[2..]),
         Some("bench") => cmd_bench(&args[2..]),
         _ => eprintln!("usage: terrexp dem|lc|dump ..."),

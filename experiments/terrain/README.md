@@ -26,3 +26,14 @@ Spacing is in ticks of 1/120 arc-second (120 = 1", 360 = 3", 60 = 1/2").
   layers packed or run-length coded.
 - `scripts/`: block lists from the OSM boundary, the run matrix, independent numpy/rasterio
   checks, the byte-identity run across targets, and the GUGiK spacing study.
+
+## E3 (land cover)
+
+    target/release/terrexp osm <pbf> <blocks.txt> <spacing-ticks> <out-dir> [--threads N]
+
+- `src/osm.rs`: OSM closed ways and multipolygon relations (rings joined by end nodes, even-odd
+  fill, smaller area on top) sampled 4x4 per post in exact integer arithmetic; writes
+  `posts_fine.u8` (31 fine classes) and `posts_cov.u8` (covered samples 0-16).
+- `terrexp lc` also writes `posts_purity.u8` (majority count and valid pixels per post).
+- `scripts/e3/`: BDOT10k onto the lattice (reference), the independent OSM check, the evaluation
+  against BDOT10k and the fused-layer sizes. Results: `off-road-sar/exp/E3/README.md`.
