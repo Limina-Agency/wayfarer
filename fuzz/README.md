@@ -35,11 +35,12 @@ overflow checks, which the release-mode build `cargo fuzz` makes by default
 leaves off, so arithmetic on hostile header counts panics instead of wrapping
 silently. Embedders that build with overflow checks would hit the same panic.
 
-The "Gate and fuzz" workflow (`.github/workflows/nightly.yml`, started by
-hand from the Actions tab) runs `scripts/fuzz-nightly.sh`: every target at
-once, with `--debug-assertions`, the seeds, dictionaries and a compiled Monaco
-package seed, for 30 minutes each by default, on corpora it keeps in the
-Actions cache and minimizes after each run.
+The "Gate and fuzz" workflow (`.github/workflows/nightly.yml`, every night at
+02:23 UTC on `main`, or by hand from the Actions tab) runs
+`scripts/fuzz-nightly.sh`: every target at once, with `--debug-assertions`,
+the seeds, dictionaries and a compiled Monaco package seed, for 30 minutes
+each by default, on corpora it keeps in the Actions cache and minimizes after
+each run.
 A crash fails the run and uploads `fuzz/artifacts` and the logs as the
 artifact `fuzz-artifacts-<run>`. Locally, `FUZZ_TOOLCHAIN=nightly
 scripts/fuzz-nightly.sh 60` runs the same for a minute per target.

@@ -1,9 +1,11 @@
 name: Gate and fuzz
 
 # The slow runs that stay off developer machines, on in-repo fixtures only
-# (no large downloads). Manual only (Actions > Gate and fuzz > Run workflow):
-# no schedule, so it uses no CI minutes unless started, and it runs on
-# GitHub-hosted runners, free for public repositories.
+# (no large downloads). Runs every night at 02:23 UTC on main, and by hand
+# (Actions > Gate and fuzz > Run workflow) with a choice of jobs and fuzz
+# minutes. GitHub-hosted runners are free for public repositories. Running
+# daily also keeps the Actions caches (corpora, the release's gate binaries)
+# alive: GitHub evicts an entry after 7 days without use.
 # - gate: the Kraków centre regional gate, latency by request class, and
 #   gates.sh timing against the last release on the same package, recorded
 #   in the job summary and a 90-day artifact (benchmarks/gates/nightly.sh).
@@ -15,6 +17,8 @@ name: Gate and fuzz
 # REGION=malopolskie MALOPOLSKIE_PBF=<extract> benchmarks/gates/nightly.sh.
 
 on:
+  schedule:
+    - cron: "23 2 * * *" # 02:23 UTC daily, on the default branch
   workflow_dispatch:
     inputs:
       fuzz_minutes:
@@ -29,6 +33,13 @@ on:
 permissions:
   contents: read
 
+# One run at a time: both jobs save caches (the corpora, the release's gate
+# binaries) that the next run builds on. A run started while one is going
+# waits instead of cancelling it.
+concurrency:
+  group: gate-and-fuzz
+  cancel-in-progress: false
+
 defaults:
   run:
     shell: bash
@@ -39,7 +50,8 @@ env:
 
 jobs:
   gate:
-    if: inputs.jobs != 'fuzz'
+    # Scheduled runs have no inputs and run both jobs.
+    if: github.event_name == 'schedule' || inputs.jobs != 'fuzz'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -111,7 +123,7 @@ jobs:
             ${{ runner.temp }}/nightly/gate/routes.jsonl
 
   fuzz:
-    if: inputs.jobs != 'gate'
+    if: github.event_name == 'schedule' || inputs.jobs != 'gate'
     runs-on: ubuntu-24.04 # 4 cores on public repositories: one per target
     timeout-minutes: 150
     steps:
@@ -135,7 +147,7 @@ jobs:
           restore-keys: fuzz-corpus-
       - name: Fuzz
         env:
-          FUZZ_MINUTES: ${{ inputs.fuzz_minutes }}
+          FUZZ_MINUTES: ${{ inputs.fuzz_minutes || '30' }}
         run: scripts/fuzz-nightly.sh "$((FUZZ_MINUTES * 60))"
       - name: Keep the corpora
         if: ${{ !cancelled() }}
