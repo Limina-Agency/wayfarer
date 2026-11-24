@@ -2,8 +2,10 @@
 
 Status: proposal, written against 0.1.3 (2026-11-17), updated on
 2026-11-19 after the 0.2.0 release, on 2026-11-23 after 0.4.0 and on
-2026-11-24 with the plan to 0.7: format 3 ships in 0.7, the work to it runs
-as three tranches (0.5, 0.6, 0.7, section 7.13), off-road terrain goes to
+2026-11-24 with the plan to 0.7: the work to it runs as three tranches
+(0.5, 0.6, 0.7, section 7.13), package format 3 becomes the default in the
+current release, 0.5 (decided 2026-11-24, FMT 7), with the stored CCH
+potentials following as format-3 optional sections, off-road terrain goes to
 format 4 (`docs/design/format-4.md`), and the search-and-rescue planning
 crate stays on its own branch until the next major release is prepared
 (3.2). Section
@@ -160,7 +162,14 @@ discounted matrices bounded by the request's own costs (M4, M5, #94);
 bicycle-only ways closed to walkers and busways to cars (FEAT-P0a, P0d,
 #97); the first-route work's parallel CCH topology build and parallel
 checks at open (#98, #102); a walking pace model with team GPX calibration
-(#99); and the terrain layouts moved to a format 4 draft (#95).
+(#99); and the terrain layouts moved to a format 4 draft (#95). Then: the
+scheduled Małopolskie gate and fuzzing (#103), an opt-in background
+warm-up at open (#105), the stored-potentials design (POT 4, #106),
+isochrone polygons (FEAT-A1, #107), costed access legs with the X6
+`costed` flag (FEAT-X1, #108) and format 3's widths and global request grid
+(FMT 6, #109). Format 3 becomes the default package format in 0.5 (FMT 7,
+#110): compiles write format 3, the engine reads formats 2 and 3, and
+format 2 can still be written on request for older engines.
 
 ## 3. Gap analysis
 
@@ -234,7 +243,7 @@ pace model (#99) and the analysis tools (FEAT-A).
 | Rust API | 9 crates, all 0.x, wide re-exports | A named set of public crates (proposal below); the rest internal | semver; `cargo-semver-checks` in CI |
 | JSON wire format | Follows the engine crate; no version field | `apiVersion` in requests/results; schemas published per version | Additive only: new optional fields, new enum values (clients must tolerate unknowns) |
 | C ABI | ABI 1 | ABI 2, designed once (FFI-4) | Additive only: new functions, never changed signatures |
-| Package format | Format 1, reads N-1 for one release (format 2 on `main`, reads only 2) | The format current at the 0.90 freeze, frozen at 1.0: format 3 (0.7), with an optional-section table and region identity so regions and cells come in 1.x without a new format (6.7), and format 4 once the terrain sections land (7.2) | Every 1.x engine reads every package a 1.x compiler wrote |
+| Package format | Format 1, reads N-1 for one release (format 2 on `main`, reads only 2) | The format current at the 0.90 freeze, frozen at 1.0: format 3 (0.5), with an optional-section table and region identity so regions and cells come in 1.x without a new format (6.7), and format 4 once the terrain sections land (7.2) | Every 1.x engine reads every package a 1.x compiler wrote |
 | Costing model | Model 1; older models re-costed | Versioned separately | A model change never needs a new engine to open old packages |
 | Determinism | Same bytes on every platform | Same | Same |
 
@@ -717,9 +726,11 @@ of **gates** at fixed versions says when breaking changes stop.
 - **Breaking items carry a migration note** and, where possible, deprecate in
   one release and remove in the next.
 - **Package-format bumps.** The earlier rule of at most one bump per ten
-  versions is relaxed for 0.x (2026-11-23): format 3 ships in 0.7 and
-  format 4 (terrain) follows when it is ready. The engine keeps reading the
-  previous format for at least one release (format 2 through 0.8).
+  versions is relaxed for 0.x (2026-11-23): format 3 ships in 0.5
+  (2026-11-24; first planned for 0.7) and format 4 (terrain) follows when it
+  is ready. The engine keeps reading the previous format for at least one
+  release (format 2 through 0.6 at least), and a compile can still write
+  format 2 on request for older engines.
 - **Lanes don't block each other** except where a dependency is written down
   (7.12).
 
@@ -730,7 +741,7 @@ of **gates** at fixed versions says when breaking changes stop.
 | Tooling on | by 0.5 | Semver, schema and C header diffs run on every PR (informational) |
 | API redesign window | 0.10 – 0.39 | The API lane's breaking items land here, one area per release |
 | Breaking cut-off | 0.80 | After this, only the hardening review may break anything |
-| Format 3 | 0.7 | Built behind an off-by-default compiler switch through 0.5 and 0.6, then the default in 0.7, with stored potentials so the first route costs about one search. It carries the changes to existing layouts and the optional-section table; non-terrain content sections (bicycle data, truck limits, directional destinations, conditional turns, cells) follow as optional sections without another bump (7.12) |
+| Format 3 | 0.5 | Built behind an off-by-default compiler switch during 0.5 (FMT 1 to FMT 6), then the default in 0.5 itself (FMT 7, decided 2026-11-24). The stored CCH topology and metrics, which make the first route cost about one search, follow as optional sections (their ids are reserved) in 0.6 and go on by default in 0.7. It carries the changes to existing layouts and the optional-section table; non-terrain content sections (bicycle data, truck limits, directional destinations, conditional turns, cells) follow as optional sections without another bump (7.12) |
 | Format 4 | after the terrain experiments, before 0.80 | Terrain: road elevation, the DEM grid, land cover, linear features and steepness (`docs/design/format-4.md`), with layouts set from the terrain lane's measurements. Whether it is a version bump or optional sections added to format 3 is still open; the layouts are the same either way |
 | Freeze | 0.90 | API, wire format, C ABI, package format and costing model frozen; diffs become blocking; releases are candidates |
 | 1.0 | — | Stability contract (section 4) published and enforced |
@@ -1002,13 +1013,14 @@ The ones that decide ordering:
   format and the wire are frozen.
 - **EXP-5b → REG-3.** A seam is prototyped before format 3's region sections
   are fixed.
-- **One format-3 bump, layout changes only, in 0.7.** Format 2 cannot carry
+- **One format-3 bump, layout changes only, in 0.5.** Format 2 cannot carry
   an optional section (exact section count, strict `LegAttrs`), so the bump
   carries REG-3's section table and `RegionInfo`, the profile slot table
   and u16 access and restriction masks (FEAT-P1's prerequisite), a versioned
-  `LegAttrs`, REG-13's cell-major numbering, and the stored CCH topology and
-  metrics that remove customization from the first route. Non-terrain
-  content sections (FEAT-G4b, FEAT-W4, truck limits, REG-10 and REG-13's
+  `LegAttrs`, REG-13's cell-major numbering and the wider offsets and cost
+  tuple rows. The stored CCH topology and metrics that remove customization
+  from the first route are optional sections with reserved ids, so they
+  follow in 0.6 without another bump. Non-terrain content sections (FEAT-G4b, FEAT-W4, truck limits, REG-10 and REG-13's
   directory) follow as optional sections, one release at a time.
 - **Terrain goes to format 4.** FEAT-T1 and T4, FEAT-X2, X3a and the
   steepness layer are format 4's sections (`docs/design/format-4.md`),
@@ -1028,9 +1040,9 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.2 | Released 2026-11-19: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
-| 0.5 | Tranche 1, under way: first route roughly halved without a format change (parallel CCH topology #98, parallel checks at open #102, then an opt-in background warm-up); FEAT-X1 costed access legs with the X6 `costed` flag after QW-2 and QW-3 (#83, #93); FEAT-A10 (#91) and A1 polygons; the route request options; FEAT-D2 (clip); FEAT-P0a and P0d (#97); format 3 built behind the switch (FMT 1 to FMT 5 on `main`); also on `main`: FEAT-A2 core, FEAT-G0 and G4a, parallel customization, matrix and compile speed-ups, the walking pace model (#99) |
-| 0.6 | Tranche 2: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D3 (several extracts); lean leg records; stored potentials and the last format-3 layouts behind the switch; API-0b (builders, `apiVersion` and `warnings`, one release tag) |
-| 0.7 | Tranche 3: format 3 as the default, with stored CCH topology and metrics (the first route costs about one search); format 2 still read through 0.8 |
+| 0.5 | Tranche 1, under way: first route roughly halved (parallel CCH topology #98, parallel checks at open #102, opt-in background warm-up #105); FEAT-X1 costed access legs with the X6 `costed` flag (#108, after QW-2 and QW-3, #83, #93); FEAT-A10 (#91) and A1 polygons (#107); the route request options; FEAT-D2 (clip); FEAT-P0a and P0d (#97); package format 3 as the default (FMT 1 to FMT 6 on `main`, FMT 7 #110), format 2 still read and writable on request; also on `main`: FEAT-A2 core, FEAT-G0 and G4a, parallel customization, matrix and compile speed-ups, the walking pace model (#99) |
+| 0.6 | Tranche 2: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D3 (several extracts); lean leg records; stored CCH topology and metrics as format-3 optional sections (POT 5, POT 6), opt-in at compile; API-0b (builders, `apiVersion` and `warnings`, one release tag) |
+| 0.7 | Tranche 3: stored CCH topology and metrics on by default (the first route costs about one search), measured on Poland and Mobile |
 | 0.8 – 0.9 | Format-3 optional sections as each is ready (FEAT-P1, P2 extras, G4b, W4); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), with the default isochrone order (cost or fastest time), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
