@@ -136,8 +136,9 @@ also writes the model alone, which a later `--base` or any pace option takes in 
 
 ```sh
 wayfarer sar reach <routing.mrt> --last-known LAT,LNG --hours H [--uncertainty-m M]
-                   [--max-edges N] [--geojson]
-wayfarer sar reach <routing.mrt> --request reach.json [--max-edges N] [--geojson]
+                   [--max-edges N] [--polygons] [--no-off-trail] [--geojson]
+wayfarer sar reach <routing.mrt> --request reach.json [--max-edges N] [--polygons]
+                   [--no-off-trail] [--geojson]
 wayfarer sar teams <routing.mrt> --request teams.json
 wayfarer sar coverage <routing.mrt> --request coverage.json
 ```
@@ -147,9 +148,10 @@ predicts where a missing person could be from the last known position and the
 time since: the paths a fast, typical and slow person could have reached, a
 probability per path, the likely routes and the corridors they share. A request
 file adds zones the person may avoid, destinations, distance statistics and a
-team's pace model (`wayfarer pace calibrate -o`). `--max-edges` lists only the
-most probable paths (the rest is `probability.unlisted`), and `--geojson` prints
-a map instead. `teams` plans teams onto search segments and `coverage` updates
+team's pace model (`wayfarer pace calibrate -o`). A position off the paths pays the walk to them at the off-road pace
+(`--no-off-trail` snaps it for free). `--polygons` draws each person's reach as
+a polygon, `--max-edges` lists only the most probable paths (the rest is
+`probability.unlisted`), and `--geojson` prints a map instead. `teams` plans teams onto search segments and `coverage` updates
 the probability from the teams' GPS tracks; both take a reach result's
 `probability`. The requests and results are in `schema/sar-*.json`.
 

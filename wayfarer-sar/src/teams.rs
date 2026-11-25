@@ -9,7 +9,7 @@ use wayfarer::{
     RoutingEngine,
 };
 
-use crate::network::{centroid, zone_overlays};
+use crate::network::{centroid, search_options, zone_overlays};
 use crate::pace::{footpath_ratio, pace_ratio};
 use crate::reach::{Edges, ProbabilityMap};
 use crate::{SarError, SarZone, SarZoneKind, finite_positive, invalid_point, unit_interval};
@@ -143,6 +143,13 @@ pub struct TeamPlanRequest {
     pub overlays: Vec<RouteOverlay>,
     #[serde(default)]
     pub options: RouteOptions,
+    /// `true` (default): the walk or drive from a team's start point and to a
+    /// segment's access point off the network is priced at the profile's
+    /// off-road pace and is in the arrival times (costed access legs, within
+    /// 2 km for walkers), unless `options.offNetwork` sets its own. `false`
+    /// snaps those points to the network for free.
+    #[serde(default = "yes")]
+    pub off_trail: bool,
     /// The time overlay windows are evaluated at (UTC ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_ms: Option<i64>,
@@ -163,6 +170,7 @@ impl TeamPlanRequest {
             zones: Vec::new(),
             overlays: Vec::new(),
             options: RouteOptions::default(),
+            off_trail: true,
             at_ms: None,
             include_edge_ids: true,
         }
@@ -445,7 +453,7 @@ pub fn plan_teams(
             targets.clone(),
             profile,
         );
-        matrix.options = request.options.clone();
+        matrix.options = search_options(&request.options, profile, request.off_trail);
         matrix.overlays = overlays.clone();
         matrix.departure_at_ms = request.at_ms;
         matrix.include_edge_ids = false;
@@ -572,7 +580,7 @@ fn territories(
                 .collect(),
         );
         isochrone.order = RouteIsochroneOrder::Time;
-        isochrone.options = request.options.clone();
+        isochrone.options = search_options(&request.options, team.profile, request.off_trail);
         isochrone.overlays = overlays.to_vec();
         isochrone.departure_at_ms = request.at_ms;
         let result = engine.isochrone(isochrone)?;

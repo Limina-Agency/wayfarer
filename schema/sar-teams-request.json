@@ -17,6 +17,11 @@
       "type": "boolean",
       "default": true
     },
+    "offTrail": {
+      "description": "`true` (default): the walk or drive from a team's start point and to a\nsegment's access point off the network is priced at the profile's\noff-road pace and is in the arrival times (costed access legs, within\n2 km for walkers), unless `options.offNetwork` sets its own. `false`\nsnaps those points to the network for free.",
+      "type": "boolean",
+      "default": true
+    },
     "options": {
       "$ref": "#/$defs/RouteOptions",
       "default": {

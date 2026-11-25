@@ -87,6 +87,31 @@ reachable network in each ring by length; the two models are mixed,
 `P = (1 - ringWeight) * P_time + ringWeight * P_rings` (default 0.5 when rings
 are given). This is the consensus approach SAR planners already use.
 
+### 2.2b Off the paths (X1 access legs) and reach polygons (A1)
+
+A last known position is often off the paths: in forest, on open ground, at
+a crag. With `offTrail` (default `true`), every search a planning step runs
+turns the engine's costed access legs on (`options.offNetwork`, X1, unless the
+request sets its own): the LKP, each uncertainty point and each destination
+reach up to 16 path candidates within 2 km (walkers; vehicles take the
+engine's 250 m), each at the straight-line distance over the profile's
+off-road pace, and that time is in every contour, band and route. The person
+factor scales it like any other model time. Two effects on the Tatra demo
+(measured, 1 h): from a point 384 m off the paths the fast, typical and slow
+reach is 25 / 14 / 10 km of path against 15 / 8 / 4 km with the old free snap,
+because the person can walk to any path within reach and not only to the
+nearest one; from 30 m off a path the 3 h reach changes by under 3 %.
+`offTrail: false` gives the old free snap. Team start points and segment access
+points are priced the same way in a team plan.
+
+`polygons` (A1's `RouteIsochronePolygonOptions`) draws each person's reach as a
+GeoJSON `MultiPolygon` (`areas[].polygon`, and `complyingAreas[].polygon` with
+avoid zones): the ground within a short walk of the reached paths, and where
+the reach ends part way along a path, the rest of the time at the off-road
+pace. On the Tatra demo (3 h) it adds 1.1 s and 2.5 MB of JSON; the `geojson`
+output gains a `reach` feature per person. Probability stays on the paths
+until the incident surface (step 3).
+
 ### 2.3 Zones
 
 | Kind | Effect on the search | Effect on probability |
@@ -149,8 +174,8 @@ routes respect `no_go` and `avoid` zones (the complying run).
 | Step | What | Needs | When |
 |---|---|---|---|
 | **1 (this branch)** | `wayfarer-sar` crate: reach prediction with P10/P50/P90 bands, LKP uncertainty, elapsed time, conditions, zones, distance rings, likely routes and corridors, segment POA, team arrival matrix and assignment, team territories, track coverage, POD and Bayes update, GeoJSON output | isochrones (A2, A10), matrices, projection, map matching: all on main | 0.5 / 0.6 |
-| 1b | Reach polygons per band (pass `polygons` through) | A1 (`feat/isochrone-polygons`, not merged yet) | after A1 |
-| 1c | Off-trail starts and ends priced (LKP off the network, segment centroids in forest) | X1 costed access legs (`feat/costed-access-legs`, in progress) | after X1 |
+| **1b (this branch)** | Reach polygons per person (`polygons`, section 2.2b) | A1 (#107, on main) | 0.5 / 0.6 |
+| **1c (this branch)** | Off-trail starts and ends priced: the LKP, uncertainty points, destinations, team starts and segment access points (`offTrail`, section 2.2b) | X1 costed access legs (#108, on main) | 0.5 / 0.6 |
 | **1d (this branch)** | CLI `wayfarer sar reach|teams|coverage`; C ABI `wayfarer_sar_reach`, `wayfarer_sar_plan_teams`, `wayfarer_sar_coverage` (the library's `sar` build); `schema/sar-*.json`; `maxEdges` and `minEdgeProbability` trim the probability map | this crate | 0.5 / 0.6 |
 | 2 | Pace on slope: switch default factors to the E4 curve basis | T2 Tobler/E4 pace in OnFoot costing, T1 elevation | 0.8 |
 | 3 | Reach and probability per terrain cell (off-network spread, S9) | incident surface / X5a | 0.9 |
@@ -165,18 +190,20 @@ named destinations, 24 frontier sectors:
 
 | | Fast (P10) | Typical (P50) | Slow (P90) |
 |---|---|---|---|
-| Path within reach | 1,233 km | 680 km | 335 km |
-| Straight-line radius | 13.6 km | 9.9 km | 7.8 km |
+| Path within reach | 1,241 km | 683 km | 344 km |
+| Straight-line radius | 13.7 km | 10.0 km | 7.8 km |
 
 With the built-in pace model the measured ratio to the engine's time is 1.31
 (Zakopane's paved streets pull it below a footpath's 1.37), so the person
 factors are 0.95 / 1.28 / 1.73. `predict_reach` takes 0.8 s (three 15-contour
-isochrones from 9 origins, one of them the re-run with the measured ratio, a
-1 x 28 matrix, 20,776 edges with probability; 79 % of the probability lies
-within the slow person's contour, ROW 0.2 %). A team plan with 3 teams (one
-legged), 4 segments and 2 h territories takes 0.5 s; coverage of one 6.9 km
-track takes 0.2 s. The JSON result is about 4.7 MB, most of it the per-edge
-probabilities; `maxEdges: 2000` cuts it to 1.6 MB (the 2,000 most probable
+isochrones from 9 origins with access legs (2.2b), one of them the re-run with
+the measured ratio, a 1 x 28 matrix, 20,890 edges with probability; 75 % of
+the probability lies within the slow person's contour, ROW 0.2 %). Without
+access legs (`offTrail: false`) it was 1,233 / 680 / 335 km. A team plan with
+3 teams (one legged), 4 segments and 2 h territories takes 0.9 s with access
+legs (0.5 s without); coverage of one 6.9 km track takes 0.2 s. The JSON
+result is about 4.7 MB, most of it the per-edge probabilities; `maxEdges:
+2000` cuts it to 1.6 MB (the 2,000 most probable
 edges hold 76 % of the mass, the rest is `unlisted`).
 
 Without heights the pace is flat: on mountain paths the model gives 1.29 to
@@ -189,8 +216,10 @@ the engine's public queries, so Monaco and Kraków stay byte-identical.
 
 ## 4. Limits and honesty
 
-- Network only: a person off trail is modelled at the nearest path. Until step 3
-  the area between paths is not scored; the reach band polygons (1b) draw it.
+- Network only: a person off trail walks to the paths at the off-road pace
+  (2.2b) and is then on them. Until step 3 the area between paths is not
+  scored; the reach polygons (1b) draw it. The off-road pace is flat and one
+  pace for all ground until terrain (format 4).
 - An edge's entry and whole-reach times come from the band buckets and the
   boundary fragments, so they are exact to within one band (default outer
   contour / 12) where no contour cuts the edge.

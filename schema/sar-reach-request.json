@@ -93,8 +93,13 @@
       "format": "double",
       "default": 1.0
     },
+    "offTrail": {
+      "description": "`true` (default): the walk from an off-path last known position,\nuncertainty point or destination to the paths is priced at the\nprofile's off-road pace and is in every time (costed access legs,\nwithin 2 km for walkers), unless `options.offNetwork` sets its own.\n`false` snaps those points to the network for free.",
+      "type": "boolean",
+      "default": true
+    },
     "options": {
-      "description": "Route options (SAR relaxations, correlation) as for an isochrone.",
+      "description": "Route options (SAR relaxations, correlation, `offNetwork` access\nlegs) as for an isochrone.",
       "$ref": "#/$defs/RouteOptions",
       "default": {
         "alternatives": {
@@ -163,6 +168,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/PersonFactors"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "polygons": {
+      "description": "Draws each person's reach as a GeoJSON `MultiPolygon` (`areas[].polygon`):\nthe ground within a short walk of the paths they reach. Left out (the\ndefault), areas carry no polygon.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteIsochronePolygonOptions"
         },
         {
           "type": "null"
@@ -991,6 +1007,37 @@
         "endFraction",
         "speedKph"
       ]
+    },
+    "RouteIsochronePolygonOptions": {
+      "description": "How an isochrone draws its buckets as polygons (see\n`RouteIsochroneRequest::polygons`). The polygon is drawn on a square grid\nover the reached roads: a grid node is inside when it lies within\n`spread_m` of a reached road, where on a boundary fragment the spread\nshrinks to what remains of the contour at the profile's off-road pace\n(metres for a distance contour), down to nothing where the fragment ends.\nRings follow the grid (marching squares), so the polygon is exact only to\nabout a cell; they never touch, before or after rounding. The bucket's `edgeIds` and boundary fragments stay the\nexact answer; the polygon is a function of them and the package's road\nshapes. Every value is optional; the result's `polygons` echoes the\nvalues used.",
+      "type": "object",
+      "properties": {
+        "denoise": {
+          "description": "Drops each polygon whose area is less than this share of the largest\npolygon's in its bucket (0 to 1; by default 0, which keeps every\none). Holes are kept.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "resolutionM": {
+          "description": "The grid's cell size in metres, from 2 to 10,000. By default the\nlarger side of the reached area over 256, rounded up to whole metres\nand kept within 10 m to 500 m.\nA grid that would exceed `limits::MAX_ISOCHRONE_POLYGON_GRID_NODES`\nnodes takes larger cells.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "spreadM": {
+          "description": "How far off a reached road the polygon reaches, in metres, at most\n10,000. By default 1.5 cells; never less than 0.75 of a cell, so\nthat every reached road meets the grid.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "RouteOffNetworkOptions": {
       "description": "Costed off-network access legs on a request (`RouteOptions::off_network`).\nEvery field is optional: `\"offNetwork\": {}` turns access legs on with the\nprofile's defaults.",

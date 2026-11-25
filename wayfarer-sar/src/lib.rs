@@ -52,6 +52,7 @@ pub use coverage::{
     CoverageRequest, CoverageResult, CoveredEdge, SegmentCoverage, TeamTrack, TrackCoverage,
     apply_coverage,
 };
+pub use network::SAR_ACCESS_RADIUS_WALKING_M;
 pub use pace::{PersonFactors, PersonPercentile};
 pub use reach::{
     DistanceRing, EdgeProbability, LikelyRoute, NamedPoint, ProbabilityMap, ReachArea,

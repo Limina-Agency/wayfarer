@@ -57,8 +57,10 @@ pub fn probability_features(engine: &RoutingEngine, probability: &ProbabilityMap
 }
 
 /// A reach prediction as a FeatureCollection: the last known position, the
-/// three radius circles, the edge probabilities, the likely routes (when
-/// their edge ids were kept) and the corridors.
+/// three radius circles, each person's reach polygon (when the request drew
+/// them), the edge probabilities, the likely routes (when their edge ids
+/// were kept; from the last known position, through any walk to the paths)
+/// and the corridors.
 pub fn reach_feature_collection(engine: &RoutingEngine, reach: &ReachResult) -> Value {
     let network = Network::new(engine);
     let mut features = vec![feature(
@@ -82,13 +84,26 @@ pub fn reach_feature_collection(engine: &RoutingEngine, reach: &ReachResult) -> 
             }),
         ));
     }
+    for area in &reach.areas {
+        if let Some(polygon) = &area.polygon {
+            features.push(feature(
+                json!(polygon),
+                json!({
+                    "kind": "reach",
+                    "person": area.person,
+                    "contourS": area.contour_s,
+                    "networkLengthM": area.network_length_m,
+                }),
+            ));
+        }
+    }
     features.extend(probability_features(engine, &reach.probability));
     for route in reach
         .routes
         .iter()
         .filter(|route| route.reachable && !route.edge_ids.is_empty())
     {
-        let mut points: Vec<GeoPoint> = Vec::new();
+        let mut points: Vec<GeoPoint> = vec![reach.last_known];
         for edge_id in &route.edge_ids {
             let Some(record) = engine.route_graph_view().edge_by_id(*edge_id) else {
                 continue;
@@ -102,6 +117,11 @@ pub fn reach_feature_collection(engine: &RoutingEngine, reach: &ReachResult) -> 
                     points.push(point);
                 }
             }
+        }
+        if let RouteTarget::Destination { point, .. } = &route.target
+            && points.last() != Some(point)
+        {
+            points.push(*point);
         }
         let target = match &route.target {
             RouteTarget::Destination { id, .. } => json!({ "destination": id }),

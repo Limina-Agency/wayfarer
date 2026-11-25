@@ -354,7 +354,9 @@ void wayfarer_compile_free(WayfarerCompileJob *job);
  * "uncertaintyM", "elapsedS" (or "lastSeenAtMs" and "atMs"), "profile",
  * "pace" (a pace model, as `wayfarer pace calibrate` writes it), "zones"
  * ([{"id", "kind": "no_go" | "avoid" | "weight", "polygon", "factor"}]),
- * "destinations", "distanceRings", "maxEdges", "minEdgeProbability", ...}
+ * "destinations", "distanceRings", "maxEdges", "minEdgeProbability",
+ * "offTrail" (default true: the walk from an off-path point to the paths is
+ * priced), "polygons" (draw each reach as a MultiPolygon), ...}
  * gives a ReachResult: the fast, typical and slow person's reach
  * ("areas"), the probability per edge ("probability": {"edges",
  * "restOfWorld", "offNetwork", "unlisted"}), likely "routes" and

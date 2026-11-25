@@ -4,14 +4,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use wayfarer::{
-    CorrelatedLocation, GeoPoint, MobilityProfile, RouteError, RouteIsochroneBoundaryFragment,
-    RouteIsochroneContour, RouteIsochroneMetric, RouteIsochroneOrder, RouteIsochroneOrigin,
-    RouteIsochroneRequest, RouteIsochroneResult, RouteMatrixCellStatus, RouteMatrixRequest,
-    RouteOptions, RouteOverlay, RoutingEngine, SnapRequest,
+    CorrelatedLocation, GeoJsonMultiPolygon, GeoPoint, MobilityProfile, RouteError,
+    RouteIsochroneBoundaryFragment, RouteIsochroneContour, RouteIsochroneMetric,
+    RouteIsochroneOrder, RouteIsochroneOrigin, RouteIsochronePolygonOptions, RouteIsochroneRequest,
+    RouteIsochroneResult, RouteMatrixCellStatus, RouteMatrixRequest, RouteOptions, RouteOverlay,
+    RoutingEngine, SnapRequest,
 };
 
 use crate::network::{
-    Network, NetworkEdge, bearing_deg, destination, distance_m, midpoint, zone_overlays,
+    Network, NetworkEdge, bearing_deg, destination, distance_m, midpoint, search_options,
+    snap_radius_m, zone_overlays,
 };
 use crate::pace::{PersonFactors, PersonPercentile, footpath_ratio, pace_ratio};
 use crate::{SarError, SarZone, SarZoneKind, finite_positive, invalid_point, unit_interval};
@@ -114,9 +116,22 @@ pub struct ReachRequest {
     /// (default 0.02): their probability is the rest of world.
     #[serde(default = "default_outer_share")]
     pub outer_share: f64,
-    /// Route options (SAR relaxations, correlation) as for an isochrone.
+    /// Route options (SAR relaxations, correlation, `offNetwork` access
+    /// legs) as for an isochrone.
     #[serde(default)]
     pub options: RouteOptions,
+    /// `true` (default): the walk from an off-path last known position,
+    /// uncertainty point or destination to the paths is priced at the
+    /// profile's off-road pace and is in every time (costed access legs,
+    /// within 2 km for walkers), unless `options.offNetwork` sets its own.
+    /// `false` snaps those points to the network for free.
+    #[serde(default = "yes")]
+    pub off_trail: bool,
+    /// Draws each person's reach as a GeoJSON `MultiPolygon` (`areas[].polygon`):
+    /// the ground within a short walk of the paths they reach. Left out (the
+    /// default), areas carry no polygon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygons: Option<RouteIsochronePolygonOptions>,
     /// Closures and overlay-set items, applied as an isochrone applies them,
     /// besides the zones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -161,6 +176,8 @@ impl ReachRequest {
             bands: default_bands(),
             outer_share: default_outer_share(),
             options: RouteOptions::default(),
+            off_trail: true,
+            polygons: None,
             overlays: Vec::new(),
             max_expansion_edge_count: None,
             include_edge_ids: true,
@@ -354,6 +371,12 @@ pub struct ReachArea {
     /// Undirected edge keys (the smaller directed id of each edge), sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_ids: Vec<u64>,
+    /// With the request's `polygons`, the reach drawn as a GeoJSON
+    /// `MultiPolygon`: the ground within a short walk of the reached paths,
+    /// and where the reach ends part way along a path, what remains of the
+    /// time at the off-road pace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygon: Option<GeoJsonMultiPolygon>,
 }
 
 /// One edge's probability of holding the person.
@@ -645,7 +668,8 @@ pub fn predict_reach(
         }
     };
 
-    let origins = uncertainty_origins(engine, request, &mut warnings);
+    let options = search_options(&request.options, request.profile, request.off_trail);
+    let origins = uncertainty_origins(engine, request, &options, &mut warnings);
     let mut edges = Edges::new(engine);
     let has_avoid = request
         .zones
@@ -679,10 +703,11 @@ pub fn predict_reach(
             );
             isochrone.origins = origins.clone();
             isochrone.order = RouteIsochroneOrder::Time;
-            isochrone.options = request.options.clone();
+            isochrone.options = options.clone();
             isochrone.overlays = overlays.to_vec();
             isochrone.departure_at_ms = request.at_ms;
             isochrone.max_expansion_edge_count = request.max_expansion_edge_count;
+            isochrone.polygons = request.polygons.clone();
             let result = engine.isochrone(isochrone)?;
             let span = edge_spans(&result, bands, edges.network());
             let persons = persons
@@ -881,12 +906,17 @@ pub fn predict_reach(
 fn uncertainty_origins(
     engine: &RoutingEngine,
     request: &ReachRequest,
+    options: &RouteOptions,
     warnings: &mut Vec<String>,
 ) -> Vec<RouteIsochroneOrigin> {
     if request.uncertainty_m <= 0.0 {
         return Vec::new();
     }
-    let reach = request.uncertainty_m.clamp(75.0, 1_000.0) as u32;
+    let reach = snap_radius_m(
+        options,
+        request.profile,
+        request.uncertainty_m.clamp(75.0, 1_000.0) as u32,
+    );
     let mut origins = Vec::new();
     for index in 0..UNCERTAINTY_POINTS {
         let bearing = 360.0 * index as f64 / UNCERTAINTY_POINTS as f64;
@@ -1217,6 +1247,8 @@ fn reach_areas(
                 } else {
                     Vec::new()
                 },
+                polygon: Run::bucket(&run.result, *contour)
+                    .find_map(|bucket| bucket.polygon.clone()),
             }
         })
         .collect()
@@ -1300,7 +1332,7 @@ fn likely_routes(
         })
         .collect();
     let mut matrix = RouteMatrixRequest::new(vec![request.last_known], points, request.profile);
-    matrix.options = request.options.clone();
+    matrix.options = search_options(&request.options, request.profile, request.off_trail);
     matrix.overlays = overlays.to_vec();
     matrix.departure_at_ms = request.at_ms;
     let result = engine.matrix(matrix);

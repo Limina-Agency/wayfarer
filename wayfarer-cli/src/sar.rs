@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use serde::de::DeserializeOwned;
-use wayfarer::{GeoPoint, RoutingEngine};
+use wayfarer::{GeoPoint, RouteIsochronePolygonOptions, RoutingEngine};
 use wayfarer_sar::{
     CoverageRequest, ReachRequest, TeamPlanRequest, apply_coverage, geojson, plan_teams,
     predict_reach,
@@ -69,8 +69,16 @@ struct ReachArgs {
     /// probable first (overrides the request's `maxEdges`).
     #[arg(long)]
     max_edges: Option<usize>,
+    /// Draw each person's reach as a polygon (`areas[].polygon`; with
+    /// `--geojson`, a `reach` feature each).
+    #[arg(long)]
+    polygons: bool,
+    /// Snap an off-path last known position to the paths for free instead of
+    /// pricing the walk to them (overrides the request's `offTrail`).
+    #[arg(long)]
+    no_off_trail: bool,
     /// Print the reach as a GeoJSON FeatureCollection (last known position,
-    /// radius circles, edge probabilities, routes, corridors).
+    /// radius circles, reach polygons, edge probabilities, routes, corridors).
     #[arg(long)]
     geojson: bool,
 }
@@ -105,6 +113,12 @@ fn reach(args: ReachArgs) -> Result<(), Failure> {
     };
     if args.max_edges.is_some() {
         request.max_edges = args.max_edges;
+    }
+    if args.polygons && request.polygons.is_none() {
+        request.polygons = Some(RouteIsochronePolygonOptions::default());
+    }
+    if args.no_off_trail {
+        request.off_trail = false;
     }
     let result = predict_reach(&engine, &request).map_err(failure)?;
     if args.geojson {
@@ -158,6 +172,8 @@ mod tests {
             "300",
             "--max-edges",
             "500",
+            "--polygons",
+            "--no-off-trail",
             "--geojson",
         ]) else {
             panic!("reach flags");
@@ -165,7 +181,7 @@ mod tests {
         assert_eq!(args.last_known, Some(GeoPoint::new(49.24, -20.0)));
         assert_eq!(args.hours, Some(3.0));
         assert_eq!(args.max_edges, Some(500));
-        assert!(args.geojson && args.request.is_none());
+        assert!(args.geojson && args.polygons && args.no_off_trail && args.request.is_none());
         assert!(parse(&["reach", "a.mrt", "--request", "r.json"]).is_ok());
         // A position needs the time since; the flags and a request exclude
         // each other; one of them is needed.

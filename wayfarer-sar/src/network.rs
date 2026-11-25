@@ -2,9 +2,10 @@
 
 use std::collections::BTreeSet;
 
+use wayfarer::access::RouteOffNetworkOptions;
 use wayfarer::{
-    GeoPoint, ProjectRequest, RouteOverlay, RouteOverlayGeometryKind, RouteOverlayPolicy,
-    RoutingEngine,
+    GeoPoint, MobilityProfile, ProjectRequest, RouteOptions, RouteOverlay,
+    RouteOverlayGeometryKind, RouteOverlayPolicy, RoutingEngine,
 };
 
 use crate::{SarZone, SarZoneKind};
@@ -71,6 +72,43 @@ pub(crate) fn closed(polygon: &[GeoPoint]) -> Vec<GeoPoint> {
         points.push(first);
     }
     points
+}
+
+/// The access radius the planning steps give walkers when they turn costed
+/// access legs on themselves: a last known position or a segment's access
+/// point is often well off the paths.
+pub const SAR_ACCESS_RADIUS_WALKING_M: f64 = 2_000.0;
+
+/// The route options a planning step searches with: with `off_trail` and no
+/// `offNetwork` of the request's own, costed access legs at the profile's
+/// defaults (walkers' radius [`SAR_ACCESS_RADIUS_WALKING_M`]), so the walk
+/// from an off-path point to the paths is in every time.
+pub(crate) fn search_options(
+    options: &RouteOptions,
+    profile: MobilityProfile,
+    off_trail: bool,
+) -> RouteOptions {
+    let mut options = options.clone();
+    if off_trail && options.off_network.is_none() {
+        let walking = matches!(profile, MobilityProfile::OnFoot | MobilityProfile::Legged);
+        options.off_network = Some(RouteOffNetworkOptions {
+            max_radius_m: walking.then_some(SAR_ACCESS_RADIUS_WALKING_M),
+            ..RouteOffNetworkOptions::default()
+        });
+    }
+    options
+}
+
+/// How far from a point a search with `options` looks for the network
+/// (whole metres): the access radius with access legs, else `fallback`.
+pub(crate) fn snap_radius_m(
+    options: &RouteOptions,
+    profile: MobilityProfile,
+    fallback: u32,
+) -> u32 {
+    options.off_network.as_ref().map_or(fallback, |access| {
+        access.resolve(profile).radius_m.ceil() as u32
+    })
 }
 
 /// The blocking overlays of the zones of `kinds`.

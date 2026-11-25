@@ -485,6 +485,106 @@ fn trimmed_probability_keeps_the_most_probable_edges() {
 }
 
 #[test]
+fn off_trail_positions_pay_the_walk_to_the_paths() {
+    let engine = engine();
+    // A last known position 1.5 steps (about 333 m) west of the grid's edge.
+    let off = point(CENTRE as f64, -1.5);
+    let mut request = ReachRequest::new(off);
+    request.elapsed_s = Some(20.0 * 60.0);
+    request.destinations = vec![NamedPoint {
+        id: "centre".into(),
+        point: centre(),
+    }];
+    let priced = predict_reach(&engine, &request).unwrap();
+    request.off_trail = false;
+    let free = predict_reach(&engine, &request).unwrap();
+
+    let pace = wayfarer_costing::profile_access(wayfarer::MobilityProfile::OnFoot).pace_mps;
+    let walk_in = 333.0 / pace;
+    let first = |reach: &ReachResult| {
+        reach
+            .probability
+            .edges
+            .iter()
+            .filter_map(|edge| edge.time_s)
+            .fold(f64::INFINITY, f64::min)
+    };
+    assert!(
+        first(&priced) > 0.9 * walk_in,
+        "{} vs {walk_in}",
+        first(&priced)
+    );
+    assert!(first(&free) < 1.0, "{}", first(&free));
+    for (priced, free) in priced.areas.iter().zip(&free.areas) {
+        assert!(
+            priced.network_length_m < free.network_length_m,
+            "{:?}: {} vs {}",
+            priced.person,
+            priced.network_length_m,
+            free.network_length_m
+        );
+    }
+    // Routes run from the requested point, so they include the walk in.
+    let to_centre = |reach: &ReachResult| {
+        reach
+            .routes
+            .iter()
+            .find(|route| matches!(&route.target, RouteTarget::Destination { id, .. } if id == "centre"))
+            .and_then(|route| route.duration_s)
+            .unwrap()
+    };
+    let added = to_centre(&priced) - to_centre(&free);
+    assert!(
+        (added - walk_in).abs() < 0.1 * walk_in,
+        "{added} vs {walk_in}"
+    );
+
+    // An explicit offNetwork wins: a radius short of the paths finds none.
+    let mut short = ReachRequest::new(off);
+    short.elapsed_s = Some(20.0 * 60.0);
+    short.options.off_network = Some(wayfarer::access::RouteOffNetworkOptions {
+        max_radius_m: Some(100.0),
+        ..Default::default()
+    });
+    assert!(matches!(
+        predict_reach(&engine, &short),
+        Err(SarError::Route(_))
+    ));
+}
+
+#[test]
+fn reach_polygons_draw_each_person() {
+    let engine = engine();
+    let plain = predict_reach(&engine, &reach_request(10.0)).unwrap();
+    assert!(plain.areas.iter().all(|area| area.polygon.is_none()));
+    let mut request = reach_request(10.0);
+    request.polygons = Some(wayfarer::RouteIsochronePolygonOptions::default());
+    let drawn = predict_reach(&engine, &request).unwrap();
+    // Polygons change nothing else.
+    assert_eq!(drawn.probability, plain.probability);
+    let extent = |area: &wayfarer_sar::ReachArea| {
+        let polygon = area.polygon.as_ref().expect("a polygon per person");
+        let (mut lat, mut lng) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
+        for ring in polygon.coordinates.iter().flatten() {
+            for [x, y] in ring {
+                lng = (lng.0.min(*x), lng.1.max(*x));
+                lat = (lat.0.min(*y), lat.1.max(*y));
+            }
+        }
+        (lat.1 - lat.0) * (lng.1 - lng.0)
+    };
+    let sizes = drawn.areas.iter().map(extent).collect::<Vec<_>>();
+    // Fast, typical, slow: each reaches less far.
+    assert!(sizes[0] > sizes[1] && sizes[1] > sizes[2], "{sizes:?}");
+    // The polygon covers the last known position.
+    let slow = drawn.areas[2].polygon.as_ref().unwrap();
+    let centre = centre();
+    assert!(slow.coordinates.iter().flatten().flatten().any(|[x, y]| {
+        (x - centre.lng).abs() < 3.0 * STEP && (y - centre.lat).abs() < 3.0 * STEP
+    }));
+}
+
+#[test]
 fn elapsed_time_from_timestamps() {
     let engine = engine();
     let mut request = ReachRequest::new(centre());
@@ -597,6 +697,27 @@ fn teams_go_to_the_nearer_segment_by_probability() {
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 }
 
+#[test]
+fn off_trail_team_starts_pay_the_walk_in() {
+    let engine = engine();
+    // A team starting about 333 m west of the grid.
+    let team = SarTeam::new("alpha", point(6.0, -1.5));
+    let mut request = TeamPlanRequest::new(vec![team], west_and_east_segments());
+    let priced = plan_teams(&engine, &request).unwrap();
+    request.off_trail = false;
+    let free = plan_teams(&engine, &request).unwrap();
+    let pace = wayfarer_costing::profile_access(wayfarer::MobilityProfile::OnFoot).pace_mps;
+    let walk_in = 333.0 / pace * priced.paces[0].time_factor;
+    for (priced, free) in priced.arrivals.iter().zip(&free.arrivals) {
+        let added = priced.arrival_s.unwrap() - free.arrival_s.unwrap();
+        assert!(
+            (added - walk_in).abs() < 0.15 * walk_in,
+            "{}: {added} vs {walk_in}",
+            priced.segment_id
+        );
+    }
+}
+
 fn track_along_row(row: f64, cols: (f64, f64)) -> Vec<NavigationPositionSample> {
     let mut samples = Vec::new();
     let mut col = cols.0;
@@ -682,6 +803,7 @@ fn geojson_has_every_layer() {
     let engine = engine();
     let mut request = reach_request(15.0);
     request.route_sectors = 8;
+    request.polygons = Some(wayfarer::RouteIsochronePolygonOptions::default());
     let reach = predict_reach(&engine, &request).unwrap();
     let collection = wayfarer_sar::geojson::reach_feature_collection(&engine, &reach);
     let features = collection["features"].as_array().unwrap();
@@ -693,6 +815,7 @@ fn geojson_has_every_layer() {
     };
     assert_eq!(count("last_known"), 1);
     assert_eq!(count("radius"), 3);
+    assert_eq!(count("reach"), 3);
     assert_eq!(count("probability"), reach.probability.edges.len());
     assert!(count("route") >= 4);
     assert_eq!(count("corridor"), reach.corridors.len());

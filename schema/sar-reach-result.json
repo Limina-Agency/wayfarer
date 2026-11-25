@@ -400,6 +400,44 @@
         "lengthM"
       ]
     },
+    "GeoJsonMultiPolygon": {
+      "description": "A GeoJSON `MultiPolygon` geometry (RFC 7946): polygons of linear rings,\neach closed (its last position repeats its first), the first ring of a\npolygon its outer boundary (counterclockwise) and the others its holes\n(clockwise), in `[longitude, latitude]` positions rounded to 6 decimals,\nas [`GeoJsonLineString`]. No polygon at all is an empty `coordinates`.",
+      "type": "object",
+      "properties": {
+        "coordinates": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/GeoJsonMultiPolygonType"
+        }
+      },
+      "required": [
+        "type",
+        "coordinates"
+      ]
+    },
+    "GeoJsonMultiPolygonType": {
+      "description": "The type member of a GeoJSON polygon geometry; always `MultiPolygon` here.",
+      "type": "string",
+      "enum": [
+        "MultiPolygon"
+      ]
+    },
     "GeoPoint": {
       "type": "object",
       "properties": {
@@ -650,6 +688,17 @@
         },
         "person": {
           "$ref": "#/$defs/PersonPercentile"
+        },
+        "polygon": {
+          "description": "With the request's `polygons`, the reach drawn as a GeoJSON\n`MultiPolygon`: the ground within a short walk of the reached paths,\nand where the reach ends part way along a path, what remains of the\ntime at the off-road pace.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoJsonMultiPolygon"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
