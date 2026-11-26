@@ -18,7 +18,8 @@ notes kept outside the repository.
 Newer data that models or hosts make after compile time (flood, rubble or
 land-cover rasters, voxel-graph projections) is not stored in these sections.
 It arrives as terrain layers on the same lattice and is fused with them per
-incident: see `terrain-layers.md`.
+incident: see `terrain-layers.md`. The fused, costed result per incident
+and epoch, which every off-road query reads, is `incident-surface.md`.
 
 ## 1. What it builds on from format 3
 

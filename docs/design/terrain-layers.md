@@ -286,6 +286,9 @@ machine.
 
 ## 9. Hand-off to the cost surface
 
+The rules below are pinned, with exact arithmetic, in `incident-surface.md`
+(the stored per-incident surface, its identity, updates and query rules).
+
 E5's `cell_t(profile, dist, steep, lines)` already takes a class distribution
 at `PSCALE = 4096`, so the fused `P` goes in unchanged, and with no layers the
 surface is exactly E5's. The contract adds four rules for the cost side:
