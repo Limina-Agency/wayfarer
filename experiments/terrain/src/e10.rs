@@ -17,17 +17,17 @@ use std::time::Instant;
 const T: i64 = 1_795_521_600; // 2026-11-24 12:00 UTC, the incident time
 const SP: i64 = 120; // 1"
 
-fn mix(mut z: u64) -> u64 {
+pub(crate) fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
 }
-fn rnd(i: i64, j: i64, seed: u64) -> u64 {
+pub(crate) fn rnd(i: i64, j: i64, seed: u64) -> u64 {
     mix(mix(i as u64 ^ seed.rotate_left(17)) ^ (j as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93))
 }
 
-fn manifest(kind: Kind, channels: Vec<u16>, model: &str, ver: &str, obs: i64, from: i64, until: i64, fade: i64) -> Manifest {
+pub(crate) fn manifest(kind: Kind, channels: Vec<u16>, model: &str, ver: &str, obs: i64, from: i64, until: i64, fade: i64) -> Manifest {
     Manifest {
         kind, licence: 0, s_lat: SP as u32, s_lon: SP as u32, observed_at: obs, valid_from: from, valid_until: until,
         fade_from: fade, channels, model_id: model.into(), model_version: ver.into(),
@@ -39,23 +39,23 @@ fn manifest(kind: Kind, channels: Vec<u16>, model: &str, ver: &str, obs: i64, fr
     }
 }
 
-fn post_ij(b: BlockId, q: usize) -> (i64, i64) {
+pub(crate) fn post_ij(b: BlockId, q: usize) -> (i64, i64) {
     (b.i0() + (q / BLOCK) as i64, b.j0() + (q % BLOCK) as i64)
 }
 
 /// E7 degrees of post (i, j) at 1" (exact only to the E7 unit; used for synthetic geometry).
-fn e7_of(i: i64) -> i32 {
+pub(crate) fn e7_of(i: i64) -> i32 {
     ((i * SP * 10_000_000) / lattice::TICKS_PER_DEG) as i32
 }
 
-struct World<'a> {
-    blocks: &'a [BlockId],
-    class: &'a [u8],
-    dem_m: Vec<i32>,
+pub(crate) struct World<'a> {
+    pub blocks: &'a [BlockId],
+    pub class: &'a [u8],
+    pub dem_m: Vec<i32>,
 }
 
 impl World<'_> {
-    fn grid(&self, slots: usize, mut f: impl FnMut(i64, i64, u8, i32, &mut [u16], &mut u8) -> bool) -> Vec<GridBlock> {
+    pub(crate) fn grid(&self, slots: usize, mut f: impl FnMut(i64, i64, u8, i32, &mut [u16], &mut u8) -> bool) -> Vec<GridBlock> {
         let mut out = Vec::new();
         for (k, &b) in self.blocks.iter().enumerate() {
             let mut g = GridBlock::new(b, slots);
@@ -80,7 +80,7 @@ impl World<'_> {
     }
 }
 
-fn finish(mut l: Layer) -> Layer {
+pub(crate) fn finish(mut l: Layer) -> Layer {
     l.canonicalise().expect("synthetic layer is canonical");
     l
 }

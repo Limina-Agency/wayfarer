@@ -274,7 +274,7 @@ pub struct Graph<'a> {
     pub p: &'a Profile,
     pub t: &'a [u16],
     /// Move lengths (mm) per half-row k = 2r + dr (the move's mid-latitude) and move.
-    len: Vec<[u32; 16]>,
+    pub len: Vec<[u32; 16]>,
     pub dy_mm: i64,
     pub dx_min_mm: i64,
     pub t_min: u64,
@@ -362,7 +362,7 @@ impl Search {
         Search { dist: vec![u64::MAX; n], stamp: vec![0; n], epoch: 0, heap: BinaryHeap::new(), settled: 0, pushes: 0 }
     }
     #[inline]
-    fn d(&self, i: usize) -> u64 {
+    pub fn d(&self, i: usize) -> u64 {
         if self.stamp[i] == self.epoch { self.dist[i] } else { u64::MAX }
     }
     /// Dijkstra (astar = false) or A* to `target`; with no target, the full field. Returns the

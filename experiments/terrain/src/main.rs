@@ -11,8 +11,10 @@
 
 mod dem;
 mod e10;
+mod e14;
 mod encode;
 mod fuse;
+mod incident;
 mod landcover;
 mod lattice;
 mod layers;
@@ -611,6 +613,7 @@ fn main() {
         Some("dump") => cmd_dump(&args[2..]),
         Some("bench") => cmd_bench(&args[2..]),
         Some("e10") => e10::run(&args[2..]),
+        Some("e14") => e14::run(&args[2..]),
         _ => eprintln!("usage: terrexp dem|lc|dump ..."),
     }
 }

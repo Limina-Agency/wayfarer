@@ -72,3 +72,20 @@ The reference implementation of `docs/design/terrain-layers.md` (on branch `docs
 - `scripts/e10/`: the E3-rule base builder, an independent Python implementation of the contract
   that re-hashes every layer and re-fuses a sample, and the byte-identity run across targets.
   Results: `off-road-sar/exp/E10/README.md`.
+
+## E14 (incident surface contract)
+
+    target/release/terrexp e14 <E5 prep-dir> <E4 pace_table_50.csv> <out-dir>
+    python3 -I scripts/e14/check_surface.py <prep-dir> <out-dir> <e14.json>
+    python3 -I scripts/e10/check_fusion.py <out-dir> <out-dir>
+    scripts/e14/identity.sh <prep-dir> <pace-csv> <work-dir>
+
+The reference implementation of `docs/design/incident-surface.md` (on branch `docs/incident-surface`).
+- `src/incident.rs`: the cost rules from the fused state (blocking mass, hazards, levels, effect bits, risk,
+  reasons), the profile tables' canonical bytes, the WIS0 surface file and WISD deltas, block, content and recipe
+  hashes, epochs and `same_until`, the blocks an update touches, the canonical path and route confidence.
+- `src/e14.rs`: an eight-step incident timeline on E5's Tatra base (layers arriving, a late older layer, a team
+  overlay set, a flood fading and expiring), each step built in full and incrementally, written, read back and
+  sent as a delta; routes from the incident point with their confidence.
+- `scripts/e14/`: the independent Python check (files, hashes, deltas, cost rules, two routes) and the
+  byte-identity run across targets. Results: `off-road-sar/exp/E14/README.md`.
