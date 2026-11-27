@@ -1,4 +1,5 @@
-//! Route parity between the bounds, on the Monaco package: CCH potentials on
+//! Route parity between the bounds, on the Monaco package (the format the
+//! compiler writes): CCH potentials on
 //! its stored order against plain A* on the straight-line bound alone
 //! (`internals::set_potentials("off")`). Both are exact.
 //!
@@ -24,7 +25,10 @@ fn engine() -> &'static RoutingEngine {
     ENGINE.get_or_init(|| {
         let package = RoutingPackage::open(wayfarer_fuzz::monaco_package())
             .expect("the Monaco package opens");
-        assert_eq!(package.format_version(), 2);
+        assert_eq!(
+            package.format_version(),
+            wayfarer_package::format::ROUTING_PACKAGE_FORMAT_VERSION
+        );
         package.prepare_potentials().expect("potentials for Monaco");
         RoutingEngine::from_package(Arc::new(package))
     })
