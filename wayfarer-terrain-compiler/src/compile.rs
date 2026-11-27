@@ -32,10 +32,25 @@
 //! A post's code is the majority WorldCover class (mapped to the 4-bit codes of
 //! [`wayfarer_terrain::profile`]) of the WorldCover pixels whose centres fall in its cell,
 //! ties to the class that blocks or endangers more (water, then wetland, built-up, bare...).
-//! Its confidence bit is set when that class holds at least three quarters of those pixels.
-//! (The OSM override, which also sets the bit where OSM agrees, comes with the OSM stage.)
+//!
+//! With an OSM extract (see [`crate::osm`] for how its areas reach the posts), OSM overrides
+//! WorldCover where an OSM area covers at least half a post's 16 samples, except for forest,
+//! where the two agree almost everywhere, and scrub below 1,300 m, which is mostly
+//! overgrowing farmland. Scrub at or above 1,300 m (by the post's own height) is dwarf pine
+//! (code 12); bare rock is 13, scree 14 and bog or swamp forest 15, classes WorldCover lacks
+//! (E3's recommended fusion).
+//!
+//! The confidence bit is set where OSM overrides and agrees with WorldCover (in the coarse
+//! classes: mangrove counts as tree, moss as grass, dwarf pine as shrub, rock and scree as
+//! bare, bog as wetland), or where OSM does not override and the WorldCover class holds at
+//! least three quarters of the cell's pixels.
+//!
+//! ## Linear features
+//!
+//! The lines plane is the OSM lines mask of [`crate::osm`], zero without an extract.
 
 use crate::geo::Utm;
+use crate::osm::{self, OsmPlanes};
 use crate::source::{ChunkCache, MM_NONE, Mosaic, Window};
 use crate::{Error, Result};
 use wayfarer_terrain::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing, div_round};
@@ -331,6 +346,8 @@ pub(crate) struct Planes {
     /// Posts whose height came from each tier, and posts whose class came from a later tier.
     pub by_tier: Vec<u64>,
     pub steep_fallback: u64,
+    /// Posts whose land cover OSM set.
+    pub osm_cover: u64,
 }
 
 pub(crate) struct Ctx<'a> {
@@ -342,7 +359,7 @@ pub(crate) struct Ctx<'a> {
     pub t2: [i128; 15],
 }
 
-pub(crate) fn block(ctx: &Ctx, b: BlockId) -> Result<Planes> {
+pub(crate) fn block(ctx: &Ctx, b: BlockId, osm: Option<&OsmPlanes>) -> Result<Planes> {
     let k = ctx.k;
     let kk = (k * k) as u64;
     let mut p = Planes {
@@ -353,6 +370,7 @@ pub(crate) fn block(ctx: &Ctx, b: BlockId) -> Result<Planes> {
         lines: vec![0; BLOCK_POSTS],
         by_tier: vec![0; ctx.tiers.len()],
         steep_fallback: 0,
+        osm_cover: 0,
     };
     // Posts still wanting a height, or (with a height) a class.
     let mut want_h = vec![true; BLOCK_POSTS];
@@ -418,7 +436,34 @@ pub(crate) fn block(ctx: &Ctx, b: BlockId) -> Result<Planes> {
         }
     }
     cover(ctx, b, &mut p)?;
+    if let Some(o) = osm {
+        fuse(&mut p, o);
+    }
     Ok(p)
+}
+
+/// The lowest height of dwarf pine, in decimetres.
+const DWARF_PINE_MIN_DM: i32 = 13_000;
+/// The coarse class of each 4-bit code, for agreement.
+const COARSE: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 3, 2, 6, 6, 9];
+
+/// OSM's override of the WorldCover planes, and the lines plane.
+fn fuse(p: &mut Planes, o: &OsmPlanes) {
+    for q in 0..BLOCK_POSTS {
+        let fine = o.fine[q];
+        let code = match fine {
+            osm::FOREST => 0,
+            osm::SCRUB if p.dm[q] != DEM_NONE && p.dm[q] >= DWARF_PINE_MIN_DM => 12,
+            _ => osm::FINE_TO_COVER[fine as usize],
+        };
+        let wc = p.cover[q];
+        if 2 * o.cov[q] as usize >= osm::SUB * osm::SUB && code != 0 {
+            p.conf[q] = (COARSE[code as usize] == COARSE[wc as usize]) as u8;
+            p.cover[q] = code;
+            p.osm_cover += 1;
+        }
+    }
+    p.lines.copy_from_slice(&o.lines);
 }
 
 /// WorldCover code to the 4-bit class (0 = none).

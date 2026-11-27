@@ -1167,6 +1167,8 @@ dependencies = [
  "wayfarer-package",
  "wayfarer-sar",
  "wayfarer-service",
+ "wayfarer-terrain",
+ "wayfarer-terrain-compiler",
 ]
 
 [[package]]
@@ -1324,10 +1326,9 @@ name = "wayfarer-terrain-compiler"
 version = "0.6.0"
 dependencies = [
  "blake3",
- "clap",
- "ctrlc",
  "flate2",
  "libm",
+ "osm-pbf-ingest",
  "rayon",
  "tempfile",
  "thiserror",

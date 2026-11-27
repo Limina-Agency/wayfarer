@@ -45,3 +45,5 @@ wayfarer = { workspace = true }
 wayfarer-package = { workspace = true }
 wayfarer-sar = { workspace = true }
 wayfarer-service = { workspace = true }
+wayfarer-terrain = { workspace = true }
+wayfarer-terrain-compiler = { workspace = true }

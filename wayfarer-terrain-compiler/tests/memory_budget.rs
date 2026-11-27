@@ -163,6 +163,7 @@ fn sources() -> Sources {
             vec![SourceFile::new("glo.tif", glo)],
         ],
         land_cover: vec![SourceFile::new("wc.tif", wc)],
+        osm: None,
         attribution: String::new(),
     }
 }

@@ -1,15 +1,16 @@
-//! Stage 1 of Wayfarer's off-road terrain: compiles DEM and land-cover COG tiles into a
-//! terrain file (`wayfarer_terrain::terrain`) on the global lattice.
+//! Stage 1 of Wayfarer's off-road terrain: compiles DEM and land-cover COG tiles and an OSM
+//! extract into a terrain file (`wayfarer_terrain::terrain`) on the global lattice.
 //!
 //! The heights come from tiers of DEM sources, best first: GEM-15 (Google's 15 m DTM, the
 //! squares an app may already hold and draw), then Copernicus GLO-30 for its gaps. The
 //! steepness-max class comes from the same full-resolution pixels, and the land cover from
-//! ESA WorldCover. [`compile()`] reads only the tiles it needs, holds decoded tiles in a cache
-//! of bounded size, works one block row (64 posts, about 2 km at 1″) at a time and streams
-//! the file out, so its memory does not grow with the region. The rules of every step are in
-//! [`compile`](mod@compile)'s module docs; they are integer arithmetic but for the UTM
-//! projection, which uses `libm`, so the same inputs give the same file on every target and
-//! thread count.
+//! ESA WorldCover, overridden by OSM areas (multipolygons included) where they say more. OSM
+//! ways give the linear features: roads and paths, rivers and streams, railways, fences,
+//! cliffs. [`compile()`] reads only the tiles it needs, holds decoded tiles in a cache of
+//! bounded size, works one block row (64 posts, about 2 km at 1″) at a time and streams the
+//! file out. The rules of every step are in the [`compile`](mod@compile) and [`osm`] module
+//! docs; they are integer arithmetic but for the UTM projection, which uses `libm`, so the
+//! same inputs give the same file on every target and thread count.
 //!
 //! A host compiles the terrain file from the tiles it already holds:
 //!
@@ -17,7 +18,8 @@
 //! use wayfarer_terrain_compiler::{CancelToken, Options, Region, Sources, compile_to_file};
 //!
 //! // Files or directories of `.tif` tiles; each inner list is one height tier, best first.
-//! let sources = Sources::from_paths(&[vec!["tiles/gem15"], vec!["tiles/glo30"]], &["tiles/worldcover"])?;
+//! let sources = Sources::from_paths(&[vec!["tiles/gem15"], vec!["tiles/glo30"]], &["tiles/worldcover"])?
+//!     .with_osm("malopolskie.osm.pbf");
 //! let region = Region::Bbox { south: 49.2, west: 19.84, north: 49.38, east: 20.12 };
 //! let cancel = CancelToken::new(); // `cancel.cancel()` from any thread stops it
 //! let report = compile_to_file(sources, &region, &Options::default(), "tatra.wtr", &cancel, |p| {
@@ -29,15 +31,13 @@
 //!
 //! [`compile()`] writes to any seekable sink and takes sources from any reader
 //! ([`SourceFile::new`]); a host that polls instead of taking callbacks starts a
-//! [`TerrainJob`]. The `wayfarer-terrain` binary (feature `cli`, on by default) is the command
-//! line: `wayfarer-terrain compile` and `wayfarer-terrain inspect`.
-//!
-//! Not yet here: the OSM stage (land-cover override and its confidence, linear features),
-//! which fills the `cover`, `conf` and `lines` planes from an OSM extract.
+//! [`TerrainJob`]. The command line is `wayfarer terrain compile` and `wayfarer terrain
+//! inspect` (crate `wayfarer-cli`).
 
 pub mod compile;
 pub mod geo;
 mod job;
+pub mod osm;
 pub mod source;
 pub mod tiff;
 
@@ -80,6 +80,8 @@ pub mod attribution {
     pub const GEM15: &str = "Heights: GEM-15 DTM, CC BY 4.0. This dataset is produced by Google.";
     pub const GLO30: &str = "Heights where GEM-15 has none: Copernicus DEM GLO-30, produced using Copernicus WorldDEM-30 (c) DLR e.V. 2010-2014 and (c) Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.";
     pub const WORLDCOVER: &str = "Land cover: ESA WorldCover 10 m 2021 v200, CC BY 4.0. (c) ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium.";
+    /// Added by [`Sources::with_osm`](crate::Sources::with_osm).
+    pub const OSM: &str = "Land-cover override and linear features: (c) OpenStreetMap contributors, ODbL 1.0, openstreetmap.org/copyright.";
     pub const ALL: [&str; 3] = [GEM15, GLO30, WORLDCOVER];
 }
 
@@ -91,6 +93,9 @@ pub struct Sources {
     pub heights: Vec<Vec<SourceFile>>,
     /// ESA WorldCover tiles (geographic, class codes 10-100); empty for no land cover.
     pub land_cover: Vec<SourceFile>,
+    /// An OSM extract (`.osm.pbf`) for the land-cover override and the linear features; `None`
+    /// for WorldCover only and an empty lines plane.
+    pub osm: Option<PathBuf>,
     /// Licences and attribution, written into the file's sources text with the file names
     /// (sorted, so the order files come in changes no byte).
     pub attribution: String,
@@ -119,8 +124,17 @@ impl Sources {
                 .map(|t| open(t))
                 .collect::<Result<_>>()?,
             land_cover: open(land_cover)?,
+            osm: None,
             attribution: attribution::ALL.join("\n"),
         })
+    }
+
+    /// Adds an OSM extract and its attribution ([`attribution::OSM`]).
+    pub fn with_osm(mut self, pbf: impl Into<PathBuf>) -> Sources {
+        self.osm = Some(pbf.into());
+        self.attribution.push('\n');
+        self.attribution.push_str(attribution::OSM);
+        self
     }
 }
 
@@ -143,6 +157,31 @@ fn tiles(path: &Path) -> Result<Vec<PathBuf>> {
     }
     v.sort();
     Ok(v)
+}
+
+/// A directory of the compile's own, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(base: Option<&Path>) -> Result<Scratch> {
+        let base = base
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = base.join(format!("wayfarer-terrain-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Error::Output(format!("scratch {}: {e}", dir.display())))?;
+        Ok(Scratch(dir))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Where to compile.
@@ -216,6 +255,10 @@ pub struct Options {
     pub cache_bytes: usize,
     /// Worker threads; `None` uses the current rayon pool. Never changes the output.
     pub threads: Option<usize>,
+    /// Where the OSM stage keeps its node store while it reads an extract (a directory of
+    /// its own is made in it and removed after); the system's temporary directory by
+    /// default. A small extract's store stays in memory.
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -224,6 +267,7 @@ impl Default for Options {
             spacing: Spacing::new(120).unwrap(),
             cache_bytes: 64 << 20,
             threads: None,
+            scratch_dir: None,
         }
     }
 }
@@ -231,8 +275,19 @@ impl Default for Options {
 /// How far a compile has come, reported after each block row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Progress {
+    pub stage: Stage,
     pub blocks_done: u64,
     pub blocks_total: u64,
+}
+
+/// What a compile is doing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stage {
+    /// Reading the OSM extract (two passes), before any block.
+    ReadingOsm,
+    /// Compiling and writing block rows.
+    #[default]
+    Blocks,
 }
 
 impl Progress {
@@ -258,6 +313,11 @@ pub struct Report {
     pub steep_from_later_tier: u64,
     pub posts_with_cover: u64,
     pub posts_with_confident_cover: u64,
+    /// Posts whose land cover OSM set, and posts with a linear feature.
+    pub posts_with_osm_cover: u64,
+    pub posts_with_lines: u64,
+    /// What the OSM read found, with an extract.
+    pub osm: Option<osm::OsmStats>,
     /// Source tiles decoded, counting repeats after eviction from the cache.
     pub tiles_decoded: u64,
     pub cache_peak_bytes: u64,
@@ -333,6 +393,13 @@ pub fn compile<W: Write + Seek + Send>(
         names.sort_unstable();
         text.push_str(&format!("\nland cover: {}", names.join(", ")));
     }
+    if let Some(pbf) = &sources.osm {
+        let name = pbf
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        text.push_str(&format!("\nosm: {name}"));
+    }
     if text.len() > MAX_SOURCES {
         // Long file lists are cut at a character boundary; the attribution comes first.
         let mut cut = MAX_SOURCES;
@@ -365,20 +432,53 @@ pub fn compile<W: Write + Seek + Send>(
         ..Report::default()
     };
     let mut writer = TerrainWriter::new(out, s, blocks.clone(), &text)?;
+    let pbf = sources.osm;
     let mut run = |writer: &mut TerrainWriter<W>, report: &mut Report| -> Result<()> {
+        let osm = match &pbf {
+            Some(pbf) if !blocks.is_empty() => {
+                on_progress(Progress {
+                    stage: Stage::ReadingOsm,
+                    blocks_done: 0,
+                    blocks_total: blocks.len() as u64,
+                });
+                let scratch = Scratch::new(options.scratch_dir.as_deref())?;
+                let o = osm::Osm::read(
+                    pbf,
+                    osm::Rect::of_blocks(&blocks, s),
+                    options.threads,
+                    &scratch.0,
+                    cancel,
+                );
+                drop(scratch);
+                let o = o?;
+                report.osm = Some(o.stats.clone());
+                Some(o)
+            }
+            _ => None,
+        };
         let mut at = 0;
         while at < blocks.len() {
             let bi = blocks[at].bi;
             let end = at + blocks[at..].iter().take_while(|b| b.bi == bi).count();
-            let planes: Vec<compile::Planes> = blocks[at..end]
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let row = &blocks[at..end];
+            let bands = osm.as_ref().map(|o| {
+                let bjs: Vec<i32> = row.iter().map(|b| b.bj).collect();
+                o.band(s, bi, &bjs)
+            });
+            let planes: Vec<compile::Planes> = row
                 .par_iter()
-                .map(|&b| {
+                .enumerate()
+                .map(|(n, &b)| {
                     if cancel.is_cancelled() {
                         return Err(Error::Cancelled);
                     }
-                    compile::block(&ctx, b)
+                    compile::block(&ctx, b, bands.as_ref().map(|o| &o[n]))
                 })
                 .collect::<Result<_>>()?;
+            drop(bands);
             for p in planes {
                 for (t, n) in p.by_tier.iter().enumerate() {
                     report.heights_by_tier[t] += n;
@@ -389,10 +489,13 @@ pub fn compile<W: Write + Seek + Send>(
                 report.posts_with_cover += p.cover.iter().filter(|&&c| c != 0).count() as u64;
                 report.posts_with_confident_cover +=
                     p.conf.iter().filter(|&&c| c != 0).count() as u64;
+                report.posts_with_osm_cover += p.osm_cover;
+                report.posts_with_lines += p.lines.iter().filter(|&&l| l != 0).count() as u64;
                 writer.push(&p.dm, &p.steep, &p.cover, &p.conf, &p.lines)?;
             }
             at = end;
             on_progress(Progress {
+                stage: Stage::Blocks,
                 blocks_done: at as u64,
                 blocks_total: blocks.len() as u64,
             });

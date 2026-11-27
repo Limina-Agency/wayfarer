@@ -39,27 +39,27 @@ details() { # <summary> <file> <language>
 }
 
 cmd_semver() {
-  local out status=0 root name manifest
-  local -a exclude=() added=()
+  local out status=0 root name dir
+  local new=() exclude=()
   out="$(mktemp)"
-  # A crate the base does not have yet has no baseline to compare with, and
-  # semver-checks stops on it, so it is left out and named instead.
+  # A published crate the base doesn't have has no API to break; semver-checks
+  # cannot find it there and would stop, so it is listed as new and left out.
   root="$(pwd)/"
-  while IFS=$'\t' read -r name manifest; do
-    if ! git cat-file -e "$base:${manifest#"$root"}" 2>/dev/null; then
+  while read -r name dir; do
+    if ! git cat-file -e "$base:${dir#"$root"}/Cargo.toml" 2>/dev/null; then
+      new+=("$name")
       exclude+=(--exclude "$name")
-      added+=("$name")
     fi
   done < <(cargo metadata --no-deps --format-version 1 |
-    jq -r '.packages[] | [.name, .manifest_path] | @tsv')
+    jq -r '.packages[] | select(.publish != []) | "\(.name) \(.manifest_path | rtrimstr("/Cargo.toml"))"')
   # Patch-level rules: a 0.x minor release may break the API, but every break
   # should be on purpose and named in the changelog, so all of them are shown.
   cargo semver-checks --workspace "${exclude[@]}" --baseline-rev "$base" \
     --release-type patch --color never >"$out" 2>&1 || status=$?
   echo "## Semver checks against $base_label"
   echo
-  if ((${#added[@]})); then
-    echo "New since $base_label, so not checked: $(printf '`%s` ' "${added[@]}")"
+  if ((${#new[@]})); then
+    echo "New published crates, not checked: $(printf '`%s` ' "${new[@]}")"
     echo
   fi
   if [[ $status == 0 ]]; then
