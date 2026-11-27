@@ -834,3 +834,50 @@ fn aoi_cut_and_host_time() {
     // The host passes its own time; the surface is the one at the start of that epoch.
     assert_eq!(inc(&fx.ter).surface_at(t + E - 1).unwrap(), full);
 }
+
+/// The incident id is the host's: it enters the recipe, never the content, and a surface that
+/// belongs to no incident uses `NO_INCIDENT`, so identical inputs give identical recipes.
+#[test]
+fn incident_id_is_recipe_only() {
+    use wayfarer_terrain::surface::NO_INCIDENT;
+    let fx = fixture();
+    let rules = [Rules::walker_default()];
+    let prior = Prior::default();
+    let build = |id: [u8; 16]| {
+        Incident {
+            id,
+            terrain: &fx.ter,
+            prior: &prior,
+            layers: fx.layers.iter().collect(),
+            overlay: fx.overlay.clone(),
+            rules: &rules,
+            epoch_s: E,
+            allow_research: false,
+            feature_min_conf: 128,
+            level_min_w: 128,
+        }
+        .surface(T0)
+        .unwrap()
+    };
+    let (a, b, m) = (
+        build(NO_INCIDENT),
+        build(NO_INCIDENT),
+        build(*b"mission-0042\0\0\0\0"),
+    );
+    assert_eq!(
+        a.recipe_hash(),
+        b.recipe_hash(),
+        "no incident: same inputs, same recipe"
+    );
+    assert_ne!(
+        a.recipe_hash(),
+        m.recipe_hash(),
+        "a mission's surfaces are its own"
+    );
+    assert_eq!(
+        a.content_hash(),
+        m.content_hash(),
+        "the id never changes a route"
+    );
+    assert_eq!(a.block_section(), m.block_section());
+}

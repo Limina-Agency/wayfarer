@@ -35,6 +35,8 @@ pub const MINOR: u16 = 0;
 pub const FUSE_VERSION: u16 = 1;
 pub const MAGIC: &[u8; 4] = b"WIS0";
 pub const DELTA_MAGIC: &[u8; 4] = b"WISD";
+/// The incident id of a surface that belongs to no incident: all zeros.
+pub const NO_INCIDENT: [u8; 16] = [0; 16];
 /// Source of a post: the base.
 pub const SRC_BASE: u8 = 0;
 /// Source of a post: the team overlay.
@@ -242,6 +244,7 @@ pub struct Header {
     /// [`FUSE_VERSION`] of the build that made the surface. A reader with another fuse version
     /// still reads and routes on it; it just cannot rebuild the same surface.
     pub fuse_version: u16,
+    /// [`Incident::id`]; [`NO_INCIDENT`] when the surface belongs to no incident.
     pub incident: [u8; 16],
     pub spacing: u32,
     pub epoch_s: u32,
@@ -665,6 +668,10 @@ pub fn kind_u8(k: Kind) -> u8 {
 /// Everything a surface is built from.
 #[derive(Clone, Debug)]
 pub struct Incident<'a> {
+    /// The incident (mission) the surface belongs to, chosen by the host, or [`NO_INCIDENT`]
+    /// for a surface that belongs to none (a route's own analysis). It enters the recipe hash
+    /// but not the content hash, so it never changes a route: two hosts that build from the
+    /// same inputs with the same id, or both with none, get the same recipe hash.
     pub id: [u8; 16],
     pub terrain: &'a Terrain,
     pub prior: &'a Prior,
