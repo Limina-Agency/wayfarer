@@ -60,9 +60,36 @@ terrain crates.
   experimental `wayfarer-layer` and `wayfarer-terrain` (#112 to #119) are
   published. `wayfarer-terrain-compiler` (#116) is not published yet: build
   it from the tag. No terrain file ships; an app compiles its own.
-- **Rust API (breaking):** see Changes; struct literals of the request and
-  result types named there need the new fields, and `::new` and `Default`
-  are unchanged.
+- **Rust API (breaking),** from `cargo semver-checks` against 0.4.0. Struct
+  literals need the new fields; `::new` and `Default` are unchanged.
+  - `wayfarer`: `RouteIsochroneRequest` gains `origins`, `order`,
+    `include_origins` and `polygons`; `RouteIsochroneResult` gains `origins`
+    and `polygons`, `RouteIsochroneBucket` gains `edge_origins` and
+    `polygon`, and `RouteIsochroneBoundaryFragment` gains `origin` (#85,
+    #91, #107). `RouteOptions` gains `off_network`, `LegResult` gains
+    `off_network`, `CorrelationPolicy` gains `access`, `SarOffNetwork`
+    gains `costed`, `RouteShapeDynamicOverlay` gains `duration_seconds`,
+    and `RouteShapeQualityFlag::OffNetworkAccess` and
+    `RouteShapeDynamicOverlayKind::AccessLeg` are new variants, so
+    exhaustive matches need an arm (#108). `RouteDiagnostics` and
+    `RouteMatrixResult` gain the expanded correlation distances (#83).
+    `RouteNavigationInput` gains `shape_segment_speed_limits_kph` and
+    `RouteNavigationProgress` gains `speed_limit_kph` (#87).
+  - `wayfarer-compiler`: `PackageBuildOptions` gains `package_format`
+    (#82, #110).
+  - `wayfarer-package`: `Section` gains the format-3 sections, so
+    exhaustive matches need an arm. The free `format::profile_bit` is gone:
+    a profile's bit depends on the package's slots, so use the package's
+    or the sections' `profile_bit(profile)`, or `format_2_profile_bit` for
+    format 2's fixed bits. `BarrierAccess::is_valid` takes the slot count.
+    `Sections::edge_profile_access` is `edge_access` (an `EdgeAccess`), and
+    `Sections` gains `profiles`, `nodes_by_rank`, `edge_ids_implied` and the
+    OSM node id columns. `RoutingPackageVerification` gains `content_hash`,
+    `PackageLayout` gains `nodes_by_rank` and `RoutingPackageSection` gains
+    `id` (#82, #88, #96, #101).
+  - `wayfarer-costing`, `wayfarer-road-graph`, `wayfarer-service`,
+    `wayfarer-line-network` and `wayfarer-ffi` have no breaking change.
+    `wayfarer-sar`, `wayfarer-layer` and `wayfarer-terrain` are new.
 
 ### Changes
 
