@@ -1,8 +1,9 @@
 # Portals: routes that start or end on open ground (W3)
 
-Status: proposal with the first two pieces built (the priced-access seam,
-section 2, and the terrain fields, section 3.1), for review before portal
-generation lands. Written against
+Status: proposal, mostly built. The priced-access seam (section 2), the
+terrain fields (section 3.1) and portal generation (section 3) are built.
+Truncation reporting (section 4) and the Tatra parity runs (section 5) are
+next. Written against
 `main` at `e1d070c` (0.6.0). Off-road plan W3, "portals and blending": PLAN
 section 8 ("0.8 incident-surface portals: each cell a road passes through,
 cheapest per directed edge, truncation reported"). The terrain side is
@@ -115,24 +116,47 @@ Bounds stay admissible because a priced access is still a super-source arc. The
 CCH potentials are seeded with candidate offsets (#93), so they take the
 priced cost as they take X1's.
 
-## 3. Portal generation (`wayfarer::portals`, feature `terrain`)
+## 3. Portal generation (`wayfarer::portals`, feature `terrain`, built)
 
 ```rust
-pub struct TerrainPricer {     // implements AccessPricer
-    pub surface: Arc<Surface>,
-    pub grid: Arc<Grid>,           // built once per surface (Incident caches it)
-    pub profiles: ProfileMap,      // MobilityProfile -> surface profile index
-    pub max_access_s: f64,         // default 1,800 walkers, 600 vehicles
-    pub switch_cost_s: f64,        // default 10 walkers, 45 vehicles
+pub struct TerrainPricer {        // implements AccessPricer
+    // terrain (steepness, line masks), surface, grid: private
+    pub walker: PortalClass,      // OnFoot, Legged
+    pub vehicle: PortalClass,     // every other profile
+    pub snap_radius_m: f64,       // 25
+    pub force: bool,              // price even an endpoint on a road (SAR)
 }
+pub struct PortalClass {
+    pub max_access_s: f64,        // 1,800 walkers, 600 vehicles
+    pub switch_cost_s: f64,       // 10 walkers, 45 vehicles
+    pub max_steep: u8,            // 9 walkers, 5 vehicles
+    pub max_risk: u8,             // 128 (1/255)
+    pub road_pace_mps: f64,       // 1.4 walkers, 30 km/h vehicles
+}
+TerrainPricer::from_incident(&incident)   // the incident's last surface
+TerrainPricer::new(terrain, surface, grid).with_profile(profile, index)
 // a request: offNetwork { maxRadiusM: 3000, maxCandidates: 16,
 //                         pricer: TerrainPricer }
 ```
 
-A request's endpoints are correlated as today. An endpoint is priced by the
-terrain when the `TerrainPricer`'s surface covers it and it is farther than the snap radius
-from every road, or when the request asks for it. That decision is section 6,
-question 2.
+Walkers use the surface's profile named `walker` and vehicles the one named
+`vehicle`. `with_profile` maps others. `Incident::grid` is now public, so the
+pricer shares the grid the incident built once per surface.
+
+With a pricer on the request, the correlator finds up to 64 candidates within
+the radius (more than `maxCandidates`) and hands them to the pricer, which
+returns them best first. The endpoint keeps the first `maxCandidates`. An
+endpoint keeps X1's straight-line candidates, unpriced, when:
+
+- its profile has no surface profile;
+- a candidate lies within `snap_radius_m` of the point and `force` is off;
+- the surface does not cover the point, or the profile cannot stand on its
+  post.
+
+Otherwise a candidate that has no legal portal within `max_access_s` is
+dropped. When none has one, the endpoint has no candidates and the route
+fails, rather than drawing a straight line across ground the terrain says
+cannot be crossed.
 
 ### 3.1 The terrain search
 
@@ -148,24 +172,30 @@ question 2.
 
 ### 3.2 Portals on each directed edge
 
-- Directed edges come from the package's spatial grid within the box (the
-  correlator's index). The profile's access mask is the same one
-  `search_access` applies.
+- Directed edges are the correlator's candidates (above), so the profile's
+  access mask and the island rules are the ones `search_access` applies.
 - Each edge's shape is walked through lattice posts with the same exact
   supercover the overlay lines use (`fuse::supercover_*`). Each post it
   crosses becomes a portal at the shape point closest to the post's centre,
   with that point's `fraction`.
-- The key of a portal at fraction `f` on an origin edge is the access cost,
-  plus the switch cost, plus `(1 − f)` of the edge's cost: what the seed would
-  cost at the edge's head. For a destination edge it is the access cost, plus
-  the switch cost, plus `f` of the edge's cost. The engine computes the
-  edge-cost part with the request's costing, as seeds already do. Each
-  directed edge keeps its portal with the least key. Ties go to the lower post
-  index, then the lower fraction.
+- The key of a portal at fraction `f` on an origin edge is the access time,
+  plus the switch cost, plus `(1 − f)` of the edge's time: what the seed would
+  cost at the edge's head. For a destination edge it is the access time, plus
+  the switch cost, plus `f` of the edge's time. Correlation runs before
+  costing, so the edge's time stands in for its cost: a vehicle's at the
+  edge's own speed where it states one, otherwise at the class's
+  `road_pace_mps`. The key only chooses the portal on each edge and ranks the
+  edges. The searches then seed the kept candidates with the request's
+  costing, as they seed any candidate. Each directed edge keeps its portal
+  with the least key. Ties go to the lower post index, then the lower
+  fraction.
+- The access time is the field's time at the portal post, plus the offsets
+  from the requested point to its post and from the portal post to the join,
+  each at its own post's time per metre.
 - All directed edges are ranked by key, then by edge id, and the first
-  `max_candidates` are kept. Fractions and costs are fixed point (µs and
-  1/2^32 of the edge) until they are handed to the engine as `f64`, so the
-  choice is the same on every target.
+  `max_candidates` are kept. Keys are µs and fractions 1/2^32 of the edge,
+  so the choice is the same on every target except where a fraction falls
+  within a rounding of a unit boundary (the snap uses the platform `cos`).
 
 ### 3.3 Exit legality and switch cost
 
@@ -173,11 +203,11 @@ A post is a legal portal for a profile when all of these hold:
 
 | Rule | Source |
 |---|---|
-| The edge is not a motorway, motorway link, motorroad, bridge or tunnel, and its layer is 0 | edge attributes in the package |
+| The edge is not a motorway, motorway link, motorroad, bridge, tunnel or ferry, and its layer is 0 | edge attributes in the package |
 | The surface lets the profile stand on the post (time per metre above 0, closure risk below the profile's limit) | the surface |
 | The post's line mask has no barrier bit (`lines::BARRIERS`: river, stream, rail, fence, cliff) and no team block | the surface's line mask |
 | The post's steepness-max class is at most the profile's embankment class (walkers 9, vehicles 5; field trial) | the terrain |
-| Vehicles: the edge is a track, unpaved, or of road class minor or lower | edge attributes |
+| Vehicles: the edge is a track, unpaved (surface, or a tracktype other than grade1), or of road class residential or lower | edge attributes |
 
 The switch cost is added once per stretch, in time and in cost. It stops
 search results from zigzagging between road and terrain for a few seconds.
@@ -186,14 +216,15 @@ calibrates them.
 
 ### 3.4 Cost of the stretch
 
-The terrain search gives time in µs. The stretch's duration is that time plus
-the switch cost. Its cost is duration × `costFactor`, where the factor
-defaults to 1 for portals: the surface's time already says what open ground
-costs. X1's 2 and 1.5 were a stand-in for that and are not applied again. The
-distance is the length of the terrain path. Its confidence is
-`search::route_conf` of the path.
+The terrain search gives time in µs. The stretch's duration is that time,
+with the two offsets, plus the switch cost. Its cost is the duration: a
+factor of 1, because the surface's time already says what open ground costs.
+X1's 2 and 1.5 were a stand-in for that and are not applied again, and the
+request's `costFactor` applies only to X1's straight lines. The distance is
+the path's length on the lattice plus the two offsets. Its confidence,
+`search::route_conf` of the path, comes with the result summary (next).
 
-## 4. Truncation
+## 4. Truncation (next)
 
 A search over the kept candidates is exact. A cut candidate could still have
 given a cheaper route if its key, minus the best kept candidate's key, is
@@ -207,6 +238,13 @@ reports both:
   exceeds the route's cost spread. This is the plan's "truncation reported".
 
 ## 5. Tests and measurements
+
+Built: `terrain_portals_match_the_reference` runs routes and matrices for a
+walker and a car on a synthetic surface over the grid test package, with and
+without a fence along one road. Engine and oracle agree, totals add up, each
+stretch is priced, at least as long as the straight line and at the
+surface's pace, a point on a road keeps X1's line, and no portal lies on a
+fenced post. Next:
 
 - **Parity:** routes, matrices, isochrones and trips with portal candidates
   against the reference oracle with the same candidates. This uses the
@@ -236,3 +274,6 @@ reports both:
    switch to force terrain pricing is for SAR's last known position.
 3. **The cost factor on terrain stretches.** Recommended: 1, as section 3.4
    says. X1 keeps 2 and 1.5 for straight lines with no terrain.
+4. **No legal portal within the bound.** Built: the endpoint has no
+   candidates and the route fails. The alternative is to fall back to X1's
+   straight line, which hides that the terrain closes the point off.

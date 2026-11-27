@@ -82,6 +82,8 @@ mod queries;
 pub mod reference;
 // Prototype of a search across regions (feature `experimental-regions`): not
 // a supported API, changes without notice.
+#[cfg(feature = "terrain")]
+pub mod portals;
 #[cfg(feature = "experimental-regions")]
 #[doc(hidden)]
 pub mod regions;

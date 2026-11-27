@@ -316,7 +316,10 @@ impl Incident {
             .ok_or_else(|| Error::invalid("no surface yet: call surface_at first"))
     }
 
-    fn grid(&self) -> Result<Arc<Grid>> {
+    /// The search grid of the last surface, built once per surface and shared: what
+    /// [`Incident::route`] and a host's own searches (portals, say) run on. An error when
+    /// there is no surface yet.
+    pub fn grid(&self) -> Result<Arc<Grid>> {
         let b = self.built()?;
         if let Some(g) = b.grid.get() {
             return Ok(g.clone());

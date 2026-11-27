@@ -379,27 +379,26 @@ impl<'a> Correlator<'a> {
         endpoint_options: &RouteEndpointOptions,
     ) -> CandidateSearch {
         if let Some(access) = &policy.access {
-            let mut search = self.search_access(
+            let resolved = access.resolve(profile);
+            let Some(pricer) = &access.pricer else {
+                return self.search_access(point, profile, policy, endpoint_options, resolved);
+            };
+            // The pricer chooses among more candidates than the endpoint keeps.
+            let wide = crate::access::AccessPolicy {
+                candidate_limit: crate::access::ACCESS_MAX_CANDIDATES,
+                ..resolved
+            };
+            let mut search = self.search_access(point, profile, policy, endpoint_options, wide);
+            let candidates = std::mem::take(&mut search.candidates);
+            search.candidates = pricer.0.price(crate::access::AccessQuery {
                 point,
                 profile,
-                policy,
-                endpoint_options,
-                access.resolve(profile),
-            );
-            if let Some(pricer) = &access.pricer {
-                let candidates = std::mem::take(&mut search.candidates);
-                search.candidates = pricer.0.price(crate::access::AccessQuery {
-                    point,
-                    profile,
-                    role,
-                    policy: access.resolve(profile),
-                    candidates,
-                    view: self.access,
-                });
-                search
-                    .candidates
-                    .truncate(crate::access::ACCESS_MAX_CANDIDATES);
-            }
+                role,
+                policy: resolved,
+                candidates,
+                view: self.access,
+            });
+            search.candidates.truncate(resolved.candidate_limit);
             return search;
         }
         let nearby = self.search(point, profile, policy, endpoint_options);
