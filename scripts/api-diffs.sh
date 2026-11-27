@@ -39,14 +39,29 @@ details() { # <summary> <file> <language>
 }
 
 cmd_semver() {
-  local out status=0
+  local out status=0 root name dir
+  local new=() exclude=()
   out="$(mktemp)"
+  # A published crate the base doesn't have has no API to break; semver-checks
+  # cannot find it there and would stop, so it is listed as new and left out.
+  root="$(pwd)/"
+  while read -r name dir; do
+    if ! git cat-file -e "$base:${dir#"$root"}/Cargo.toml" 2>/dev/null; then
+      new+=("$name")
+      exclude+=(--exclude "$name")
+    fi
+  done < <(cargo metadata --no-deps --format-version 1 |
+    jq -r '.packages[] | select(.publish != []) | "\(.name) \(.manifest_path | rtrimstr("/Cargo.toml"))"')
   # Patch-level rules: a 0.x minor release may break the API, but every break
   # should be on purpose and named in the changelog, so all of them are shown.
-  cargo semver-checks --workspace --baseline-rev "$base" --release-type patch \
-    --color never >"$out" 2>&1 || status=$?
+  cargo semver-checks --workspace "${exclude[@]}" --baseline-rev "$base" \
+    --release-type patch --color never >"$out" 2>&1 || status=$?
   echo "## Semver checks against $base_label"
   echo
+  if ((${#new[@]})); then
+    echo "New published crates, not checked: $(printf '`%s` ' "${new[@]}")"
+    echo
+  fi
   if [[ $status == 0 ]]; then
     echo "No breaking change in the published library crates."
   elif grep -qE '^\s*(--- failure|Summary semver requires)' "$out"; then
