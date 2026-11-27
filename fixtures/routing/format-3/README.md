@@ -2,7 +2,7 @@
 
 `short_road.mrt` is the synthetic road of `../short_road.mrt` (one
 bidirectional road at latitude 52°, longitude 21°–21.002°, no real-world data)
-in package format 3, the format 0.5 first writes: a tagged section table,
+in package format 3, the format 0.6 first writes: a tagged section table,
 implied ids numbered by CCH rank, `PackageParams` and the lattice request
 grid. `wayfarer/tests/package_formats.rs` checks that the engine keeps opening
 and routing it.

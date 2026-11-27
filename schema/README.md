@@ -18,6 +18,9 @@ result types from them (Swift, Kotlin, TypeScript, …).
 | `navigation-sample.json`, `navigation-progress-options.json`, `navigation-progress.json` | `wayfarer_navigation_progress` |
 | `overlay-set.json` | overlay sets (`"overlaySets"` in a route request) |
 | `compile-request.json`, `compile-progress.json`, `compile-result.json` | `wayfarer_compile_*` (compiler build) and `wayfarer compile --request` |
+| `sar-reach-request.json`, `sar-reach-result.json` | `wayfarer_sar_reach` (sar build) and `wayfarer sar reach --request` |
+| `sar-teams-request.json`, `sar-teams-result.json` | `wayfarer_sar_plan_teams` (sar build) and `wayfarer sar teams` |
+| `sar-coverage-request.json`, `sar-coverage-result.json` | `wayfarer_sar_coverage` (sar build) and `wayfarer sar coverage` |
 
 Every object key is camelCase; enum values are snake_case. The test fails when
 a type changes without its schema; after an intended change run

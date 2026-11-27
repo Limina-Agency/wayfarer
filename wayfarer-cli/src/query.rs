@@ -23,7 +23,7 @@ use wayfarer_service::{
 use crate::{Failure, print_json};
 
 /// `lat,lng` in degrees.
-fn parse_point(text: &str) -> Result<GeoPoint, String> {
+pub(crate) fn parse_point(text: &str) -> Result<GeoPoint, String> {
     let (lat, lng) = text
         .split_once(',')
         .ok_or_else(|| format!("`{text}` is not `lat,lng`"))?;
@@ -76,7 +76,7 @@ impl Common {
     }
 }
 
-fn read_text(path: &Path) -> Result<String, Failure> {
+pub(crate) fn read_text(path: &Path) -> Result<String, Failure> {
     if path == Path::new("-") {
         let mut text = String::new();
         std::io::stdin()

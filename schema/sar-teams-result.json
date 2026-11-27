@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TeamPlanResult",
+  "type": "object",
+  "properties": {
+    "arrivals": {
+      "description": "Every team against every segment, team-major in request order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TeamArrival"
+      }
+    },
+    "assignments": {
+      "description": "A first assignment: segments by probability, highest first, each to\nthe free team that arrives first (ties: the earlier team). A team\ntakes one segment; segments no free team reaches stay unassigned.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TeamAssignment"
+      }
+    },
+    "paces": {
+      "description": "Each team's travel-time multiplier, in team order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TeamPace"
+      }
+    },
+    "segments": {
+      "description": "In request order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SegmentPlan"
+      }
+    },
+    "territories": {
+      "description": "With `shift_s`, in team order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TeamTerritory"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "paces",
+    "arrivals",
+    "segments",
+    "assignments"
+  ],
+  "$defs": {
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "PaceSource": {
+      "description": "Where a model's numbers come from.",
+      "oneOf": [
+        {
+          "description": "The built-in E4 calibration.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "default"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Calibrated from a team's GPS tracks.",
+          "type": "object",
+          "properties": {
+            "curveRefitted": {
+              "description": "Whether the slope curve was refitted (or only scaled).",
+              "type": "boolean"
+            },
+            "distanceM": {
+              "description": "Moving distance used, metres.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "team"
+            },
+            "label": {
+              "description": "A label the caller gave (team name, date).",
+              "type": "string"
+            },
+            "movingS": {
+              "description": "Moving time used, seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "tracks": {
+              "description": "Track pieces used.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "label",
+            "tracks",
+            "distanceM",
+            "movingS",
+            "curveRefitted"
+          ]
+        }
+      ]
+    },
+    "SegmentPlan": {
+      "type": "object",
+      "properties": {
+        "accessPoint": {
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "edgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "firstArrivalS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "firstTeam": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "networkLengthM": {
+          "description": "Paths inside the segment (both directions once).",
+          "type": "number",
+          "format": "double"
+        },
+        "probability": {
+          "description": "Probability of area: the planner's, or summed from the edges inside.",
+          "type": "number",
+          "format": "double"
+        },
+        "segmentId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "segmentId",
+        "probability",
+        "networkLengthM",
+        "edgeCount",
+        "accessPoint"
+      ]
+    },
+    "TeamArrival": {
+      "description": "One cell of the arrival matrix.",
+      "type": "object",
+      "properties": {
+        "arrivalS": {
+          "description": "Seconds from now until the team reaches the segment's access point\n(start offset plus travel at its pace); none when it cannot.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "distanceM": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "segmentId": {
+          "type": "string"
+        },
+        "teamId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "teamId",
+        "segmentId"
+      ]
+    },
+    "TeamAssignment": {
+      "type": "object",
+      "properties": {
+        "arrivalS": {
+          "type": "number",
+          "format": "double"
+        },
+        "probability": {
+          "type": "number",
+          "format": "double"
+        },
+        "segmentId": {
+          "type": "string"
+        },
+        "teamId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "teamId",
+        "segmentId",
+        "arrivalS",
+        "probability"
+      ]
+    },
+    "TeamPace": {
+      "description": "The travel-time multiplier a team's arrivals use.",
+      "type": "object",
+      "properties": {
+        "paceRatio": {
+          "description": "The pace model's expected time over the engine's on the segments'\npaths (1 for teams not on foot).",
+          "type": "number",
+          "format": "double"
+        },
+        "source": {
+          "description": "The pace model's source; none for teams not on foot.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaceSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "teamId": {
+          "type": "string"
+        },
+        "timeFactor": {
+          "description": "`pace_ratio * pace_factor`: the multiplier on engine travel time.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "teamId",
+        "paceRatio",
+        "timeFactor"
+      ]
+    },
+    "TeamTerritory": {
+      "type": "object",
+      "properties": {
+        "edgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "edgeIds": {
+          "description": "Undirected edge keys, sorted.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "networkLengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "probability": {
+          "description": "The plan's probability on the territory's edges.",
+          "type": "number",
+          "format": "double"
+        },
+        "teamId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "teamId",
+        "edgeCount",
+        "networkLengthM",
+        "probability"
+      ]
+    }
+  }
+}

@@ -1,0 +1,1692 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TeamPlanRequest",
+  "description": "Which team goes where first. See `docs/design/sar-planning.md` 2.5.",
+  "type": "object",
+  "properties": {
+    "atMs": {
+      "description": "The time overlay windows are evaluated at (UTC ms).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "includeEdgeIds": {
+      "description": "`false` leaves out the territories' `edgeIds`.",
+      "type": "boolean",
+      "default": true
+    },
+    "offTrail": {
+      "description": "`true` (default): the walk or drive from a team's start point and to a\nsegment's access point off the network is priced at the profile's\noff-road pace and is in the arrival times (costed access legs, within\n2 km for walkers), unless `options.offNetwork` sets its own. `false`\nsnaps those points to the network for free.",
+      "type": "boolean",
+      "default": true
+    },
+    "options": {
+      "$ref": "#/$defs/RouteOptions",
+      "default": {
+        "alternatives": {
+          "maxCostRatio": 1.6,
+          "maxSharedEdgeRatio": 0.8,
+          "minimumWarningDifference": 0,
+          "requestedAlternativeCount": 0
+        },
+        "avoidedEdgeIds": [],
+        "avoidedEdgeRanges": [],
+        "blockedEdgeIds": [],
+        "blockedEdgeRanges": [],
+        "candidateLimit": 8,
+        "costing": {
+          "allowFord": true,
+          "avoidAccessRestricted": 0.0,
+          "avoidDestinationOnly": 0.0,
+          "avoidFerries": 0.0,
+          "avoidGates": 0.0,
+          "avoidMotorways": 0.0,
+          "avoidPaths": 0.0,
+          "avoidTolls": 0.0,
+          "avoidTracks": 0.0,
+          "conditionalRestrictionEvalAtMs": null,
+          "emergencyOverrideStrength": 0.0,
+          "fixedSpeedKph": null,
+          "preferKnownRouteRefs": 0.0,
+          "preferPaved": 0.0,
+          "speedPreference": "posted_or_inferred",
+          "topSpeedKph": null
+        },
+        "edgeCostMultiplierRanges": [],
+        "edgeCostMultipliers": {},
+        "maxCorrelationDistanceM": 75,
+        "maxVisitedEdgeCount": null,
+        "warningEdgeIds": [],
+        "warningEdgeRanges": []
+      }
+    },
+    "overlays": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteOverlay"
+      }
+    },
+    "pace": {
+      "description": "The pace model of on-foot teams that set none; by default the\nbuilt-in E4 model.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PaceModel"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "probability": {
+      "description": "A reach prediction's probability (`ReachResult::probability`), for the\nsegments that set none and for territories.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProbabilityMap"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "segments": {
+      "description": "1 to 1,000 segments, ids unique.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SearchSegment"
+      }
+    },
+    "shiftS": {
+      "description": "With a shift length (seconds from now), each team's territory: the\npaths it reaches first within the shift.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "teams": {
+      "description": "1 to 64 teams, ids unique.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SarTeam"
+      }
+    },
+    "territoryBands": {
+      "description": "Time bands of a territory, 1 to 16 (default 8): arrival times are\nexact to within one band.",
+      "type": "integer",
+      "format": "uint",
+      "default": 8,
+      "minimum": 0
+    },
+    "zones": {
+      "description": "`no_go` zones block teams too; other zones are ignored here.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SarZone"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "teams",
+    "segments"
+  ],
+  "$defs": {
+    "EdgeProbability": {
+      "description": "One edge's probability of holding the person.",
+      "type": "object",
+      "properties": {
+        "avoidOnly": {
+          "description": "Reached only by crossing an `avoid` zone (or inside one).",
+          "type": "boolean"
+        },
+        "edgeId": {
+          "description": "The undirected key (the smaller directed id of the edge's two).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "probability": {
+          "type": "number",
+          "format": "double"
+        },
+        "timeS": {
+          "description": "The model time at which the edge is first entered (the complying\nsearch's when it reaches the edge).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "probability",
+        "lengthM"
+      ]
+    },
+    "GeoPoint": {
+      "type": "object",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "format": "double"
+        },
+        "lng": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ]
+    },
+    "MobilityProfile": {
+      "oneOf": [
+        {
+          "description": "Routed and costed exactly as `Wheeled`.",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "A road vehicle (car, van, truck), costed close to driving time.\nPrivate and destination-only roads only at a route's ends.",
+          "type": "string",
+          "const": "wheeled"
+        },
+        {
+          "description": "A tracked or off-road vehicle on the vehicle network: tracks are\nstrongly preferred, and speeds are capped (30 km/h on tracks, 42 km/h\non main roads). Private and destination-only roads only at a route's\nends.",
+          "type": "string",
+          "const": "tracked"
+        },
+        {
+          "description": "An emergency vehicle: the roads cars may use and busways, and not\nconfined to through roads (it may cross private and destination-only\nroads).",
+          "type": "string",
+          "const": "emergency"
+        },
+        {
+          "description": "A person walking, costed close to walking time (about 5 km/h), as\nValhalla's pedestrian costing: footways, paths and streets alike.",
+          "type": "string",
+          "const": "on_foot"
+        },
+        {
+          "description": "Travel on foot that keeps to tracks and paths: the ways `OnFoot` may\nuse, and bikeable ways `foot=no` closes to it (a cycleway with\n`foot=no`, a track with `access=no, bicycle=yes`). Tracks and paths cost\nhalf as much as streets, main roads are avoided more strongly, and the\npace on tracks and paths is faster (6–6.5 km/h).",
+          "type": "string",
+          "const": "legged"
+        }
+      ]
+    },
+    "PaceModel": {
+      "description": "A walking pace model. Serialized as JSON for calibration files.",
+      "type": "object",
+      "properties": {
+        "flatSpeedMmS": {
+          "description": "Moving speed on flat ground on the calibration mix of ways, mm/s.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "slopePermille": {
+          "description": "[`PACE_SLOPE_STEPS`] entries, per mille of the flat speed, for grade\n-100 % to +100 % in 1 % steps.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/PaceSource"
+        },
+        "timePercentilesPermille": {
+          "$ref": "#/$defs/PaceTimePercentiles"
+        },
+        "trailPermille": {
+          "$ref": "#/$defs/PaceTrailFactors"
+        },
+        "version": {
+          "description": "[`PACE_MODEL_VERSION`].",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "source",
+        "flatSpeedMmS",
+        "slopePermille",
+        "trailPermille",
+        "timePercentilesPermille"
+      ]
+    },
+    "PaceSource": {
+      "description": "Where a model's numbers come from.",
+      "oneOf": [
+        {
+          "description": "The built-in E4 calibration.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "default"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Calibrated from a team's GPS tracks.",
+          "type": "object",
+          "properties": {
+            "curveRefitted": {
+              "description": "Whether the slope curve was refitted (or only scaled).",
+              "type": "boolean"
+            },
+            "distanceM": {
+              "description": "Moving distance used, metres.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "team"
+            },
+            "label": {
+              "description": "A label the caller gave (team name, date).",
+              "type": "string"
+            },
+            "movingS": {
+              "description": "Moving time used, seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "tracks": {
+              "description": "Track pieces used.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "label",
+            "tracks",
+            "distanceM",
+            "movingS",
+            "curveRefitted"
+          ]
+        }
+      ]
+    },
+    "PaceTimePercentiles": {
+      "description": "Travel-time multipliers per percentile, per mille of the expected time.",
+      "type": "object",
+      "properties": {
+        "p10": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "p50": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "p90": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "p10",
+        "p50",
+        "p90"
+      ]
+    },
+    "PaceTrailFactors": {
+      "description": "Trail factors, per mille of the slope curve's speed.",
+      "type": "object",
+      "properties": {
+        "alpinePath": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "mountainPath": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "path": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "paved": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "steps": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "track": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "paved",
+        "track",
+        "path",
+        "mountainPath",
+        "alpinePath",
+        "steps"
+      ]
+    },
+    "ProbabilityMap": {
+      "description": "Probability of area on the network: per edge, plus what lies beyond.\nEdges, `unlisted`, `rest_of_world` and `off_network` add up to 1.",
+      "type": "object",
+      "properties": {
+        "edges": {
+          "description": "Sorted by edge key; only edges above 0.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EdgeProbability"
+          }
+        },
+        "offNetwork": {
+          "description": "Mass of bands or rings with no reachable path in them (the network\nended: the person went off the network or stopped at its end).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "restOfWorld": {
+          "description": "Beyond the outermost band (faster than nearly everyone, or outside the\ndistance rings).",
+          "type": "number",
+          "format": "double"
+        },
+        "unlisted": {
+          "description": "Mass of reached edges left out of `edges` by the request's `maxEdges`\nor `minEdgeProbability`: on the network, but not on any listed edge.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "edges",
+        "restOfWorld"
+      ]
+    },
+    "RouteAlternativePolicy": {
+      "type": "object",
+      "properties": {
+        "maxCostRatio": {
+          "type": "number",
+          "format": "double",
+          "default": 1.6
+        },
+        "maxSharedEdgeRatio": {
+          "type": "number",
+          "format": "double",
+          "default": 0.8
+        },
+        "minimumWarningDifference": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "requestedAlternativeCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "RouteCostingOptions": {
+      "type": "object",
+      "properties": {
+        "allowFord": {
+          "type": "boolean",
+          "default": true
+        },
+        "avoidAccessRestricted": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidDestinationOnly": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidFerries": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidGates": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidMotorways": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidPaths": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidTolls": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "avoidTracks": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "conditionalRestrictionEvalAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "emergencyOverrideStrength": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "fixedSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "preferKnownRouteRefs": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "preferPaved": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "speedPreference": {
+          "$ref": "#/$defs/RouteSpeedPreference",
+          "default": "posted_or_inferred"
+        },
+        "topSpeedKph": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      }
+    },
+    "RouteDynamicEndpointKind": {
+      "type": "string",
+      "enum": [
+        "origin",
+        "destination"
+      ]
+    },
+    "RouteDynamicOverlay": {
+      "type": "object",
+      "properties": {
+        "diagnostics": {
+          "$ref": "#/$defs/RouteDynamicOverlayDiagnostics",
+          "default": {
+            "crossCountryConnectorCount": 0,
+            "endpointConnectorCount": 0,
+            "fullBlockedEdgeCount": 0,
+            "partialSplitEdgeCount": 0,
+            "rejectedConnectorCount": 0,
+            "roadBypassConnectorCount": 0,
+            "splitEdgeCount": 0,
+            "virtualConnectorCount": 0
+          }
+        },
+        "splitEdgeRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteDynamicSplitEdgeRange"
+          }
+        },
+        "virtualEdges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteDynamicVirtualEdge"
+          }
+        }
+      }
+    },
+    "RouteDynamicOverlayDiagnostics": {
+      "type": "object",
+      "properties": {
+        "crossCountryConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "endpointConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "fullBlockedEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "partialSplitEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "rejectedConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "roadBypassConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "splitEdgeCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "virtualConnectorCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "splitEdgeCount",
+        "partialSplitEdgeCount",
+        "fullBlockedEdgeCount",
+        "virtualConnectorCount",
+        "endpointConnectorCount",
+        "roadBypassConnectorCount"
+      ]
+    },
+    "RouteDynamicSplitEdgeRange": {
+      "type": "object",
+      "properties": {
+        "blockedRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "usableRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        }
+      },
+      "required": [
+        "edgeId"
+      ]
+    },
+    "RouteDynamicVirtualEdge": {
+      "type": "object",
+      "properties": {
+        "connectorId": {
+          "type": "string"
+        },
+        "connectorType": {
+          "$ref": "#/$defs/RouteDynamicVirtualEdgeKind"
+        },
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "distanceM": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "geometry": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "provenance": {
+          "type": "string",
+          "default": ""
+        },
+        "sourceChunkIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sourceEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sourceEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicEndpointKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceFraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sourcePoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetEdgeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "targetEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicEndpointKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetFraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "targetPoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "edgeId",
+        "connectorId",
+        "connectorType",
+        "distanceM",
+        "cost"
+      ]
+    },
+    "RouteDynamicVirtualEdgeKind": {
+      "type": "string",
+      "enum": [
+        "endpoint",
+        "road_entry",
+        "road_to_road_bypass",
+        "cross_country"
+      ]
+    },
+    "RouteEdgeAvoidanceRange": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction"
+      ]
+    },
+    "RouteEdgeCostMultiplierRange": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "multiplier": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction",
+        "multiplier"
+      ]
+    },
+    "RouteEdgeRange": {
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction"
+      ]
+    },
+    "RouteEdgeSpeedOverrideRange": {
+      "description": "A speed override (km/h) on a stretch of an edge\n(`RouteOptions::edge_speed_override_ranges`).",
+      "type": "object",
+      "properties": {
+        "edgeId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "endFraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "speedKph": {
+          "type": "number",
+          "format": "double"
+        },
+        "startFraction": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "edgeId",
+        "startFraction",
+        "endFraction",
+        "speedKph"
+      ]
+    },
+    "RouteOffNetworkOptions": {
+      "description": "Costed off-network access legs on a request (`RouteOptions::off_network`).\nEvery field is optional: `\"offNetwork\": {}` turns access legs on with the\nprofile's defaults.",
+      "type": "object",
+      "properties": {
+        "costFactor": {
+          "description": "Cost per second of access time, at least 1 and at most\n[`ACCESS_MAX_COST_FACTOR`]: above 1, roads stay preferred over open\nground at the same pace. Defaults to 2 for walkers and 1.5 for\nvehicles.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maxCandidates": {
+          "description": "Directed candidate edges per point, 1 to [`ACCESS_MAX_CANDIDATES`]\n(default [`ACCESS_DEFAULT_CANDIDATES`]). It replaces\n`candidateLimit`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "maxRadiusM": {
+          "description": "How far from a point to look for the road network, metres: finite,\nabove 0 and at most [`ACCESS_MAX_RADIUS_M`]. Defaults to\n[`ACCESS_DEFAULT_RADIUS_WALKING_M`] for walkers and\n[`ACCESS_DEFAULT_RADIUS_VEHICLE_M`] for vehicles. It replaces\n`maxCorrelationDistanceM` and its widening.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "paceMps": {
+          "description": "Pace across open ground, m/s: above 0 and at most\n[`ACCESS_MAX_PACE_MPS`]. Defaults to the profile's off-road pace (the\npace of direct legs).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "RouteOptions": {
+      "type": "object",
+      "properties": {
+        "alternatives": {
+          "$ref": "#/$defs/RouteAlternativePolicy",
+          "default": {
+            "maxCostRatio": 1.6,
+            "maxSharedEdgeRatio": 0.8,
+            "minimumWarningDifference": 0,
+            "requestedAlternativeCount": 0
+          }
+        },
+        "avoidedEdgeIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "avoidedEdgeRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeAvoidanceRange"
+          }
+        },
+        "blockedEdgeIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "blockedEdgeRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        },
+        "candidateLimit": {
+          "description": "Correlation candidates kept per endpoint (at most 16).",
+          "type": "integer",
+          "format": "uint",
+          "default": 8,
+          "minimum": 0
+        },
+        "costing": {
+          "$ref": "#/$defs/RouteCostingOptions",
+          "default": {
+            "allowFord": true,
+            "avoidAccessRestricted": 0.0,
+            "avoidDestinationOnly": 0.0,
+            "avoidFerries": 0.0,
+            "avoidGates": 0.0,
+            "avoidMotorways": 0.0,
+            "avoidPaths": 0.0,
+            "avoidTolls": 0.0,
+            "avoidTracks": 0.0,
+            "conditionalRestrictionEvalAtMs": null,
+            "emergencyOverrideStrength": 0.0,
+            "fixedSpeedKph": null,
+            "preferKnownRouteRefs": 0.0,
+            "preferPaved": 0.0,
+            "speedPreference": "posted_or_inferred",
+            "topSpeedKph": null
+          }
+        },
+        "dynamicOverlay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDynamicOverlay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "edgeCostMultiplierRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeCostMultiplierRange"
+          }
+        },
+        "edgeCostMultipliers": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^\\d+$": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        },
+        "edgeSpeedOverrideRanges": {
+          "description": "Speed overrides on stretches of edges: the stretch takes its length\nat the given speed, the rest of the edge its own time.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteEdgeSpeedOverrideRange"
+          }
+        },
+        "edgeSpeedOverrides": {
+          "description": "Speed overrides (km/h) on whole edges: the edge's travel time becomes\nits length at that speed, and its cost follows (cost is time times\nthe edge's factors). Faster than the profile's own speed is a\ndiscount; it is costed exactly, with bounds scaled by the least\ncost ratio.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^\\d+$": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        },
+        "maxCorrelationDistanceM": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 75,
+          "minimum": 0
+        },
+        "maxVisitedEdgeCount": {
+          "description": "Budget for one search: the most out-edges it may examine before it\nstops with `SearchBudgetExceeded`. A route is one search. A matrix\napplies it to each search separately, never to the request as a\nwhole: to each cell when cells are searched pairwise (on a package\nwith CCH potentials, up to 64 searchable targets on foot and any\nnumber with a vehicle; without them, up to 12 on foot and 50 with a\nvehicle), and to each source row's shared expansion above that\ncut-off. Cells a stopped search had not reached fail with\n`search_budget_exceeded`; targets a stopped row had already reached\nkeep their best path so far. Isochrones ignore it and use\n`RouteIsochroneRequest::max_expansion_edge_count`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "offNetwork": {
+          "description": "Costed off-network access legs (`crate::access`): every location's\ncandidates within the access radius are priced by a straight stretch\nfrom the point, which results include. Off when absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOffNetworkOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openedEdgeIds": {
+          "description": "Edges the request opens for its profile (an overlay `open`): costed\nlike an accessible edge of the profile even where legal access, a\ndestination-only rule or a conditional closure closes it. A block\nstill wins. Endpoints do not snap onto edges the profile cannot use.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "sar": {
+          "description": "Search-and-rescue relaxations (`crate::sar`); off when absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteSarOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warningEdgeIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "warningEdgeRanges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        }
+      }
+    },
+    "RouteOverlay": {
+      "type": "object",
+      "properties": {
+        "costMultiplier": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "edges": {
+          "description": "Explicit edges (an overlay set bound to this package): used instead\nof projecting `points`, which may then be empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteEdgeRange"
+          }
+        },
+        "geometryKind": {
+          "$ref": "#/$defs/RouteOverlayGeometryKind"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/RouteOverlayPolicy"
+        },
+        "profiles": {
+          "description": "The profiles the overlay applies to; empty: every profile.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MobilityProfile"
+          }
+        },
+        "projectionDistanceM": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteOverlaySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speedKph": {
+          "description": "`discount` and `open`: the speed (km/h) on the covered edges.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "validFromMs": {
+          "description": "The overlay is active from this time (UTC ms) on; absent: always.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "validToMs": {
+          "description": "The overlay is active before this time (UTC ms); absent: always.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "required": [
+        "geometryKind",
+        "points",
+        "policy",
+        "projectionDistanceM"
+      ]
+    },
+    "RouteOverlayGeometryKind": {
+      "description": "The shape of an overlay's geometry.",
+      "type": "string",
+      "enum": [
+        "point",
+        "line",
+        "polygon"
+      ]
+    },
+    "RouteOverlayPolicy": {
+      "description": "What an overlay does to the edges it covers.\nInside one request: a block wins over a discount and a slow-go; an\n`open` wins over legal closure and over a block whose `valid_from_ms` is\nearlier than its own (an absent one is earliest); overlapping discounts\nmultiply, slow-go factors take the largest, and of several speed\noverrides on one edge the slowest stands.",
+      "oneOf": [
+        {
+          "description": "Blocked.",
+          "type": "string",
+          "const": "no_go"
+        },
+        {
+          "description": "Dearer: `cost_multiplier` above 1 (default 2), cost only.",
+          "type": "string",
+          "const": "slow_go"
+        },
+        {
+          "description": "A hazard warning on the route; costs are unchanged.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Cheaper: `cost_multiplier` in (0, 1) scales cost and duration, and\n`speed_kph` sets the speed (cost follows the time). Costed exactly;\ngoal-directed bounds are scaled by the least cost ratio.",
+          "type": "string",
+          "const": "discount"
+        },
+        {
+          "description": "Usable by the request's profile (when `profiles` lists it, or lists\nnone) whatever its legal access says, at `speed_kph` if given. The\nedge must be in the package; endpoints do not snap onto it.",
+          "type": "string",
+          "const": "open"
+        }
+      ]
+    },
+    "RouteOverlaySource": {
+      "description": "Where an overlay came from, when it came from an overlay set.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "itemVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "setId": {
+          "type": "string"
+        },
+        "setVersion": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "setId",
+        "setVersion",
+        "itemId",
+        "itemVersion"
+      ]
+    },
+    "RouteSarOptions": {
+      "description": "The SAR option of a request (`RouteOptions::sar`). An absent relaxation\nis not relaxed. JSON names are snake_case with camelCase aliases.",
+      "type": "object",
+      "properties": {
+        "relaxations": {
+          "$ref": "#/$defs/RouteSarRelaxations",
+          "default": {}
+        }
+      }
+    },
+    "RouteSarRelaxations": {
+      "description": "The relaxations of a SAR request, each absent unless named.",
+      "type": "object",
+      "properties": {
+        "barriers": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarBarriers"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conditional": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarConditional"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "legalAccess": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarLegalAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "offNetwork": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarOffNetwork"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnRestrictions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarTurnRestrictions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vehicleOnPaths": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarVehicleOnPaths"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wrongWay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SarWrongWay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RouteSpeedPreference": {
+      "type": "string",
+      "enum": [
+        "posted_or_inferred",
+        "posted",
+        "inferred",
+        "free_flow",
+        "constrained",
+        "road_type_default"
+      ]
+    },
+    "SarBarriers": {
+      "description": "R4.",
+      "type": "object",
+      "properties": {
+        "gateS": {
+          "type": "number",
+          "format": "double",
+          "default": 90.0
+        },
+        "lockedGateS": {
+          "type": "number",
+          "format": "double",
+          "default": 300.0
+        },
+        "motorBlocking": {
+          "$ref": "#/$defs/SarMotorBlocking",
+          "default": "impassable"
+        }
+      }
+    },
+    "SarConditional": {
+      "description": "R6: `ignore` (default true when the relaxation is named).",
+      "type": "object",
+      "properties": {
+        "ignore": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "SarLegalAccess": {
+      "description": "R1. `military` is relaxed only when listed; `private` or `customers`\nlift the destination-only confinement of the whole request (see\n`lifts_destination_only`).",
+      "type": "object",
+      "properties": {
+        "factor": {
+          "type": "number",
+          "format": "double",
+          "default": 1.2
+        },
+        "values": {
+          "type": "array",
+          "default": [
+            "private",
+            "no",
+            "customers",
+            "forestry",
+            "agricultural"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "SarMotorBlocking": {
+      "description": "How R4 treats barriers that block motor vehicles (bollards, blocks).",
+      "oneOf": [
+        {
+          "description": "Impassable for vehicles (the default).",
+          "type": "string",
+          "const": "impassable"
+        },
+        {
+          "description": "Passable on foot only: the route ends its vehicle part there.",
+          "type": "string",
+          "const": "foot_only"
+        }
+      ]
+    },
+    "SarOffNetwork": {
+      "description": "R7.",
+      "type": "object",
+      "properties": {
+        "costed": {
+          "description": "X6: cost the leg (`crate::access`, at the profile's off-road pace and\na cost factor of 1). The join is then chosen by total time among the\ncandidates within `max_leg_m`, and the route's cost, duration,\ndistance, geometry and maneuvers include the leg; the report's\n`added_cost_s` is both the cost and the duration they add. Off by\ndefault: the leg is reported and left out of the totals.",
+          "type": "boolean"
+        },
+        "maxLegM": {
+          "type": "number",
+          "format": "double",
+          "default": 2000.0
+        }
+      }
+    },
+    "SarTeam": {
+      "description": "A search team.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "pace": {
+          "description": "The team's own walking pace model (`wayfarer pace calibrate` on its\nGPX tracks); by default the plan's `pace`, else the built-in model.\nApplies on foot only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaceModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paceFactor": {
+          "description": "A further multiplier on the team's travel time (a loaded team is\nslower than 1), in (0, 5]. Default 1.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "point": {
+          "description": "Where the team starts (the command post, a drop-off point).",
+          "$ref": "#/$defs/GeoPoint"
+        },
+        "profile": {
+          "$ref": "#/$defs/MobilityProfile",
+          "default": "on_foot"
+        },
+        "startOffsetS": {
+          "description": "Seconds from now until the team leaves (default 0).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "point"
+      ]
+    },
+    "SarTurnRestrictions": {
+      "description": "R3: each violated simple or complex restriction costs `penalty_s`.",
+      "type": "object",
+      "properties": {
+        "penaltyS": {
+          "type": "number",
+          "format": "double",
+          "default": 60.0
+        }
+      }
+    },
+    "SarUnknownWidth": {
+      "description": "Whether R5 admits paths of unknown width.",
+      "type": "string",
+      "enum": [
+        "deny",
+        "allow"
+      ]
+    },
+    "SarVehicleOnPaths": {
+      "description": "R5.",
+      "type": "object",
+      "properties": {
+        "classes": {
+          "type": "array",
+          "default": [
+            "pedestrian",
+            "cycleway",
+            "footway",
+            "path",
+            "bridleway"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "factor": {
+          "type": "number",
+          "format": "double",
+          "default": 3.0
+        },
+        "minWidthM": {
+          "type": "number",
+          "format": "double",
+          "default": 2.5
+        },
+        "unknownWidth": {
+          "$ref": "#/$defs/SarUnknownWidth",
+          "default": "deny"
+        }
+      }
+    },
+    "SarWrongWay": {
+      "description": "R2.",
+      "type": "object",
+      "properties": {
+        "entryS": {
+          "type": "number",
+          "format": "double",
+          "default": 30.0
+        },
+        "factor": {
+          "type": "number",
+          "format": "double",
+          "default": 2.0
+        }
+      }
+    },
+    "SarZone": {
+      "description": "A zone the planner draws, as a closed polygon (the last point need not\nrepeat the first).",
+      "type": "object",
+      "properties": {
+        "factor": {
+          "description": "`weight` zones: the probability multiplier, finite and above 0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "id": {
+          "description": "The planner's label, echoed in results.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SarZoneKind"
+        },
+        "polygon": {
+          "description": "At least three points.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "polygon"
+      ]
+    },
+    "SarZoneKind": {
+      "description": "How a zone shapes the prediction (see `docs/design/sar-planning.md` 2.3).",
+      "oneOf": [
+        {
+          "description": "The person cannot enter it (a river, a cliff band): blocked in every\nsearch, so it holds no probability.",
+          "type": "string",
+          "const": "no_go"
+        },
+        {
+          "description": "The person tends to avoid it (dense forest, a steep slope, private\nground): blocked in the complying search only, and the result is a\nmixture of the complying and the free search by\n`ReachRequest::avoid_compliance`.",
+          "type": "string",
+          "const": "avoid"
+        },
+        {
+          "description": "The search is unchanged; the probability of the edges inside is\nmultiplied by `factor` (above 1 for places the person is drawn to,\nbelow 1 for places they are unlikely to stop), then renormalised.",
+          "type": "string",
+          "const": "weight"
+        }
+      ]
+    },
+    "SearchSegment": {
+      "description": "A search segment: an area one team searches in one assignment, as people\ndrew it. It is taken as given: any winding, convex or not, never split,\nmerged or clipped to the reach; overlapping segments each count the paths\ninside them, and a segment with no path inside still gets arrival times\n(to its access point, off the paths with `offTrail`).",
+      "type": "object",
+      "properties": {
+        "accessPoint": {
+          "description": "Where a team enters the segment; by default a point inside the\npolygon (its centroid when that is inside).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "polygon": {
+          "description": "At least three points.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeoPoint"
+          }
+        },
+        "probability": {
+          "description": "The segment's probability of area when the planner sets it; by\ndefault the sum of the plan's edge probabilities inside the polygon.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "polygon"
+      ]
+    }
+  }
+}

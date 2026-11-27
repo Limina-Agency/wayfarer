@@ -91,6 +91,7 @@ overlap 0.97.
 | `wayfarer-costing` | The edge-cost model packages are built and queried with |
 | `wayfarer` | The engine: routes with alternatives, matrices, isochrones, map matching, turn-by-turn guidance, dynamic overlays |
 | `wayfarer-service` | Routing sources, readiness checks and route workflows (waypoints, direct legs) over the engine |
+| `wayfarer-sar` | Search and rescue planning over the engine: reach prediction (probability of area), likely routes, team assignment and track coverage |
 | `wayfarer-ffi` | The C ABI (`include/wayfarer.h`): JSON requests and results |
 | `wayfarer-compiler` | The compiler library: `compile` a `CompileRequest`, with progress and cancellation, or poll a `CompileJob` |
 | `wayfarer-cli` | The `wayfarer` command line: `compile`, `info`, `verify`, `route`, `matrix`, `nearest`, `isochrone`, `match`, `snap` |
@@ -160,7 +161,7 @@ which strings and handles the caller frees.
 - **Package format.** An engine opens formats
   `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=3 since
   0.5, which writes format 3; 0.2.0 dropped format 1, so recompile older
-  packages). Engines before 0.5 don't open format 3. A layout change bumps
+  packages). Engines before 0.6 don't open format 3. A layout change bumps
   the format and keeps reading the previous one for at least a release;
   every readable format has a frozen package under
   `fixtures/routing/format-<N>/` that the tests open and route.

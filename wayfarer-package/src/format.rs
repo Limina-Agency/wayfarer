@@ -68,7 +68,7 @@ pub const IDENTITY_HASH_TAG: &[u8] = b"wayfarer.package.identity.3";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum PackageFormat {
     /// Format 2: a positional section table after the header, for engines
-    /// older than 0.5.
+    /// older than 0.6.
     V2,
     /// Format 3 (the default): a tagged section table after the sections,
     /// implied ids, [`Section::PackageParams`].

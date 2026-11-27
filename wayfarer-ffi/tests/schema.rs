@@ -13,6 +13,9 @@ use wayfarer::{
     RouteNavigationProgressOptions, RouteOverlayGeometryProjection, SnapRequest, SnapResult,
 };
 use wayfarer_compiler::{CompileProgress, CompileRequest, CompileResult};
+use wayfarer_sar::{
+    CoverageRequest, CoverageResult, ReachRequest, ReachResult, TeamPlanRequest, TeamPlanResult,
+};
 use wayfarer_service::overlay_set::RouteOverlaySet;
 use wayfarer_service::{RouteWorkflowRequest, RouteWorkflowResult};
 
@@ -58,6 +61,12 @@ fn schemas_match_the_types() {
         ("compile-request", request::<CompileRequest>()),
         ("compile-progress", result::<CompileProgress>()),
         ("compile-result", result::<CompileResult>()),
+        ("sar-reach-request", request::<ReachRequest>()),
+        ("sar-reach-result", result::<ReachResult>()),
+        ("sar-teams-request", request::<TeamPlanRequest>()),
+        ("sar-teams-result", result::<TeamPlanResult>()),
+        ("sar-coverage-request", request::<CoverageRequest>()),
+        ("sar-coverage-result", result::<CoverageResult>()),
     ];
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../schema");
     let update = std::env::var_os("UPDATE_SCHEMA").is_some();

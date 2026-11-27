@@ -9,7 +9,7 @@ description = "C ABI for the offline routing engine: open routing packages; rout
 readme = "README.md"
 keywords = ["routing", "ffi", "c-api", "openstreetmap", "navigation"]
 categories = ["science::geo", "development-tools::ffi"]
-exclude = ["tests/abi.rs", "tests/compile.rs", "tests/schema.rs"]
+exclude = ["tests/abi.rs", "tests/compile.rs", "tests/sar.rs", "tests/schema.rs"]
 
 [lib]
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -25,6 +25,7 @@ wayfarer-service.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 wayfarer-compiler = { workspace = true, optional = true }
+wayfarer-sar = { workspace = true, optional = true }
 mimalloc = { workspace = true, optional = true }
 libmimalloc-sys = { workspace = true, optional = true }
 
@@ -39,6 +40,9 @@ mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # The wayfarer_compile_* calls: compile packages on the device. A
 # separate build of the library, since it adds the compiler and OSM ingest.
 compiler = ["dep:wayfarer-compiler"]
+# The wayfarer_sar_* calls: search and rescue planning (reach prediction,
+# team plans, track coverage) on an open package.
+sar = ["dep:wayfarer-sar"]
 # The compiler's phase events and counting allocator for benchmark harnesses
 # (see wayfarer-compiler), in place of mimalloc: a program has one global
 # allocator, so this also turns the library's mimalloc off.
@@ -48,5 +52,6 @@ benchmark-profiling = ["compiler", "wayfarer-compiler/benchmark-profiling"]
 # Generates the JSON Schemas in `schema/` (tests/schema.rs).
 wayfarer-service = { workspace = true, features = ["schema"] }
 wayfarer-compiler = { workspace = true, features = ["schema"] }
+wayfarer-sar = { workspace = true, features = ["schema"] }
 schemars = { workspace = true }
 tempfile = "3"

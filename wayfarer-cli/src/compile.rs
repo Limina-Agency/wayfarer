@@ -84,7 +84,7 @@ pub(crate) struct CompileArgs {
     )]
     profiles: Option<Vec<MobilityProfile>>,
     /// The package format to write: 3 (the default), or 2 for engines
-    /// older than 0.5.
+    /// older than 0.6.
     #[arg(
         long,
         value_name = "N",

@@ -85,7 +85,7 @@ pub struct PackageBuildOptions {
     /// bound with the straight line alone (tests and benchmarks).
     pub cch_order: bool,
     /// The package format to write: format 3 (the default,
-    /// `docs/design/format-3.md`), or format 2 for engines older than 0.5.
+    /// `docs/design/format-3.md`), or format 2 for engines older than 0.6.
     pub package_format: PackageFormat,
 }
 
