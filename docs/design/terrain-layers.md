@@ -267,10 +267,13 @@ twice counts once.
    supercover in integers (E7 × 27 and ticks × 625 share a unit), with both
    neighbours when a segment passes exactly through a cell corner. Effects are
    ORed, so feature order does not matter.
-6. **Team overlay items**, last and in the overlay set's own order: they beat
-   every raster and feature. v0 effects over a box of posts: block, clear (the
-   team walked it: hazards, levels and the debris, fallen-tree, washout and
-   block bits are cleared), and set a hazard to a value.
+6. **Team overlay items**, last, in the overlay set's canonical order (by
+   observed time, then item bytes): they beat every raster and feature, and a
+   later observation beats an earlier one. Effects: block, clear (the team
+   walked it: hazards, levels and the debris, fallen-tree, washout and block
+   bits are cleared), and set a hazard to a value, over a box, a polygon or a
+   line. The shapes, their rasterising rules and the item bytes are
+   `incident-surface.md` section 5.
 
 **Out, per post:** `P`, the 8 hazard probabilities, the 3 levels with their
 confidence, the effect bits, a certainty `round(255 · max P / S)`, and the

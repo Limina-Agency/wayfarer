@@ -235,7 +235,7 @@ in the release that first writes it.
 The incident surface's cost rules read a 16-bit mask per post of the lines
 crossing its cell (way kinds, path grades, steps, rivers, streams, railways,
 fences and walls, cliffs; bits 13 to 15 for the effects layers add;
-`incident-surface.md` section 5.1). No section stores it. It is derived when
+`incident-surface.md` section 6.1). No section stores it. It is derived when
 a surface is built, for the surface's AOI and spacing, from `BarrierLines`
 and the routing package's ways (way kind and `sac_scale` grade), by exact
 supercover: every cell a line touches, always 4-connected so an 8-connected
@@ -251,8 +251,11 @@ AOI at 1″). Deriving it keeps one source of truth per line.
 
 So a surface's recipe names what its mask came from: the `BarrierLines`
 section's hash and the package identity, beside the terrain file's hash.
-The incident surface contract (draft v0) still counts the mask inside the
-terrain hash; v1 should name these inputs instead. The bit layout is that contract's.
+The incident surface contract v1 still counts the mask inside the terrain
+hash, because the v1 sidecar terrain file stores the base line bits
+(`incident-surface.md` appendix A). When format 4 derives the mask, that
+contract's next major names these inputs instead. The bit layout is that
+contract's.
 
 ## 6. Open questions
 
