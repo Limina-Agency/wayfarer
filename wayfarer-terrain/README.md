@@ -15,9 +15,9 @@ off-road plan:
 3. **Query.** 16-connected integer Dijkstra and A* run on the surface, with pace by
    grade from the heights, canonical paths and route confidence.
 
-The formats follow the drafts `docs/design/terrain-layers.md` (layer contract v0)
-and `docs/design/incident-surface.md` (incident surface v1 draft: a fuse version in
-the recipe, an overlay that is a set applied by observed time, an AOI cut). Overlay
+The formats follow the v1 contracts `docs/design/terrain-layers.md` and
+`docs/design/incident-surface.md` (a fuse version in the recipe, an overlay that is
+a set applied by observed time, an AOI cut). Overlay
 items are boxes, polygons (filled even-odd, holes allowed) or lines (the supercover
 feature lines use), each with one exact integer rule for the posts it marks. The
 terrain file is the sidecar format in `terrain.rs` (v1: a sources and attribution
@@ -30,41 +30,38 @@ by grade is measured (E4).
 ## Example
 
 ```rust
-use wayfarer_terrain::fuse::{HashedLayer, Prior};
+use wayfarer_terrain::fuse::{Effect, OverlayItem};
+use wayfarer_terrain::incident::{Aoi, Incident, Settings};
 use wayfarer_terrain::profile::Rules;
-use wayfarer_terrain::search::{Grid, route};
-use wayfarer_terrain::surface::{Incident, Surface};
+use wayfarer_terrain::surface::Surface;
 use wayfarer_terrain::terrain::Terrain;
 
-fn plan(terrain_file: &[u8], layer_files: &[Vec<u8>], t: i64) -> wayfarer_terrain::Result<()> {
+fn plan(terrain_file: &[u8], layer_files: &[Vec<u8>], now: i64) -> wayfarer_terrain::Result<()> {
     let terrain = Terrain::read(terrain_file)?;
-    let layers = layer_files.iter().map(|b| HashedLayer::read(b)).collect::<Result<Vec<_>, _>>()?;
-    let rules = [Rules::walker_default(), Rules::vehicle()];
-    let prior = Prior::default();
-    let incident = Incident {
-        id: *b"incident-0001\0\0\0",
-        terrain: &terrain,
-        prior: &prior,
-        layers: layers.iter().collect(),
-        overlay: vec![],
-        rules: &rules,
-        epoch_s: 900,
-        allow_research: false,
-        feature_min_conf: 128,
-        level_min_w: 128,
-    };
-    let surface = incident.surface(t)?;
-    // A device that fused the same layers checks it got the same surface.
+    // The mission's AOI in degrees: the terrain is cut to it once.
+    let aoi = Aoi::from_degrees((49.15, 49.30), (19.85, 20.10))?;
+    let rules = vec![Rules::walker_default(), Rules::vehicle()];
+    let mut incident = Incident::new(*b"mission-0001\0\0\0\0", &terrain, Some(aoi), rules, Settings::default())?;
+    for f in layer_files {
+        incident.add_layer(f)?;
+    }
+    // The whole team overlay, in any order.
+    incident.set_overlay(vec![OverlayItem::polygon_from_degrees(
+        &[vec![(49.22, 19.95), (49.23, 19.95), (49.22, 19.97)]],
+        now - 600,
+        Effect::Block,
+    )?])?;
+    // At the host's time; later calls re-fuse only what changed.
+    let surface = incident.surface_at(now)?;
+    // A device that built from the same inputs has the same recipe hash.
     let shared = Surface::read(&surface.write())?;
-    assert_eq!(shared.content_hash(), surface.content_hash());
+    assert_eq!(shared.recipe_hash(), surface.recipe_hash());
 
-    let grid = Grid::new(&terrain, &surface)?;
-    let walker = grid.profile("walker").unwrap();
-    let (a, b) = (grid.cell_of(177_440, 71_936), grid.cell_of(177_400, 71_990));
-    if let (Some(a), Some(b)) = (a, b) {
-        if let Some(r) = route(&grid, walker, a, b) {
-            println!("{} s, mean certainty {}/255", r.conf.cost_us / 1_000_000, r.conf.mean_cert);
-        }
+    if let Some(r) = incident.route("walker", (49.20, 19.90), (49.25, 20.05))? {
+        println!("{} s, mean certainty {}/255", r.route.conf.cost_us / 1_000_000, r.route.conf.mean_cert);
+    }
+    if let Some(c) = incident.cell(49.21, 19.93)? {
+        println!("cover {}, steepness {}, hazards {:?}", c.post.cover, c.post.steep, c.hazards);
     }
     Ok(())
 }

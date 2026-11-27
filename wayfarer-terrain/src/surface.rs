@@ -1,4 +1,4 @@
-//! The incident surface (`docs/design/incident-surface.md`, contract v1 draft).
+//! The incident surface (`docs/design/incident-surface.md`, contract v1).
 //!
 //! The incident surface is the stored result of fusion: the base, the layers and the team
 //! overlay active at an incident epoch T, costed per profile. A query reads only this surface
@@ -253,7 +253,7 @@ pub struct Header {
     /// [`FUSE_VERSION`] of the build that made the surface. A reader with another fuse version
     /// still reads and routes on it; it just cannot rebuild the same surface.
     pub fuse_version: u16,
-    /// [`Incident::id`]; [`NO_INCIDENT`] when the surface belongs to no incident.
+    /// [`Inputs::id`]; [`NO_INCIDENT`] when the surface belongs to no incident.
     pub incident: [u8; 16],
     pub spacing: u32,
     pub epoch_s: u32,
@@ -662,7 +662,7 @@ pub fn kind_u8(k: Kind) -> u8 {
 
 /// Everything a surface is built from.
 #[derive(Clone, Debug)]
-pub struct Incident<'a> {
+pub struct Inputs<'a> {
     /// The incident (mission) the surface belongs to, chosen by the host, or [`NO_INCIDENT`]
     /// for a surface that belongs to none (a route's own analysis). It enters the recipe hash
     /// but not the content hash, so it never changes a route: two hosts that build from the
@@ -682,7 +682,7 @@ pub struct Incident<'a> {
     pub level_min_w: u8,
 }
 
-impl Incident<'_> {
+impl Inputs<'_> {
     fn params(&self, t: i64) -> Params {
         Params {
             t,
@@ -709,8 +709,8 @@ impl Incident<'_> {
 
     /// The surface at epoch start T from `prev`, re-fusing only the blocks whose inputs changed
     /// between `before` (the inputs `prev` was built from) and `self`. Equal to
-    /// [`Incident::surface`] at T, which tests check.
-    pub fn update(&self, t: i64, prev: &Surface, before: &Incident) -> Result<Surface> {
+    /// [`Inputs::surface`] at T, which tests check.
+    pub fn update(&self, t: i64, prev: &Surface, before: &Inputs) -> Result<Surface> {
         match self.dirty_blocks(t, prev, before) {
             None => self.surface(t),
             Some(only) => self.build(t, Some(prev), Some(&only)),
@@ -718,7 +718,7 @@ impl Incident<'_> {
     }
 
     /// The blocks to re-fuse, or None when everything must be rebuilt.
-    fn dirty_blocks(&self, t: i64, prev: &Surface, before: &Incident) -> Option<Vec<BlockId>> {
+    fn dirty_blocks(&self, t: i64, prev: &Surface, before: &Inputs) -> Option<Vec<BlockId>> {
         let same_base = self.terrain.hash() == before.terrain.hash()
             && prev.h.terrain == self.terrain.hash()
             && self.prior == before.prior

@@ -11,6 +11,10 @@
 //! 3. **Query** ([`search`]): 16-connected integer Dijkstra and A* on the surface with
 //!    pace by grade from the heights, canonical paths, and route confidence.
 //!
+//! A host that runs incidents keeps an [`incident::Incident`]: the terrain cut to the AOI, its
+//! layers and overlay, and the last surface, rebuilt only where its inputs changed, with routes
+//! and a per-post read in degrees. The modules above are the parts it is built from.
+//!
 //! Everything that changes a result is integer arithmetic with one rounding rule per step,
 //! and each block depends only on its own inputs, so the same inputs give the same bytes on
 //! every target, thread count and update order. The few floating-point steps (profile tables
@@ -20,9 +24,9 @@
 //! so producers can write layers on any device; they are re-exported here as [`lattice`],
 //! [`layer`] and [`codec`].
 //!
-//! Status: experimental. The file formats follow contract drafts (layers v0, surface and terrain
-//! file v1) and change until they are pinned; the profile values are assumptions until the
-//! field trial.
+//! Status: experimental. The formats follow the contracts `docs/design/terrain-layers.md` and
+//! `docs/design/incident-surface.md` (v1, with the terrain file in its appendix A); the profile
+//! values are assumptions until the field trial, and change through the fuse version.
 //!
 //! ```
 //! use wayfarer_terrain::{lattice::{BlockId, Spacing}, terrain::Terrain};
@@ -39,6 +43,7 @@ pub use wayfarer_layer::{codec, lattice, layer};
 
 pub mod cost;
 pub mod fuse;
+pub mod incident;
 pub mod lines;
 pub mod profile;
 pub mod search;

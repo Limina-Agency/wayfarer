@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use wayfarer_terrain::fuse::Prior;
 use wayfarer_terrain::profile::Rules;
 use wayfarer_terrain::search::{Grid, route};
-use wayfarer_terrain::surface::Incident;
+use wayfarer_terrain::surface::Inputs;
 
 struct Counting;
 static NOW: AtomicUsize = AtomicUsize::new(0);
@@ -50,7 +50,7 @@ fn peak(km2: f64) -> usize {
     let a = synth::area(km2);
     let rules = [Rules::walker_default(), Rules::vehicle()];
     let prior = Prior::default();
-    let inc = Incident {
+    let inc = Inputs {
         id: *b"wayfarer-memory\0",
         terrain: &a.terrain,
         prior: &prior,

@@ -1,4 +1,4 @@
-//! Terrain layer files (`docs/design/terrain-layers.md`, contract v0).
+//! Terrain layer files (`docs/design/terrain-layers.md`, contract v1, wire version 0.1).
 //!
 //! A layer is what a producer (a model, a host, a drone survey, a voxel-graph projection) hands
 //! to fusion: values per lattice post with a per-post confidence, or a list of linear features,

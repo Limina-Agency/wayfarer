@@ -1,6 +1,6 @@
 //! Fusion of the base with terrain layers and the team overlay into the per-post state the
-//! incident surface is costed from (`docs/design/terrain-layers.md`, contract v0; the overlay follows the incident surface
-//! contract v1 draft).
+//! incident surface is costed from (`docs/design/terrain-layers.md` section 8; the overlay is
+//! `docs/design/incident-surface.md` section 5, both contract v1).
 //!
 //! Per post, in this order:
 //! 1. The base: the land-cover code and confidence bit, turned into a class distribution by
