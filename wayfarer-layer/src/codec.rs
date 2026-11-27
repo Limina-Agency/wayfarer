@@ -25,13 +25,15 @@ pub fn unzigzag(u: u64) -> i64 {
     ((u >> 1) as i64) ^ -((u & 1) as i64)
 }
 
-pub(crate) fn put_str(o: &mut Vec<u8>, s: &str) {
+#[doc(hidden)]
+pub fn put_str(o: &mut Vec<u8>, s: &str) {
     put_varint(o, s.len() as u64);
     o.extend_from_slice(s.as_bytes());
 }
 
 /// A bounds-checked little-endian reader; every short read is `Error::Truncated(what)`.
-pub(crate) struct Reader<'a> {
+#[doc(hidden)]
+pub struct Reader<'a> {
     pub b: &'a [u8],
     pub pos: usize,
     what: &'static str,
@@ -84,6 +86,8 @@ impl<'a> Reader<'a> {
         }
     }
     /// A varint used as a length or count: at most what the remaining bytes could hold.
+    // Reads a length prefix; it is not the reader's own length.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&mut self) -> Result<usize> {
         let n = self.varint()?;
         if n > (self.b.len() - self.pos) as u64 {

@@ -118,7 +118,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: i686
-      - run: cargo test -p wayfarer-package -p wayfarer --target "$TARGET"
+      - run: cargo test -p wayfarer-package -p wayfarer -p wayfarer-layer -p wayfarer-terrain --target "$TARGET"
       - run: cargo build --release -p wayfarer-cli --target "$TARGET"
       - name: Monaco package matches fixtures/monaco-info.json
         run: |

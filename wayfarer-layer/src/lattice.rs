@@ -95,7 +95,7 @@ pub fn div_round(num: i128, den: i128) -> i128 {
 
 /// `div_round` in i64, for hot paths.
 #[inline]
-pub(crate) fn div_round_i64(num: i64, den: i64) -> i64 {
+pub fn div_round_i64(num: i64, den: i64) -> i64 {
     if num >= 0 {
         (2 * num + den) / (2 * den)
     } else {
@@ -104,7 +104,7 @@ pub(crate) fn div_round_i64(num: i64, den: i64) -> i64 {
 }
 
 /// Ceiling division for a positive divisor.
-pub(crate) fn ceil_div(a: i64, b: i64) -> i64 {
+pub fn ceil_div(a: i64, b: i64) -> i64 {
     -((-a).div_euclid(b))
 }
 

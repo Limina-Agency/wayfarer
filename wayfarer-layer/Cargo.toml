@@ -1,0 +1,22 @@
+[package]
+name = "wayfarer-layer"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Terrain layer files for Wayfarer: the global arc-second lattice and a small reader and writer for model output, hazard rasters and drone features"
+readme = "README.md"
+keywords = ["routing", "terrain", "search-and-rescue", "gis"]
+categories = ["science::geo", "encoding"]
+# Experimental: the layer contract is a draft (v0). Not published until Anton decides (see the
+# engine plan's publishing decision).
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+flate2 = { workspace = true }
+thiserror = { workspace = true }

@@ -1220,6 +1220,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfarer-layer"
+version = "0.4.0"
+dependencies = [
+ "blake3",
+ "flate2",
+ "thiserror",
+]
+
+[[package]]
 name = "wayfarer-line-network"
 version = "0.4.0"
 dependencies = [
@@ -1288,6 +1297,7 @@ dependencies = [
  "rayon",
  "thiserror",
  "wayfarer-costing",
+ "wayfarer-layer",
 ]
 
 [[package]]

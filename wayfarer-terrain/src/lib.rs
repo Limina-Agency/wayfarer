@@ -16,6 +16,10 @@
 //! every target, thread count and update order. The few floating-point steps (profile tables
 //! and ground lengths) use `libm`, which gives the same bits everywhere.
 //!
+//! The lattice, the layer format and the byte codings live in the small `wayfarer-layer` crate,
+//! so producers can write layers on any device; they are re-exported here as [`lattice`],
+//! [`layer`] and [`codec`].
+//!
 //! Status: experimental. The file formats follow contract drafts v0 and change until they are
 //! pinned as v1; the profile values are assumptions until the field trial.
 //!
@@ -30,53 +34,17 @@
 //! assert_eq!(Terrain::read(&file).unwrap().hash(), t.hash());
 //! ```
 
-pub mod codec;
+pub use wayfarer_layer::{codec, lattice, layer};
+
 pub mod cost;
 pub mod fuse;
-pub mod lattice;
-pub mod layer;
 pub mod lines;
 pub mod profile;
 pub mod search;
 pub mod surface;
 pub mod terrain;
 
-/// Why a file or an input was refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum Error {
-    /// The bytes do not start with the magic of the expected file.
-    #[error("not a {0}")]
-    Magic(&'static str),
-    /// A major version this reader does not know.
-    #[error("{what} major version {found}, this reader knows {known}")]
-    Version {
-        what: &'static str,
-        found: u16,
-        known: u16,
-    },
-    /// The bytes end before the structure does.
-    #[error("truncated {0}")]
-    Truncated(&'static str),
-    /// A stored hash does not match the decoded content.
-    #[error("{0} hash mismatch")]
-    Hash(&'static str),
-    /// A value or a combination of values the contract does not allow.
-    #[error("{0}")]
-    Invalid(String),
-}
-
-impl Error {
-    pub(crate) fn invalid(msg: impl Into<String>) -> Error {
-        Error::Invalid(msg.into())
-    }
-}
-
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// Lower-case hex of a hash, for logs and records.
-pub fn hex(h: &[u8; 32]) -> String {
-    h.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use wayfarer_layer::{Error, Result, hex};
 
 /// Compiles the README's example as a doctest.
 #[cfg(doctest)]

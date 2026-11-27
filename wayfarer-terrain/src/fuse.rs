@@ -621,9 +621,33 @@ mod tests {
         assert_eq!(blend_hazard(0, 255, 128), 128);
     }
 
+    fn test_manifest(kind: Kind, channels: Vec<u16>) -> layer::Manifest {
+        layer::Manifest {
+            kind,
+            licence: 0,
+            s_lat: 120,
+            s_lon: 120,
+            observed_at: 1_000,
+            valid_from: 0,
+            valid_until: 10_000,
+            fade_from: 10_000,
+            channels,
+            model_id: "test".into(),
+            model_version: "0".into(),
+            weights: [1; 32],
+            dataset_manifest: [2; 32],
+            eval_set: [3; 32],
+            ece_permille: 0xFFFF,
+            backend: "none".into(),
+            attribution: String::new(),
+            inputs: vec![],
+            parents: vec![],
+        }
+    }
+
     #[test]
     fn fade() {
-        let mut m = layer::tests::manifest(Kind::Hazard, vec![1]);
+        let mut m = test_manifest(Kind::Hazard, vec![1]);
         (m.valid_from, m.fade_from, m.valid_until) = (0, 100, 200);
         assert_eq!(w_eff(200, &m, 50), 200);
         assert_eq!(w_eff(200, &m, 150), 100);

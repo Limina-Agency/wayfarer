@@ -743,10 +743,10 @@ pub fn quantise_probs(f: &[f32]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
-    pub fn manifest(kind: Kind, channels: Vec<u16>) -> Manifest {
+    fn manifest(kind: Kind, channels: Vec<u16>) -> Manifest {
         Manifest {
             kind,
             licence: 0,
