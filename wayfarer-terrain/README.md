@@ -16,8 +16,10 @@ off-road plan:
    grade from the heights, canonical paths and route confidence.
 
 The formats follow the drafts `docs/design/terrain-layers.md` (layer contract v0)
-and `docs/design/incident-surface.md` (incident surface v0). The terrain file is
-the sidecar format in `terrain.rs`, used until format 4 fixes the layouts.
+and `docs/design/incident-surface.md` (incident surface v1 draft: a fuse version in
+the recipe, an overlay that is a set applied by observed time, an AOI cut). The
+terrain file is the sidecar format in `terrain.rs` (v1: a sources and attribution
+text, the hash folded per block), used until format 4 fixes the layouts.
 Everything is integer arithmetic or `libm`, so the same inputs give the same
 bytes on every target. CI checks this with pinned hashes in `tests/incident.rs`.
 The profile values are assumptions until the field trial; only the walker's pace

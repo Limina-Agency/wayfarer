@@ -103,6 +103,18 @@ pub fn div_round_i64(num: i64, den: i64) -> i64 {
     }
 }
 
+/// Ticks of a latitude or longitude in degrees: `round(deg × 432,000)`, half away from zero.
+///
+/// This is the one rule for bringing an f64 position onto the lattice. Both steps are exact
+/// IEEE operations (one correctly rounded multiply, then `round`), so every target gets the
+/// same ticks. `None` for a value that is not finite or lies outside ±180°.
+pub fn ticks_of_deg(deg: f64) -> Option<i64> {
+    if !deg.is_finite() || deg.abs() > 180.0 {
+        return None;
+    }
+    Some((deg * TICKS_PER_DEG as f64).round() as i64)
+}
+
 /// Ceiling division for a positive divisor.
 pub fn ceil_div(a: i64, b: i64) -> i64 {
     -((-a).div_euclid(b))
@@ -111,6 +123,16 @@ pub fn ceil_div(a: i64, b: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn degrees_to_ticks() {
+        assert_eq!(ticks_of_deg(49.25), Some(21_276_000));
+        assert_eq!(ticks_of_deg(-0.5 / TICKS_PER_DEG as f64), Some(-1));
+        assert_eq!(ticks_of_deg(0.4 / TICKS_PER_DEG as f64), Some(0));
+        assert_eq!(ticks_of_deg(180.0), Some(77_760_000));
+        assert_eq!(ticks_of_deg(180.1), None);
+        assert_eq!(ticks_of_deg(f64::NAN), None);
+    }
 
     #[test]
     fn rounding() {

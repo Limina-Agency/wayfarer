@@ -1,6 +1,10 @@
 //! Replays experiment E14 (lane TERRX) on its real Tatra base and checks that this crate
-//! reproduces the experiment's files byte for byte: the eight incident surfaces, the seven
-//! deltas and the walker routes' paths.
+//! reproduces the experiment's results byte for byte: every block of the eight incident
+//! surfaces, the block ops of the seven deltas, and the walker routes' paths.
+//!
+//! E14 wrote contract v0 files. Contract v1 changed the header and the hashes on purpose (the
+//! fuse version, the canonical overlay, new hash domains), so the files' headers and hashes
+//! differ; their block sections, which hold everything a route reads, must not.
 //!
 //! The data is not in the repository (the E5 base is 21 MB). Set `WAYFARER_E14_PREP` to the
 //! E5 prep directory (`blocks.txt`, `dem_dm.i32`, `steep.u8`, `lc4.u8`, `conf.u8`,
@@ -13,7 +17,7 @@ use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Prior};
 use wayfarer_terrain::lattice::{BlockId, Spacing};
 use wayfarer_terrain::profile::Rules;
 use wayfarer_terrain::search::{Graph, Grid, Search, path};
-use wayfarer_terrain::surface::{Incident, Surface, apply_delta, delta};
+use wayfarer_terrain::surface::{Incident, Surface, apply_delta, delta, delta_ops};
 use wayfarer_terrain::terrain::Terrain;
 
 const SP: i64 = 120;
@@ -88,10 +92,8 @@ fn e14_replay() {
         }),
     )
     .unwrap();
-    assert_eq!(
-        wayfarer_terrain::hex(&ter.hash()),
-        json_str(&text, "terrain_hash")
-    );
+    // Terrain file v1 folds the terrain hash per block, so it is no longer E14's
+    // terrain_hash; the planes are E14's inputs as loaded above.
     // The terrain file round trip on real data.
     assert_eq!(Terrain::read(&ter.write()).unwrap(), ter);
 
@@ -135,6 +137,8 @@ fn e14_replay() {
         lat1: (tb[0] + 2) * SP,
         lon0: (tb[1] - 1) * SP,
         lon1: (tb[1] + 2) * SP,
+        // E14 applied the block before the clear box: observed first.
+        observed_at: T0 + 5 * E - 120,
         effect: Effect::Block,
     };
     let clear_item = OverlayItem {
@@ -142,6 +146,7 @@ fn e14_replay() {
         lat1: (tc[0] + 6) * SP,
         lon0: (tc[1] - 6) * SP,
         lon1: (tc[1] + 6) * SP,
+        observed_at: T0 + 5 * E - 60,
         effect: Effect::Clear,
     };
     let all: Vec<usize> = vec![0, 7, 8, 9, 1, 2, 3, 4, 5, 6];
@@ -175,13 +180,9 @@ fn e14_replay() {
         let full = inc.surface(*t).unwrap();
         let file = full.write();
         let want = std::fs::read(format!("{out}/step{sn}_{name}.wis")).unwrap();
-        assert_eq!(
-            file, want,
-            "step {name}: the surface file is E14's, byte for byte"
-        );
-        assert_eq!(
-            wayfarer_terrain::hex(&full.content_hash()),
-            json_str(&text, &format!("h_content_{name}"))
+        assert!(
+            want.ends_with(&full.block_section()),
+            "step {name}: every block is E14's, byte for byte"
         );
         assert_eq!(Surface::read(&file).unwrap(), full);
         if let Some(prev) = surfaces.last() {
@@ -193,10 +194,11 @@ fn e14_replay() {
                 "step {name}: incremental equals full (previous T {pt})"
             );
             let d = delta(prev, &full);
-            assert_eq!(
-                d,
-                std::fs::read(format!("{out}/step{sn}_{name}.wisd")).unwrap(),
-                "step {name}: the delta is E14's"
+            assert!(
+                std::fs::read(format!("{out}/step{sn}_{name}.wisd"))
+                    .unwrap()
+                    .ends_with(&delta_ops(prev, &full)),
+                "step {name}: the delta's block ops are E14's"
             );
             assert_eq!(apply_delta(prev, &d).unwrap(), full);
         }
