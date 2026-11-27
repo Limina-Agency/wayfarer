@@ -1,0 +1,25 @@
+[package]
+name = "wayfarer-terrain"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Off-road terrain for Wayfarer: terrain files on the global lattice, terrain layers, fusion into an incident surface, and least-cost search on it"
+readme = "README.md"
+keywords = ["routing", "terrain", "search-and-rescue", "gis"]
+categories = ["science::geo", "algorithms"]
+# Experimental: the layer and incident-surface contracts are drafts (v0) until the field trial.
+# Not published until they are pinned as v1.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+flate2 = { workspace = true }
+libm = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+wayfarer-costing = { workspace = true }

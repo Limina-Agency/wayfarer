@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["wayfarer-package", "wayfarer-costing", "wayfarer", "wayfarer-service", "wayfarer-ffi", "wayfarer-compiler", "wayfarer-cli", "wayfarer-road-graph", "wayfarer-line-network"]
+members = ["wayfarer-package", "wayfarer-costing", "wayfarer", "wayfarer-service", "wayfarer-ffi", "wayfarer-compiler", "wayfarer-cli", "wayfarer-road-graph", "wayfarer-line-network", "wayfarer-terrain"]
 
 [workspace.package]
 version = "0.4.0"
@@ -45,6 +45,7 @@ wayfarer-line-network = { path = "wayfarer-line-network", version = "0.4.0" }
 wayfarer-package = { path = "wayfarer-package", version = "0.4.0" }
 wayfarer-road-graph = { path = "wayfarer-road-graph", version = "0.4.0" }
 wayfarer-service = { path = "wayfarer-service", version = "0.4.0" }
+wayfarer-terrain = { path = "wayfarer-terrain", version = "0.4.0" }
 zstd = "0.14"
 
 [workspace.lints.rust]

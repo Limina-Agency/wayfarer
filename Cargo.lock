@@ -1279,6 +1279,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfarer-terrain"
+version = "0.4.0"
+dependencies = [
+ "blake3",
+ "flate2",
+ "libm",
+ "rayon",
+ "thiserror",
+ "wayfarer-costing",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
