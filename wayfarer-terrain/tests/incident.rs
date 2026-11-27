@@ -12,7 +12,7 @@ use wayfarer_terrain::layer::{
 };
 use wayfarer_terrain::lines::*;
 use wayfarer_terrain::profile::Rules;
-use wayfarer_terrain::search::{Graph, Grid, Search, path, route};
+use wayfarer_terrain::search::{Graph, Grid, Search, Toward, path, path_to, route};
 use wayfarer_terrain::surface::{Inputs, Surface, apply_delta, delta, epoch_of};
 use wayfarer_terrain::terrain::{STEEP_NONE, Terrain};
 use wayfarer_terrain::{cost, hex};
@@ -1104,4 +1104,87 @@ fn owned_incident_matches_a_full_build() {
     assert_eq!(r.points.last(), Some(&deg(150, 230)));
     assert!(inc.route("nobody", deg(10, 10), deg(20, 20)).is_err());
     assert!(inc.route("walker", deg(-5, 10), deg(20, 20)).is_err());
+}
+
+/// Fields for portals (`docs/design/portals.md`): a field from a cell gives the same costs as
+/// a search from it; a field to a cell gives every cell's cost to it, each move costed the
+/// way it is walked, and its paths walk forward at that cost; a bound leaves everything beyond
+/// it unreached and the rest as it was.
+#[test]
+fn fields_from_and_to_a_cell() {
+    let fx = fixture();
+    let rules = [Rules::walker_default(), Rules::vehicle()];
+    let prior = Prior::default();
+    let s = Inputs {
+        id: *b"wayfarer-test\0\0\0",
+        terrain: &fx.ter,
+        prior: &prior,
+        layers: fx.layers.iter().collect(),
+        overlay: fx.overlay.clone(),
+        rules: &rules,
+        epoch_s: E,
+        allow_research: false,
+        feature_min_conf: 128,
+        level_min_w: 128,
+    }
+    .surface(T0 + 5 * E)
+    .unwrap();
+    let grid = Grid::new(&fx.ter, &s).unwrap();
+    let (i0, j0) = (BI0 as i64 * BLOCK as i64, BJ0 as i64 * BLOCK as i64);
+    let cells = [(30i64, 40i64), (150, 220), (10, 250), (180, 20), (65, 190)];
+    let n = grid.h * grid.w;
+    for prof in 0..2 {
+        let g = Graph::new(&grid, prof);
+        let (mut a, mut b) = (Search::new(n), Search::new(n));
+        for &(r, c) in &cells {
+            let at = grid.cell_of(i0 + r, j0 + c).unwrap();
+            a.run_field(&g, at, Toward::From, u64::MAX);
+            b.run_field(&g, at, Toward::To, u64::MAX);
+            let mut reached = 0;
+            for &(r2, c2) in &cells {
+                let other = grid.cell_of(i0 + r2, j0 + c2).unwrap();
+                let there = route(&grid, prof, at, other).map(|rt| rt.conf.cost_us);
+                let back = route(&grid, prof, other, at).map(|rt| rt.conf.cost_us);
+                let d = |se: &Search| Some(se.d(other)).filter(|&d| d != u64::MAX);
+                assert_eq!(d(&a), there, "{prof} from {r},{c} to {r2},{c2}");
+                assert_eq!(d(&b), back, "{prof} to {r},{c} from {r2},{c2}");
+                if let Some(cost) = back {
+                    let steps = path_to(&g, &b, other, at).unwrap();
+                    let walked: u64 = steps
+                        .iter()
+                        .map(|&(u, m)| g.cost(u / grid.w, u % grid.w, m).unwrap().1)
+                        .sum();
+                    assert_eq!(walked, cost, "{prof} walked to {r},{c}");
+                    if other != at {
+                        assert_eq!(steps[0].0, other);
+                        reached += 1;
+                    }
+                }
+            }
+            if prof == 0 {
+                assert!(reached > 0, "the walker reaches {r},{c} from somewhere");
+            }
+            if b.settled == 0 {
+                continue; // the profile cannot stand on this cell
+            }
+            // Bounded at half the farthest cost: beyond it unreached, within it unchanged.
+            let far = (0..n)
+                .map(|i| b.d(i))
+                .filter(|&d| d != u64::MAX)
+                .max()
+                .unwrap();
+            let limit = far / 2;
+            let mut bounded = Search::new(n);
+            let settled = bounded.run_field(&g, at, Toward::To, limit);
+            assert!(settled > 0 && settled < b.settled);
+            for i in 0..n {
+                let full = b.d(i);
+                if full <= limit {
+                    assert_eq!(bounded.d(i), full);
+                } else {
+                    assert_eq!(bounded.d(i), u64::MAX);
+                }
+            }
+        }
+    }
 }
