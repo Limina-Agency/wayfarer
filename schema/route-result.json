@@ -231,7 +231,7 @@
   ],
   "$defs": {
     "CandidateAccess": {
-      "description": "The costed access stretch of one correlation candidate: from the\nrequested `point` in a straight line to the candidate's snap point, its\nlength the candidate's `distance_m`.",
+      "description": "The costed access stretch of one correlation candidate: from the\nrequested `point` to the candidate's snap point: a straight line, its\nlength the candidate's `distance_m`, priced at `cost_factor · d / pace`,\nunless the Rust-only `priced` holds a price and path found by the caller\n(a terrain search, `docs/design/portals.md`).",
       "type": "object",
       "properties": {
         "costFactor": {

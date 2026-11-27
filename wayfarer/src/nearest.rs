@@ -118,12 +118,24 @@ impl RoutingEngine {
 
         let policy = CorrelationPolicy::from(&request.options);
         let correlator = Correlator::new(access);
-        let correlate = |point| {
+        let correlate = |point, role| {
             correlator
-                .search_expanding(point, request.profile, &policy, &Default::default())
+                .search_expanding(point, request.profile, role, &policy, &Default::default())
                 .candidates
         };
-        let source = correlate(request.source);
+        // From the source, the source is the origin and the targets the
+        // destinations; to it, the other way round.
+        let (source_role, target_role) = match request.direction {
+            NearestDirection::FromSource => (
+                crate::access::AccessRole::Origin,
+                crate::access::AccessRole::Destination,
+            ),
+            NearestDirection::ToSource => (
+                crate::access::AccessRole::Destination,
+                crate::access::AccessRole::Origin,
+            ),
+        };
+        let source = correlate(request.source, source_role);
         if source.is_empty() {
             return Err(RouteError::NoCandidate {
                 endpoint: match request.direction {
@@ -135,7 +147,7 @@ impl RoutingEngine {
         let targets = request
             .targets
             .iter()
-            .map(|target| correlate(*target))
+            .map(|target| correlate(*target, target_role))
             .collect::<Vec<_>>();
         let no_candidate_target_indexes = (0..targets.len())
             .filter(|target| targets[*target].is_empty())

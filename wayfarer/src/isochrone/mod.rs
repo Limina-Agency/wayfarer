@@ -84,7 +84,13 @@ impl RoutingEngine {
         // `off_network` relaxation reaches).
         let origins = origin_candidates(request, |point| {
             correlator
-                .search_expanding(point, request.profile, &policy, &Default::default())
+                .search_expanding(
+                    point,
+                    request.profile,
+                    crate::access::AccessRole::Origin,
+                    &policy,
+                    &Default::default(),
+                )
                 .candidates
         })?;
         if !self

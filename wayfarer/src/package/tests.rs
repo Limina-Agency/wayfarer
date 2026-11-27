@@ -9837,6 +9837,166 @@ fn junction_delays(leg: &LegResult) -> f64 {
         .sum()
 }
 
+/// A pricer for the tests: every candidate's access at its own made-up
+/// price, unlike the straight-line formula, with a bent path through a point
+/// beside the line; candidates on edges whose id is a multiple of 3 are
+/// dropped. It records the roles it was asked for.
+struct TestPricer {
+    roles: std::sync::Mutex<Vec<crate::access::AccessRole>>,
+}
+
+impl crate::access::AccessPricer for TestPricer {
+    fn price(&self, query: crate::access::AccessQuery<'_>) -> Vec<crate::CorrelatedLocation> {
+        self.roles.lock().unwrap().push(query.role);
+        query
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.edge_id % 3 != 0)
+            .map(|mut candidate| {
+                let d = candidate.distance_m;
+                let bend = GeoPoint::new(
+                    (query.point.lat + candidate.snapped_point.lat) / 2.0 + 0.0002,
+                    (query.point.lng + candidate.snapped_point.lng) / 2.0,
+                );
+                let path = match query.role {
+                    crate::access::AccessRole::Origin => {
+                        vec![query.point, bend, candidate.snapped_point]
+                    }
+                    crate::access::AccessRole::Destination => {
+                        vec![candidate.snapped_point, bend, query.point]
+                    }
+                };
+                let access = candidate.access.as_mut().unwrap();
+                access.priced = Some(std::sync::Arc::new(crate::access::PricedAccess {
+                    cost: 3.0 * d + 7.0 + (candidate.edge_id % 5) as f64 * 10.0,
+                    duration_s: d / 0.9 + 5.0,
+                    distance_m: 1.3 * d,
+                    path,
+                }));
+                candidate
+            })
+            .collect()
+    }
+}
+
+fn with_pricer(pricer: &std::sync::Arc<TestPricer>) -> impl Fn(&mut LegRequest) + '_ {
+    move |request: &mut LegRequest| {
+        request.options.off_network = Some(crate::access::RouteOffNetworkOptions {
+            pricer: Some(crate::access::AccessPricerHandle(pricer.clone())),
+            ..Default::default()
+        });
+    }
+}
+
+/// A priced access (portals' seam, `docs/design/portals.md`): engine and
+/// oracle route and build matrices on the pricer's candidates and prices, the
+/// totals are the road's plus the priced stretches, the drawn stretch is the
+/// priced path, and the pricer learns which end each point is.
+#[test]
+fn priced_access_routes_and_matrices_match_the_reference() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&large_grid_graph(), &dir.path().join("priced.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let pricer = std::sync::Arc::new(TestPricer {
+        roles: Default::default(),
+    });
+    let mut compared = 0;
+    for profile in [MobilityProfile::Wheeled, MobilityProfile::OnFoot] {
+        for origin in block_points() {
+            for destination in block_points() {
+                if origin == destination {
+                    continue;
+                }
+                let context = format!("{profile:?} {origin:?} -> {destination:?}");
+                pricer.roles.lock().unwrap().clear();
+                let actual =
+                    route(&compact, origin, destination, profile, with_pricer(&pricer)).unwrap();
+                assert_eq!(
+                    *pricer.roles.lock().unwrap(),
+                    [
+                        crate::access::AccessRole::Origin,
+                        crate::access::AccessRole::Destination
+                    ],
+                    "{context}"
+                );
+                let expected =
+                    route(&oracle, origin, destination, profile, with_pricer(&pricer)).unwrap();
+                for (left, right) in [
+                    (expected.cost, actual.cost),
+                    (expected.duration_s, actual.duration_s),
+                    (expected.distance_m, actual.distance_m),
+                ] {
+                    assert!(
+                        (left - right).abs() <= 1e-4 * left.max(1.0),
+                        "{context}: {left} vs {right}"
+                    );
+                }
+                compared += 1;
+                assert_ne!(actual.origin.edge_id % 3, 0, "{context}");
+                assert_ne!(actual.destination.edge_id % 3, 0, "{context}");
+                let summary = actual.off_network.clone().expect("access summary");
+                let (start, end) = (summary.origin.unwrap(), summary.destination.unwrap());
+                let snap = actual.origin.distance_m;
+                assert!((start.distance_m - 1.3 * snap).abs() < 1e-9, "{context}");
+                assert!((start.duration_s - (snap / 0.9 + 5.0)).abs() < 1e-9);
+                let road_m = actual.legs[0]
+                    .edges
+                    .iter()
+                    .map(|edge| edge.distance_m)
+                    .sum::<f64>();
+                assert!(
+                    (actual.distance_m - road_m - start.distance_m - end.distance_m).abs()
+                        <= 1e-6 * actual.distance_m,
+                    "{context}"
+                );
+                // The drawn stretches are the priced paths: three points each.
+                assert_eq!(actual.geometry.first(), Some(&origin), "{context}");
+                assert_eq!(actual.geometry.last(), Some(&destination), "{context}");
+                let segments = &actual.legs[0].shape_segments;
+                assert_eq!(
+                    (segments[0].begin_shape_index, segments[0].end_shape_index),
+                    (0, 2),
+                    "{context}"
+                );
+                let last = segments.last().unwrap();
+                assert_eq!(
+                    last.end_shape_index - last.begin_shape_index,
+                    2,
+                    "{context}"
+                );
+            }
+        }
+        let mut matrix = crate::RouteMatrixRequest::new(block_points(), block_points(), profile);
+        matrix.options.off_network = Some(crate::access::RouteOffNetworkOptions {
+            pricer: Some(crate::access::AccessPricerHandle(pricer.clone())),
+            ..Default::default()
+        });
+        let expected = oracle.matrix(matrix.clone());
+        let actual = compact.matrix(matrix);
+        assert_matrix_parity(&expected, &actual);
+        for cell in &actual.cells {
+            if cell.source_index == cell.target_index {
+                continue;
+            }
+            let routed = route(
+                &compact,
+                block_points()[cell.source_index],
+                block_points()[cell.target_index],
+                profile,
+                with_pricer(&pricer),
+            )
+            .unwrap();
+            assert!(
+                (cell.cost.unwrap() - routed.cost).abs() <= 1e-6 * routed.cost,
+                "{profile:?} cell {}->{}",
+                cell.source_index,
+                cell.target_index
+            );
+        }
+    }
+    assert!(compared >= 40, "{compared}");
+}
+
 /// Every candidate within the radius pays its whole stretch, so the join may
 /// move off the nearest road to a nearer point of a better one, and a
 /// route's cost is never below its stretches'.
@@ -10230,6 +10390,7 @@ fn access_leg_options_are_validated() {
         max_candidates: Some(64),
         pace_mps: Some(1.0),
         cost_factor: Some(1.0),
+        ..Options::default()
     };
     let mut request = LegRequest::new(a, b, MobilityProfile::OnFoot);
     request.options.off_network = Some(valid);

@@ -74,11 +74,19 @@ const TRAVERSED_EPSILON: f64 = 1e-9;
 
 /// A candidate's costed access stretch (`crate::access`), written out as
 /// (cost, duration, distance): its snap distance at the access pace, the
-/// time times the cost factor for its cost. Zeros without one.
+/// time times the cost factor for its cost; a priced access as priced. Zeros
+/// without one.
 fn access_of(candidate: &CorrelatedLocation) -> Access {
-    let Some(access) = candidate.access else {
+    let Some(access) = &candidate.access else {
         return Access::default();
     };
+    if let Some(priced) = &access.priced {
+        return Access {
+            cost: priced.cost,
+            duration_s: priced.duration_s,
+            distance_m: priced.distance_m,
+        };
+    }
     let distance_m = if candidate.distance_m.is_finite() {
         candidate.distance_m.max(0.0)
     } else {
@@ -132,7 +140,7 @@ fn approach_costs(candidates: &[(usize, &CorrelatedLocation)]) -> Vec<f64> {
     }
     candidates
         .iter()
-        .map(|(target, candidate)| match candidate.access {
+        .map(|(target, candidate)| match &candidate.access {
             Some(_) => access_of(candidate).cost,
             None => approach_cost_of(distance(candidate) - nearest[target]),
         })
@@ -324,11 +332,12 @@ impl<'a> ReferenceEngine<'a> {
         &self,
         point: GeoPoint,
         profile: MobilityProfile,
+        role: crate::access::AccessRole,
         policy: &CorrelationPolicy,
         options: &crate::types::RouteEndpointOptions,
     ) -> CandidateSearch {
         let correlator = Correlator::new(&self.view);
-        let search = correlator.search_expanding(point, profile, policy, options);
+        let search = correlator.search_expanding(point, profile, role, policy, options);
         if search.candidates.is_empty()
             && options.has_scoring_hints()
             && let Some(retry) = relaxed_correlation_retry(
@@ -354,6 +363,7 @@ impl<'a> ReferenceEngine<'a> {
             .correlate(
                 request.origin,
                 request.profile,
+                crate::access::AccessRole::Origin,
                 &policy,
                 &request.origin_options,
             )
@@ -365,6 +375,7 @@ impl<'a> ReferenceEngine<'a> {
             .correlate(
                 request.destination,
                 request.profile,
+                crate::access::AccessRole::Destination,
                 &policy,
                 &request.destination_options,
             )
@@ -495,25 +506,29 @@ impl<'a> ReferenceEngine<'a> {
             return result(cells, 0, Default::default());
         }
         let policy = CorrelationPolicy::from(&request.options);
-        let correlate = |point| {
-            Correlator::new(&self.view).search_expanding(
-                point,
-                request.profile,
-                &policy,
-                &Default::default(),
-            )
+        let policy = &policy;
+        let correlate = |role| {
+            move |point| {
+                Correlator::new(&self.view).search_expanding(
+                    point,
+                    request.profile,
+                    role,
+                    policy,
+                    &Default::default(),
+                )
+            }
         };
         let source_searches = request
             .sources
             .iter()
             .copied()
-            .map(correlate)
+            .map(correlate(crate::access::AccessRole::Origin))
             .collect::<Vec<_>>();
         let target_searches = request
             .targets
             .iter()
             .copied()
-            .map(correlate)
+            .map(correlate(crate::access::AccessRole::Destination))
             .collect::<Vec<_>>();
         let expanded = [
             crate::matrix::expanded_correlation_distances(&source_searches),
@@ -782,7 +797,13 @@ impl<'a> ReferenceEngine<'a> {
         let correlator = Correlator::new(&self.view);
         let origins = crate::isochrone::origin_candidates(request, |point| {
             correlator
-                .search_expanding(point, request.profile, &policy, &Default::default())
+                .search_expanding(
+                    point,
+                    request.profile,
+                    crate::access::AccessRole::Origin,
+                    &policy,
+                    &Default::default(),
+                )
                 .candidates
         })?;
         let context = self.path_context > 0;

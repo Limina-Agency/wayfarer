@@ -93,6 +93,61 @@ pub struct RouteOffNetworkOptions {
     /// vehicles.
     #[serde(alias = "cost_factor", skip_serializing_if = "Option::is_none")]
     pub cost_factor: Option<f64>,
+    /// Prices each endpoint's access itself, in place of the straight-line
+    /// formula (a terrain search, `docs/design/portals.md`). Rust only, not
+    /// on the wire.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub pricer: Option<AccessPricerHandle>,
+}
+
+/// Which end of a search a correlated point is: its access stretch runs from
+/// the point for an origin and to it for a destination, which a pricer that
+/// reads slopes needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessRole {
+    Origin,
+    Destination,
+}
+
+/// What a pricer gets for one endpoint.
+pub struct AccessQuery<'a> {
+    pub point: GeoPoint,
+    pub profile: MobilityProfile,
+    pub role: AccessRole,
+    /// The resolved options: radius, candidate count, pace and factor.
+    pub policy: AccessPolicy,
+    /// The candidates within the radius, priced by the straight-line formula.
+    pub candidates: Vec<CorrelatedLocation>,
+    /// The package, for edge shapes and attributes.
+    pub view: &'a crate::graph_view::PackageGraphView,
+}
+
+/// Prices access stretches for a request with costed access legs
+/// (`RouteOffNetworkOptions::pricer`). It returns the candidates the endpoint
+/// keeps, each with a [`CandidateAccess`] whose [`CandidateAccess::priced`]
+/// it may set: the searches, the oracle and the results then read that price.
+/// It must return the same candidates for the same query, so engine and
+/// oracle agree, and at most [`ACCESS_MAX_CANDIDATES`] of them.
+pub trait AccessPricer: Send + Sync {
+    fn price(&self, query: AccessQuery<'_>) -> Vec<CorrelatedLocation>;
+}
+
+/// A shared [`AccessPricer`]. Two handles are equal when they hold the same
+/// pricer.
+#[derive(Clone)]
+pub struct AccessPricerHandle(pub std::sync::Arc<dyn AccessPricer>);
+
+impl std::fmt::Debug for AccessPricerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AccessPricerHandle")
+    }
+}
+
+impl PartialEq for AccessPricerHandle {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 // Requests are validated before they search (`validate`), and every value
@@ -170,14 +225,17 @@ impl AccessPolicy {
             point,
             pace_mps: self.pace_mps,
             cost_factor: self.cost_factor,
+            priced: None,
         }
     }
 }
 
 /// The costed access stretch of one correlation candidate: from the
-/// requested `point` in a straight line to the candidate's snap point, its
-/// length the candidate's `distance_m`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// requested `point` to the candidate's snap point: a straight line, its
+/// length the candidate's `distance_m`, priced at `cost_factor · d / pace`,
+/// unless the Rust-only `priced` holds a price and path found by the caller
+/// (a terrain search, `docs/design/portals.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateAccess {
@@ -186,18 +244,72 @@ pub struct CandidateAccess {
     pub point: GeoPoint,
     pub pace_mps: f64,
     pub cost_factor: f64,
+    /// A price found by the caller, used in place of the straight-line
+    /// formula by every search, the oracle and the results. Not on the wire.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub priced: Option<std::sync::Arc<PricedAccess>>,
 }
 
 impl CandidateAccess {
-    /// The time to cross `distance_m` of open ground.
+    /// The time to cross `distance_m` of open ground in a straight line.
     pub fn duration_s(&self, distance_m: f64) -> f64 {
         distance_m / self.pace_mps
     }
 
-    /// The cost of crossing `distance_m` of open ground: its time times the
-    /// cost factor. Searches charge it in a candidate's seed or finish.
+    /// The cost of crossing `distance_m` of open ground in a straight line:
+    /// its time times the cost factor.
     pub fn cost(&self, distance_m: f64) -> f64 {
         self.cost_factor * self.duration_s(distance_m)
+    }
+
+    /// The stretch's cost, time and length for a candidate `distance_m` from
+    /// the point: the priced values when there are any, else the
+    /// straight-line formula. Searches charge its cost in a candidate's seed
+    /// or finish.
+    pub(crate) fn totals(&self, distance_m: f64) -> AccessTotals {
+        match &self.priced {
+            Some(priced) => AccessTotals {
+                cost: priced.cost,
+                duration_s: priced.duration_s,
+                distance_m: priced.distance_m,
+            },
+            None => AccessTotals {
+                cost: self.cost(distance_m),
+                duration_s: self.duration_s(distance_m),
+                distance_m,
+            },
+        }
+    }
+}
+
+/// An access stretch priced by the caller: what it costs, how long it takes,
+/// how long it is and the way it goes. Portals (`docs/design/portals.md`)
+/// price it with a least-cost search over an incident surface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricedAccess {
+    /// Cost in the search's units (seconds times a cost factor); finite and
+    /// not negative.
+    pub cost: f64,
+    pub duration_s: f64,
+    pub distance_m: f64,
+    /// From the requested point to the candidate's snap point for an origin,
+    /// from the snap point to the requested point for a destination. Empty
+    /// draws a straight line.
+    pub path: Vec<GeoPoint>,
+}
+
+impl PricedAccess {
+    /// Checks that the price can seed a search: finite, not negative.
+    pub fn validate(&self) -> Result<(), RouteError> {
+        let ok = |value: f64| value.is_finite() && value >= 0.0;
+        if ok(self.cost) && ok(self.duration_s) && ok(self.distance_m) {
+            Ok(())
+        } else {
+            Err(RouteError::InvalidRequest {
+                reason: "priced access",
+            })
+        }
     }
 }
 
@@ -212,14 +324,9 @@ pub(crate) struct AccessTotals {
 
 impl AccessTotals {
     pub(crate) fn of(candidate: &CorrelatedLocation) -> Self {
-        let Some(access) = &candidate.access else {
-            return Self::default();
-        };
-        let distance_m = access_distance_m(candidate);
-        Self {
-            cost: access.cost(distance_m),
-            duration_s: access.duration_s(distance_m),
-            distance_m,
+        match &candidate.access {
+            Some(access) => access.totals(access_distance_m(candidate)),
+            None => Self::default(),
         }
     }
 
@@ -298,11 +405,15 @@ pub(crate) fn add_access_stretches(result: &mut LegResult) {
     let origin = result
         .origin
         .access
-        .map(|access| stretch(&result.origin, &access));
+        .as_ref()
+        .map(|access| stretch(&result.origin, access));
     let destination = result
         .destination
         .access
-        .map(|access| stretch(&result.destination, &access));
+        .as_ref()
+        .map(|access| stretch(&result.destination, access));
+    let origin_path = priced_path(&result.origin);
+    let destination_path = priced_path(&result.destination);
     if origin.is_none() && destination.is_none() {
         return;
     }
@@ -317,7 +428,7 @@ pub(crate) fn add_access_stretches(result: &mut LegResult) {
             leg.duration_s += stretch.duration_s;
         }
         if stretch.distance_m >= ACCESS_MIN_DRAWN_M {
-            draw_origin_stretch(result, stretch);
+            draw_origin_stretch(result, stretch, origin_path);
         }
     }
     if let Some(stretch) = &destination {
@@ -326,7 +437,7 @@ pub(crate) fn add_access_stretches(result: &mut LegResult) {
             leg.duration_s += stretch.duration_s;
         }
         if stretch.distance_m >= ACCESS_MIN_DRAWN_M {
-            draw_destination_stretch(result, stretch);
+            draw_destination_stretch(result, stretch, destination_path);
         }
     }
     result.off_network = Some(RouteOffNetworkSummary {
@@ -369,11 +480,36 @@ fn access_segment(
     }
 }
 
-fn draw_origin_stretch(result: &mut LegResult, stretch: &RouteAccessStretch) {
+/// The path of a candidate's priced access, when it has one of at least two
+/// points.
+fn priced_path(candidate: &CorrelatedLocation) -> Option<Vec<GeoPoint>> {
+    let priced = candidate.access.as_ref()?.priced.as_ref()?;
+    (priced.path.len() >= 2).then(|| priced.path.clone())
+}
+
+/// A stretch's drawn line from `from` to `to`: a priced path, its ends set to
+/// the two points, or the densified straight line.
+fn stretch_line(from: GeoPoint, to: GeoPoint, path: Option<Vec<GeoPoint>>) -> Vec<GeoPoint> {
+    match path {
+        Some(mut line) => {
+            line[0] = from;
+            let last = line.len() - 1;
+            line[last] = to;
+            line
+        }
+        None => densify_geodesic(from, to, DIRECT_LEG_VERTEX_SPACING_M),
+    }
+}
+
+fn draw_origin_stretch(
+    result: &mut LegResult,
+    stretch: &RouteAccessStretch,
+    path: Option<Vec<GeoPoint>>,
+) {
     let Some(&join) = result.geometry.first() else {
         return;
     };
-    let line = densify_geodesic(stretch.point, join, DIRECT_LEG_VERTEX_SPACING_M);
+    let line = stretch_line(stretch.point, join, path);
     let added = line.len() - 1;
     result.geometry.splice(0..0, line[..added].iter().copied());
     if let Some(leg) = result.legs.first_mut() {
@@ -407,11 +543,15 @@ fn draw_origin_stretch(result: &mut LegResult, stretch: &RouteAccessStretch) {
     result.maneuvers.insert(0, maneuver);
 }
 
-fn draw_destination_stretch(result: &mut LegResult, stretch: &RouteAccessStretch) {
+fn draw_destination_stretch(
+    result: &mut LegResult,
+    stretch: &RouteAccessStretch,
+    path: Option<Vec<GeoPoint>>,
+) {
     let Some(&join) = result.geometry.last() else {
         return;
     };
-    let line = densify_geodesic(join, stretch.point, DIRECT_LEG_VERTEX_SPACING_M);
+    let line = stretch_line(join, stretch.point, path);
     let added = line.len() - 1;
     let last = result.geometry.len() - 1;
     result.geometry.extend(line[1..].iter().copied());

@@ -387,6 +387,100 @@ impl Search {
     }
 }
 
+/// Which way a [`Search::run_field`] runs: from its cell (each cell's cost is the least cost
+/// from it) or to it (the least cost from each cell to it, every move costed in the direction
+/// it is walked, so slopes count the way a walker meets them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toward {
+    From,
+    To,
+}
+
+impl Search {
+    /// The field of least costs from (`Toward::From`) or to (`Toward::To`) cell `at`, out to
+    /// `limit_us`: cells whose cost is above it are left unreached (`d` = `u64::MAX`). Returns
+    /// the number of cells settled. Read paths with [`path`] after `From` and with
+    /// [`path_to`] after `To`.
+    pub fn run_field(&mut self, g: &Graph, at: usize, toward: Toward, limit_us: u64) -> u64 {
+        if self.epoch == u32::MAX {
+            self.stamp.fill(0);
+            self.epoch = 0;
+        }
+        self.epoch += 1;
+        self.heap.clear();
+        self.settled = 0;
+        self.pushes = 0;
+        if g.t[at] == 0 {
+            return 0;
+        }
+        let (w, h) = (g.g.w as i64, g.g.h as i64);
+        self.dist[at] = 0;
+        self.stamp[at] = self.epoch;
+        self.heap.push(Reverse((0, at as u32)));
+        while let Some(Reverse((k, i))) = self.heap.pop() {
+            let i = i as usize;
+            if k != self.d(i) {
+                continue;
+            }
+            self.settled += 1;
+            let (r, c) = (i as i64 / w, i as i64 % w);
+            for (m, &(dr, dc)) in MOVES.iter().enumerate() {
+                let step = match toward {
+                    Toward::From => g.cost(r as usize, c as usize, m),
+                    Toward::To => {
+                        // The cell u whose move m reaches i, at what that move costs.
+                        let (ur, uc) = (r - dr as i64, c - dc as i64);
+                        if ur < 0 || uc < 0 || ur >= h || uc >= w {
+                            continue;
+                        }
+                        g.cost(ur as usize, uc as usize, m)
+                            .map(|(_, cost)| ((ur * w + uc) as usize, cost))
+                    }
+                };
+                if let Some((z, cost)) = step {
+                    let nd = k + cost;
+                    if nd <= limit_us && nd < self.d(z) {
+                        self.dist[z] = nd;
+                        self.stamp[z] = self.epoch;
+                        self.heap.push(Reverse((nd, z as u32)));
+                        self.pushes += 1;
+                    }
+                }
+            }
+        }
+        self.settled
+    }
+}
+
+/// The canonical path from `src` to `dst` after a [`Search::run_field`] `Toward::To` `dst`
+/// reached `src`, as (from cell, move) steps in walking order: from src on, the successor v
+/// with c(u, v) + d(v) = d(u), smallest cell index first.
+pub fn path_to(g: &Graph, se: &Search, src: usize, dst: usize) -> Option<Vec<(usize, usize)>> {
+    if se.d(src) == u64::MAX || se.d(dst) != 0 {
+        return None;
+    }
+    let w = g.g.w;
+    let mut out = Vec::new();
+    let mut u = src;
+    while u != dst {
+        let (ur, uc) = (u / w, u % w);
+        let mut best: Option<(usize, usize)> = None;
+        for m in 0..16 {
+            if let Some((v, c)) = g.cost(ur, uc, m)
+                && se.d(v) != u64::MAX
+                && se.d(v) + c == se.d(u)
+                && best.is_none_or(|b| v < b.0)
+            {
+                best = Some((v, m));
+            }
+        }
+        let (v, m) = best?;
+        out.push((u, m));
+        u = v;
+    }
+    Some(out)
+}
+
 /// The canonical path to `dst` after a run from `src` settled it, as (from cell, move) steps:
 /// from dst back, the predecessor u with d(u) + c(u, v) = d(v), smallest cell index first.
 /// Valid after a Dijkstra run settled `dst` (a full field or one stopped at `dst`): every

@@ -376,7 +376,7 @@ pub(crate) fn approach_costs(candidates: &[CorrelatedLocation]) -> Vec<f64> {
 /// (`crate::access`) pays all of it, the nearest included.
 pub(crate) fn approach_cost(chosen: &CorrelatedLocation, candidates: &[CorrelatedLocation]) -> f64 {
     if let Some(access) = &chosen.access {
-        return access.cost(snap_distance(chosen));
+        return access.totals(snap_distance(chosen)).cost;
     }
     let nearest = candidates
         .iter()
@@ -401,7 +401,7 @@ pub(crate) fn approach_costs_by_target(
         .iter()
         .zip(targets)
         .map(|(candidate, target)| match &candidate.access {
-            Some(access) => access.cost(snap_distance(candidate)),
+            Some(access) => access.totals(snap_distance(candidate)).cost,
             None => approach_cost_of(snap_distance(candidate) - nearest[target]),
         })
         .collect()
