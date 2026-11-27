@@ -10,14 +10,15 @@
 //! - `conf`: the land-cover confidence bit (1 = two sources agree);
 //! - `lines`: the linear-feature mask, base bits only ([`crate::lines::BASE_BITS`]).
 //!
-//! ## Terrain file (sidecar, v0)
+//! ## Terrain file (sidecar, v1)
 //!
 //! Until format 4 fixes the layouts, the base ships as a file beside the package:
 //!
 //! ```text
-//! "WTR0", major u16 = 0, minor u16 = 0, spacing u32 (ticks), block count u32,
+//! "WTR0", major u16 = 1, minor u16 = 0, spacing u32 (ticks), block count u32,
+//! sources: varint length (at most 65,535) and UTF-8 text,
 //! index: per block (key u64, payload length u32), in key order,
-//! payloads in key order, then the terrain hash (32 bytes).
+//! payloads in key order (see block_payload), then the terrain hash (32 bytes).
 //! payload: dem plane, steep plane, cover plane (code | conf << 4), lines plane,
 //!          each a varint length and the plane.
 //! ```
@@ -30,18 +31,23 @@
 //! predicts from the first post of the row below, the very first from 0. Absent posts take the
 //! predicted value for later predictions.
 //!
-//! The terrain hash is over the decoded planes (blake3 of `"wis0/terrain"`, the block keys,
-//! `dm` little-endian, `steep`, `cover`, `conf`, `lines` little-endian), so it does not depend
-//! on the codings a writer picked.
+//! The sources text names the inputs and carries their licences and attribution (the DEM, the
+//! land cover, the OSM snapshot). It is not hashed: correcting an attribution changes no route.
+//!
+//! The terrain hash is over the decoded planes, folded per block so a streaming writer needs
+//! one pass ([`block_hash`], [`terrain_hash`]). It does not depend on the codings a writer
+//! picked. (v0, experiment E14's file, hashed the planes across all blocks.)
 
 use crate::codec::{self, Reader, put_varint, unzigzag, zigzag};
-use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing};
+use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing, ceil_div};
 use crate::lines::BASE_BITS;
 use crate::{Error, Result};
 
 pub const MAGIC: &[u8; 4] = b"WTR0";
-pub const MAJOR: u16 = 0;
+pub const MAJOR: u16 = 1;
 pub const MINOR: u16 = 0;
+/// The longest sources text a terrain file holds, in bytes.
+pub const MAX_SOURCES: usize = 65_535;
 /// No height at this post.
 pub const DEM_NONE: i32 = i32::MIN;
 /// No steepness class at this post.
@@ -56,7 +62,82 @@ pub struct Terrain {
     pub(crate) cover: Vec<u8>,
     pub(crate) conf: Vec<u8>,
     pub(crate) lines: Vec<u16>,
+    sources: String,
     hash: [u8; 32],
+}
+
+/// A block's payload in the terrain file: the dem plane, the steep plane, the cover plane
+/// (`code | conf << 4`) and the lines plane, each a varint length and the plane. A streaming
+/// writer calls this to get the same bytes as [`Terrain::write`].
+pub fn block_payload(
+    dm: &[i32],
+    steep: &[u8],
+    cover: &[u8],
+    conf: &[u8],
+    lines: &[u16],
+) -> Vec<u8> {
+    let mut o = Vec::new();
+    let mut put = |p: Vec<u8>| {
+        put_varint(&mut o, p.len() as u64);
+        o.extend_from_slice(&p);
+    };
+    put(dem_encode(dm));
+    put(codec::plane_encode(
+        &steep.iter().map(|&x| x as u16).collect::<Vec<_>>(),
+        false,
+    ));
+    put(codec::plane_encode(
+        &cover
+            .iter()
+            .zip(conf)
+            .map(|(&c, &b)| (c | b << 4) as u16)
+            .collect::<Vec<_>>(),
+        false,
+    ));
+    put(codec::plane_encode(lines, true));
+    o
+}
+
+/// A block's hash: blake3 of `"wtr1/block"`, the key (u64 LE), then the decoded planes, `dm`
+/// (i32 LE), `steep`, `cover`, `conf` and `lines` (u16 LE), 4,096 posts each.
+pub fn block_hash(
+    id: BlockId,
+    dm: &[i32],
+    steep: &[u8],
+    cover: &[u8],
+    conf: &[u8],
+    lines: &[u16],
+) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"wtr1/block");
+    h.update(&id.key().to_le_bytes());
+    let mut buf = Vec::with_capacity(BLOCK_POSTS * 4);
+    for v in dm {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    h.update(&buf);
+    h.update(steep);
+    h.update(cover);
+    h.update(conf);
+    buf.clear();
+    for v in lines {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    h.update(&buf);
+    *h.finalize().as_bytes()
+}
+
+/// The terrain hash: blake3 of `"wtr1/terrain"`, the spacing in ticks (u32 LE), the block
+/// count (u32 LE) and each [`block_hash`] in key order.
+pub fn terrain_hash(spacing: Spacing, blocks: &[[u8; 32]]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"wtr1/terrain");
+    h.update(&(spacing.ticks() as u32).to_le_bytes());
+    h.update(&(blocks.len() as u32).to_le_bytes());
+    for b in blocks {
+        h.update(b);
+    }
+    *h.finalize().as_bytes()
 }
 
 impl Terrain {
@@ -103,6 +184,7 @@ impl Terrain {
             cover,
             conf,
             lines,
+            sources: String::new(),
             hash: [0; 32],
         };
         t.hash = t.compute_hash();
@@ -110,25 +192,36 @@ impl Terrain {
     }
 
     fn compute_hash(&self) -> [u8; 32] {
-        let mut h = blake3::Hasher::new();
-        h.update(b"wis0/terrain");
-        for b in &self.blocks {
-            h.update(&b.key().to_le_bytes());
+        let hs: Vec<[u8; 32]> = (0..self.blocks.len())
+            .map(|k| {
+                block_hash(
+                    self.blocks[k],
+                    self.dm(k),
+                    self.steep(k),
+                    self.cover(k),
+                    self.conf(k),
+                    self.lines(k),
+                )
+            })
+            .collect();
+        terrain_hash(self.spacing, &hs)
+    }
+
+    /// The same terrain with a sources text: inputs, licences and attribution. Not hashed.
+    pub fn with_sources(mut self, sources: impl Into<String>) -> Result<Terrain> {
+        let sources = sources.into();
+        if sources.len() > MAX_SOURCES {
+            return Err(Error::invalid(
+                "the sources text is longer than 65,535 bytes",
+            ));
         }
-        let mut buf = Vec::with_capacity(self.dm.len() * 4);
-        for v in &self.dm {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        h.update(&buf);
-        h.update(&self.steep);
-        h.update(&self.cover);
-        h.update(&self.conf);
-        buf.clear();
-        for v in &self.lines {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        h.update(&buf);
-        *h.finalize().as_bytes()
+        self.sources = sources;
+        Ok(self)
+    }
+
+    /// The inputs the terrain was compiled from, with their licences and attribution.
+    pub fn sources(&self) -> &str {
+        &self.sources
     }
 
     pub fn spacing(&self) -> Spacing {
@@ -165,6 +258,43 @@ impl Terrain {
         &self.lines[Self::range(k)]
     }
 
+    /// The blocks that meet a box of positions in ticks, `[lat0, lat1) x [lon0, lon1)`: the
+    /// terrain an incident needs for its AOI. Every device that cuts the same terrain to the
+    /// same box gets the same blocks and so the same terrain hash.
+    pub fn cut(&self, lat0: i64, lat1: i64, lon0: i64, lon1: i64) -> Result<Terrain> {
+        if lat0 >= lat1 || lon0 >= lon1 {
+            return Err(Error::invalid(
+                "an AOI box needs lat0 < lat1 and lon0 < lon1",
+            ));
+        }
+        let s = self.spacing.ticks();
+        // Posts p with lat0 <= p * s < lat1, then the blocks that hold them.
+        let (i0, i1) = (ceil_div(lat0, s), ceil_div(lat1, s) - 1);
+        let (j0, j1) = (ceil_div(lon0, s), ceil_div(lon1, s) - 1);
+        let b = BLOCK as i64;
+        let keep: Vec<usize> = (0..self.blocks.len())
+            .filter(|&k| {
+                let id = self.blocks[k];
+                let (bi, bj) = (id.bi as i64, id.bj as i64);
+                bi >= i0.div_euclid(b)
+                    && bi <= i1.div_euclid(b)
+                    && bj >= j0.div_euclid(b)
+                    && bj <= j1.div_euclid(b)
+            })
+            .collect();
+        let take = |v: &[u8], k: usize| v[k * BLOCK_POSTS..(k + 1) * BLOCK_POSTS].to_vec();
+        Terrain::new(
+            self.spacing,
+            keep.iter().map(|&k| self.blocks[k]).collect(),
+            keep.iter().flat_map(|&k| self.dm(k).to_vec()).collect(),
+            keep.iter().flat_map(|&k| take(&self.steep, k)).collect(),
+            keep.iter().flat_map(|&k| take(&self.cover, k)).collect(),
+            keep.iter().flat_map(|&k| take(&self.conf, k)).collect(),
+            keep.iter().flat_map(|&k| self.lines(k).to_vec()).collect(),
+        )?
+        .with_sources(self.sources.clone())
+    }
+
     pub fn write(&self) -> Vec<u8> {
         let pays: Vec<Vec<u8>> = (0..self.blocks.len()).map(|k| self.payload(k)).collect();
         let mut o = Vec::with_capacity(
@@ -175,6 +305,8 @@ impl Terrain {
         o.extend_from_slice(&MINOR.to_le_bytes());
         o.extend_from_slice(&(self.spacing.ticks() as u32).to_le_bytes());
         o.extend_from_slice(&(self.blocks.len() as u32).to_le_bytes());
+        put_varint(&mut o, self.sources.len() as u64);
+        o.extend_from_slice(self.sources.as_bytes());
         for (b, p) in self.blocks.iter().zip(&pays) {
             o.extend_from_slice(&b.key().to_le_bytes());
             o.extend_from_slice(&(p.len() as u32).to_le_bytes());
@@ -187,27 +319,13 @@ impl Terrain {
     }
 
     fn payload(&self, k: usize) -> Vec<u8> {
-        let mut o = Vec::new();
-        let mut put = |p: Vec<u8>| {
-            put_varint(&mut o, p.len() as u64);
-            o.extend_from_slice(&p);
-        };
-        put(dem_encode(self.dm(k)));
-        put(codec::plane_encode(
-            &self.steep(k).iter().map(|&x| x as u16).collect::<Vec<_>>(),
-            false,
-        ));
-        put(codec::plane_encode(
-            &self
-                .cover(k)
-                .iter()
-                .zip(self.conf(k))
-                .map(|(&c, &b)| (c | b << 4) as u16)
-                .collect::<Vec<_>>(),
-            false,
-        ));
-        put(codec::plane_encode(self.lines(k), true));
-        o
+        block_payload(
+            self.dm(k),
+            self.steep(k),
+            self.cover(k),
+            self.conf(k),
+            self.lines(k),
+        )
     }
 
     /// Reads and verifies a terrain file (every plane decoded, the hash recomputed).
@@ -227,6 +345,15 @@ impl Terrain {
         let _minor = r.u16()?;
         let spacing = Spacing::new(r.u32()? as i64)?;
         let n = r.u32()? as usize;
+        let ns = r.len()?;
+        if ns > MAX_SOURCES {
+            return Err(Error::invalid(
+                "the sources text is longer than 65,535 bytes",
+            ));
+        }
+        let sources = std::str::from_utf8(r.take(ns)?)
+            .map_err(|_| Error::invalid("the sources text is not UTF-8"))?
+            .to_string();
         if n > b.len() / 12 {
             return Err(Error::Truncated("terrain file"));
         }
@@ -268,7 +395,8 @@ impl Terrain {
         }
         let stored = r.h32()?;
         r.end()?;
-        let t = Terrain::new(spacing, blocks, dm, steep, cover, conf, lines)?;
+        let t =
+            Terrain::new(spacing, blocks, dm, steep, cover, conf, lines)?.with_sources(sources)?;
         if t.hash != stored {
             return Err(Error::Hash("terrain"));
         }
@@ -389,6 +517,41 @@ fn dem_decode(b: &[u8]) -> Option<Vec<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sources_and_per_block_hash() {
+        let ids = [
+            BlockId { bi: 0, bj: 0 },
+            BlockId { bi: 0, bj: 1 },
+            BlockId { bi: 3, bj: -2 },
+        ];
+        let t = sample(&ids);
+        let text = "DEM: GEM-15 (CC BY 4.0), land cover: ESA WorldCover 2021 v200, OSM 2026-11-20";
+        let ts = t.clone().with_sources(text).unwrap();
+        assert_eq!(ts.hash(), t.hash(), "the sources text is not hashed");
+        let back = Terrain::read(&ts.write()).unwrap();
+        assert_eq!(back.sources(), text);
+        assert_eq!(back, ts);
+        assert!(t.clone().with_sources("x".repeat(MAX_SOURCES + 1)).is_err());
+        // A streaming writer folds block hashes in key order and gets the same terrain hash.
+        let hs: Vec<[u8; 32]> = (0..ids.len())
+            .map(|k| {
+                block_hash(
+                    ids[k],
+                    t.dm(k),
+                    t.steep(k),
+                    t.cover(k),
+                    t.conf(k),
+                    t.lines(k),
+                )
+            })
+            .collect();
+        assert_eq!(terrain_hash(t.spacing(), &hs), t.hash());
+        // The cut keeps the sources and hashes only its blocks.
+        let c = ts.cut(0, 64 * 120, 0, 64 * 120).unwrap();
+        assert_eq!(c.sources(), text);
+        assert_eq!(c.hash(), terrain_hash(t.spacing(), &hs[..1]));
+    }
 
     fn sample(blocks: &[BlockId]) -> Terrain {
         let n = blocks.len() * BLOCK_POSTS;

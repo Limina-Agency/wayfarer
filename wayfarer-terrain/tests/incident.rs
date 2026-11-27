@@ -184,6 +184,7 @@ fn tick_box(r0: i64, r1: i64, c0: i64, c1: i64, effect: Effect) -> OverlayItem {
         lat1: (i0 + r1) * SP,
         lon0: (j0 + c0) * SP,
         lon1: (j0 + c1) * SP,
+        observed_at: T0,
         effect,
     }
 }
@@ -394,67 +395,67 @@ fn steps() -> Vec<Step> {
 const GOLDEN: &[(&str, &str)] = &[
     (
         "content_base",
-        "727c82bfec56382cc67550757f756a88a0ed6eb60cec3c8d15e9a00d0cf7f298",
+        "3b77629566372dbaf983db6e307d70b51d5c99bf34c6cab9afb83d649bc65f7f",
     ),
     (
         "recipe_base",
-        "5070f26ad01d674d1a536fa0426cea6a62122c1bc0851e08e18e9dab83e966e1",
+        "64bdc0d0bef81b5e98017f5cc2b46351d4b805acb351bf775ff3a13947e12a90",
     ),
     (
         "content_landcover",
-        "f96281e307abd987e8697331166180ded003995dd2c911d87bc936b131aab336",
+        "e41ede6b5e48471be4bb7b1162f085358742e205b759ac4f0b609b5fddaff02b",
     ),
     (
         "recipe_landcover",
-        "f9941ecd11473999a7dbf371e2e02a53d033b827eee17aa7725777269ac1238b",
+        "a654a23b03b09addd6313be04c3c6e06b0ad6c1fb8664265f4dbfe81fb39ae7b",
     ),
     (
         "content_flood",
-        "cab0e5d900757d30c3e93f66963b059ba6fc2e3631973188f4586e932d373a3e",
+        "f0022fdf026ebb7d4a6c27ecbad78ffa520d5ee99c8c4958f18bb087e2b740f7",
     ),
     (
         "recipe_flood",
-        "969cdb550c0d2c91ff8e848df64c093277ff77b6e72622e5775e90982abc3917",
+        "20a81323079723d30054bf1f84b062a099ca2d9c0cc181a3a99aad406fa4252c",
     ),
     (
         "content_drone",
-        "b4db890abf535ca50445152fda9ae2a217154b8383f644aecbcdce3e7ac8df76",
+        "1561b2aeee5a89961f37d90fa951fb52ddcfc9d2131ade2dd153ccae206dc75b",
     ),
     (
         "recipe_drone",
-        "5b759f39e54a52f58a28c644f857f8ea16a88fca972e521fe661b4bcb0f1ea6d",
+        "e1d575a91e6bfdbb34afc064ad58a627c42ba29df29cc763d9504176278686e6",
     ),
     (
         "content_late",
-        "3e4d8145d72f1cb040d3b92bac4d7828239935e8dfa630d777a982945771c9c9",
+        "8704c6e4f67a8ea54239d3c78f4ccdd65663d0f7ef9e33d8becbc917471bda58",
     ),
     (
         "recipe_late",
-        "cbec9fd76231dea3f2a8ad5da0a251db4a85d667383a5c344d0b2d20bf1d09ef",
+        "d244d7b8f55eff02e07f8e7dca358398c0fa5a3779918e1a633763736b78097f",
     ),
     (
         "content_team",
-        "962fffb468e68434ce8d06c901c00e1e7f62ba551e7d5f335ff45159cb533a59",
+        "7a7fe976ce5e347b8b7a61bca4c00d8cd82904c9d4ee364f4d13ae156363b140",
     ),
     (
         "recipe_team",
-        "b5a1e2542605d094f81e27493b68fe9f5cc4116dba39f9af77edc8b6c3516a90",
+        "b11b948d725c89cf5dc4b807e07acc78bc7eeb7b5fbc383ecc0eac1f2b67a08f",
     ),
     (
         "content_fading",
-        "5f02f4ea0c2a6327e4c48ba42f83228ee7415b0a21e973e10f5154bfdb02eeab",
+        "05c33485e3e99c7cdfc916aca132b4f58961d4a5326138f865e24c24680b53a8",
     ),
     (
         "recipe_fading",
-        "40a1079cb18bca2dcc4c467a2eb75106dd5a00bbf37658a19972f864f197546d",
+        "bf7dee2f06873ee3f9a3aa88d9a0e79672b70c66a6f8fdb4fdc31f45e87d5153",
     ),
     (
         "content_expired",
-        "30623ab0a2018aabe50d58e9bab01f4585624231fa82ce886164f8beb4edfb2e",
+        "c492a6a066e419b8b9643534c0e5433dbc7783f2606830b30e4d7ab7610d5328",
     ),
     (
         "recipe_expired",
-        "08a1213ff1f31ae66b3477afb90f0b1750c3ab7dd832e72b4f507d21b26316b6",
+        "ef327d2e51d2dc827474bde671efda177278220700183f4a166bbbf50922506f",
     ),
     (
         "route_base_0",
@@ -715,4 +716,121 @@ fn terrain_file_on_the_fixture() {
     let f = ter.write();
     assert_eq!(Terrain::read(&f).unwrap(), ter);
     assert_eq!(ROWS * COLS, (ter.blocks().len() * BLOCK_POSTS) as i64);
+}
+
+/// Contract v1: the overlay is a set. Any order of the same items, with duplicates, gives the
+/// same surface and recipe; dropping an item and updating equals a full build without it.
+#[test]
+fn overlay_is_a_set() {
+    let fx = fixture();
+    let rules = [Rules::walker_default(), Rules::vehicle()];
+    let prior = Prior::default();
+    let all: Vec<&HashedLayer> = fx.layers.iter().collect();
+    let inc = |overlay: Vec<OverlayItem>| Incident {
+        id: *b"wayfarer-test\0\0\0",
+        terrain: &fx.ter,
+        prior: &prior,
+        layers: all.clone(),
+        overlay,
+        rules: &rules,
+        epoch_s: E,
+        allow_research: false,
+        feature_min_conf: 128,
+        level_min_w: 128,
+    };
+    let t = T0 + 5 * E;
+    // A later block over part of the clear box: the later observation wins.
+    let mut late = tick_box(56, 60, 196, 200, Effect::Block);
+    late.observed_at = T0 + 60;
+    let items = vec![fx.overlay[0], fx.overlay[1], late];
+    let a = inc(items.clone()).surface(t).unwrap();
+    let mut shuffled = vec![late, fx.overlay[1], fx.overlay[0], late];
+    let b = inc(shuffled.clone()).surface(t).unwrap();
+    assert_eq!(a, b, "order and duplicates do not matter");
+    assert_eq!(a.recipe_hash(), b.recipe_hash());
+
+    // The later block closes posts the earlier clear box opened; observed earlier, it would not.
+    let mut early = late;
+    early.observed_at = T0 - 60;
+    let c = inc(vec![fx.overlay[0], fx.overlay[1], early])
+        .surface(t)
+        .unwrap();
+    assert_ne!(
+        a.content_hash(),
+        c.content_hash(),
+        "observed time orders the items"
+    );
+
+    // Dropping an item is how it is removed.
+    shuffled.retain(|it| *it != late);
+    let without = inc(shuffled.clone());
+    let upd = without.update(t, &a, &inc(items)).unwrap();
+    assert_eq!(
+        upd,
+        without.surface(t).unwrap(),
+        "update after a removal equals full"
+    );
+
+    // A box in degrees, corners in any order, lands on the same ticks every time.
+    let deg = |ticks: i64| ticks as f64 / 432_000.0;
+    let it = fx.overlay[0];
+    let from = OverlayItem::from_degrees(
+        (deg(it.lat1), deg(it.lat0)),
+        (deg(it.lon0), deg(it.lon1)),
+        it.observed_at,
+        it.effect,
+    )
+    .unwrap();
+    assert_eq!(from, it);
+    assert!(OverlayItem::from_degrees((49.0, 49.0), (20.0, 20.1), 0, Effect::Block).is_err());
+    assert!(OverlayItem::from_degrees((91.0, 92.0), (20.0, 20.1), 0, Effect::Block).is_err());
+}
+
+/// The AOI cut and `surface_at`: a block's content depends only on its own inputs, so a surface
+/// built on a cut terrain holds the full surface's blocks for that area.
+#[test]
+fn aoi_cut_and_host_time() {
+    let fx = fixture();
+    let rules = [Rules::walker_default()];
+    let prior = Prior::default();
+    let i0 = BI0 as i64 * BLOCK as i64 * SP;
+    let j0 = BJ0 as i64 * BLOCK as i64 * SP;
+    // Rows 70-100, columns 10-140: blocks (1, 0), (1, 1) and (1, 2).
+    let cut = fx
+        .ter
+        .cut(i0 + 70 * SP, i0 + 100 * SP, j0 + 10 * SP, j0 + 140 * SP)
+        .unwrap();
+    let ids: Vec<(i32, i32)> = cut
+        .blocks()
+        .iter()
+        .map(|b| (b.bi - BI0, b.bj - BJ0))
+        .collect();
+    assert_eq!(ids, vec![(1, 0), (1, 1), (1, 2)]);
+    assert_eq!(
+        fx.ter.cut(i0, i0 + 1, j0, j0 + 1).unwrap().blocks().len(),
+        1
+    );
+    assert!(fx.ter.cut(i0, i0, j0, j0 + 1).is_err());
+
+    let inc = |ter| Incident {
+        id: *b"wayfarer-test\0\0\0",
+        terrain: ter,
+        prior: &prior,
+        layers: fx.layers.iter().collect(),
+        overlay: fx.overlay.clone(),
+        rules: &rules,
+        epoch_s: E,
+        allow_research: false,
+        feature_min_conf: 128,
+        level_min_w: 128,
+    };
+    let t = T0 + 5 * E;
+    let full = inc(&fx.ter).surface(t).unwrap();
+    let part = inc(&cut).surface(t).unwrap();
+    assert_eq!(part.blocks.len(), 3);
+    for (k, b) in &part.blocks {
+        assert_eq!(full.blocks[k].1.hash(), b.1.hash(), "block {:?}", b.0);
+    }
+    // The host passes its own time; the surface is the one at the start of that epoch.
+    assert_eq!(inc(&fx.ter).surface_at(t + E - 1).unwrap(), full);
 }

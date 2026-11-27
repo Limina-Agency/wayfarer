@@ -1,5 +1,6 @@
 //! Fusion of the base with terrain layers and the team overlay into the per-post state the
-//! incident surface is costed from (`docs/design/terrain-layers.md`, contract v0).
+//! incident surface is costed from (`docs/design/terrain-layers.md`, contract v0; the overlay follows the incident surface
+//! contract v1 draft).
 //!
 //! Per post, in this order:
 //! 1. The base: the land-cover code and confidence bit, turned into a class distribution by
@@ -10,12 +11,13 @@
 //!    `w >= level_min_w`. A newer confident layer wins, a weak one blends, and w = 0 is a no-op.
 //! 3. Feature layers: lines at or above the confidence threshold OR their effect bits into the
 //!    posts they cross (exact supercover on the lattice).
-//! 4. Team overlay items, last: they beat every raster and feature.
+//! 4. Team overlay items, last, in (observed time, item bytes) order: they beat every raster
+//!    and feature, and a later observation beats an earlier one.
 //!
 //! All arithmetic is integer with one rounding rule per step, and each post depends only on its
 //! own inputs, so any block order, thread count or incremental re-fusion gives the same bytes.
 
-use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId};
+use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId, TICKS_PER_DEG, ticks_of_deg};
 use crate::layer::{
     self, FEAT_DEBRIS, FEAT_FALLEN, FEAT_PASSAGE, FEAT_WASHOUT, HAZARDS, Kind, LEVELS,
     LICENCE_RESEARCH, Layer, NCLASS, NHAZ, NLEV,
@@ -77,8 +79,9 @@ impl HashedLayer {
     }
 }
 
-/// The class distribution of each (land-cover code, confidence bit) of the base, at index
-/// `code * 2 + bit`; each sums to [`S`].
+/// The land-cover prior: the class distribution each (land-cover code, confidence bit) of the
+/// base starts from before any layer is fused, at index `code * 2 + bit`; each sums to [`S`].
+/// A fixed input of the incident (one-hot by default), not a previous surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prior {
     table: Vec<[u16; NCLASS]>,
@@ -132,31 +135,96 @@ pub enum Effect {
     SetHazard(u16, u8),
 }
 
-/// A team overlay item over a box of post positions in ticks, `[lat0, lat1) x [lon0, lon1)`.
+/// A team overlay item: an effect over a box of post positions in ticks, `[lat0, lat1) x
+/// [lon0, lon1)`, observed at a time (UTC seconds).
+///
+/// An overlay is a set, not a list: fusion applies its items in (observed time, item bytes)
+/// order, so items that arrive in any order from any number of devices give the same surface.
+/// Where two items cover a post, the one observed later wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OverlayItem {
     pub lat0: i64,
     pub lat1: i64,
     pub lon0: i64,
     pub lon1: i64,
+    pub observed_at: i64,
     pub effect: Effect,
 }
 
-/// Hash of an overlay set, in the set's own order (later items win).
-pub fn overlay_hash(items: &[OverlayItem]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    for it in items {
-        for v in [it.lat0, it.lat1, it.lon0, it.lon1] {
-            h.update(&v.to_le_bytes());
+impl OverlayItem {
+    /// An item from a box in f64 degrees, its corners in any order. Each edge goes onto the
+    /// lattice by [`lattice::ticks_of_deg`](crate::lattice::ticks_of_deg), the one rounding
+    /// rule, so every device that holds the same shape gets the same item.
+    pub fn from_degrees(
+        lat: (f64, f64),
+        lon: (f64, f64),
+        observed_at: i64,
+        effect: Effect,
+    ) -> Result<OverlayItem> {
+        let t =
+            |d: f64| ticks_of_deg(d).ok_or_else(|| Error::invalid("overlay corner outside ±180°"));
+        let (a, b, c, d) = (t(lat.0)?, t(lat.1)?, t(lon.0)?, t(lon.1)?);
+        if a.abs() > 90 * TICKS_PER_DEG || b.abs() > 90 * TICKS_PER_DEG {
+            return Err(Error::invalid("overlay latitude outside ±90°"));
         }
-        let (k, c, v) = match it.effect {
+        let it = OverlayItem {
+            lat0: a.min(b),
+            lat1: a.max(b),
+            lon0: c.min(d),
+            lon1: c.max(d),
+            observed_at,
+            effect,
+        };
+        if it.lat0 == it.lat1 || it.lon0 == it.lon1 {
+            return Err(Error::invalid("an overlay box has no area on the lattice"));
+        }
+        Ok(it)
+    }
+
+    /// The item's canonical bytes: observed time, box, effect.
+    pub fn bytes(&self) -> [u8; 44] {
+        let mut o = [0u8; 44];
+        o[..8].copy_from_slice(&self.observed_at.to_le_bytes());
+        for (k, v) in [self.lat0, self.lat1, self.lon0, self.lon1]
+            .iter()
+            .enumerate()
+        {
+            o[8 + 8 * k..16 + 8 * k].copy_from_slice(&v.to_le_bytes());
+        }
+        let (e, c, v) = match self.effect {
             Effect::Block => (1u8, 0u16, 0u8),
             Effect::Clear => (2, 0, 0),
             Effect::SetHazard(c, v) => (3, c, v),
         };
-        h.update(&[k]);
-        h.update(&c.to_le_bytes());
-        h.update(&[v]);
+        o[40] = e;
+        o[41..43].copy_from_slice(&c.to_le_bytes());
+        o[43] = v;
+        o
+    }
+}
+
+/// The overlay as fusion applies it: sorted by (observed time, item bytes), duplicates removed.
+/// Any order of the same items gives the same result.
+pub fn canonical_overlay(items: &[OverlayItem]) -> Vec<OverlayItem> {
+    // By observed time as a number first: the bytes are little-endian, so they alone would not
+    // sort by time.
+    let mut v: Vec<(i64, [u8; 44], OverlayItem)> = items
+        .iter()
+        .map(|it| (it.observed_at, it.bytes(), *it))
+        .collect();
+    v.sort_by_key(|a| (a.0, a.1));
+    v.dedup_by(|a, b| a.1 == b.1);
+    v.into_iter().map(|x| x.2).collect()
+}
+
+/// Hash of an overlay set: of its canonical form, so the items' order does not matter.
+pub fn overlay_hash(items: &[OverlayItem]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"wis1/overlay");
+    let c = canonical_overlay(items);
+    h.update(&(c.len() as u64).to_le_bytes());
+    for it in &c {
+        h.update(&it.bytes());
     }
     *h.finalize().as_bytes()
 }
@@ -403,6 +471,7 @@ pub fn fuse(
     only: Option<&[BlockId]>,
 ) -> (Vec<(BlockId, FusedBlock)>, Record) {
     let spacing = ter.spacing().ticks();
+    let overlay = &canonical_overlay(overlay)[..];
     // Which layers apply, in fusion order.
     let mut active: Vec<(i64, [u8; 32], &Layer)> = Vec::new();
     let mut ignored = Vec::new();
@@ -556,7 +625,7 @@ fn fuse_block(
             fb.src[q] = src;
         }
     }
-    // Team overlay items, in the set's own order, last.
+    // Team overlay items, last, in canonical order: a later observation wins.
     for it in overlay {
         for q in 0..BLOCK_POSTS {
             let (la, lo) = (

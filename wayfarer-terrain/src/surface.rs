@@ -1,4 +1,4 @@
-//! The incident surface (`docs/design/incident-surface.md`, contract draft v0).
+//! The incident surface (`docs/design/incident-surface.md`, contract v1 draft).
 //!
 //! The incident surface is the stored result of fusion: the base, the layers and the team
 //! overlay active at an incident epoch T, costed per profile. A query reads only this surface
@@ -11,8 +11,8 @@
 //!
 //! Identity: a block hash over each block's canonical decoded bytes; the **content hash** over
 //! what routes depend on (spacing, terrain, profile tables) and the block hashes; the **recipe
-//! hash** over every input (terrain, prior, layers applied and left out, overlay, profiles,
-//! params, T). The same content hash means the same routes. A delta carries only the changed
+//! hash** over every input (fuse version, terrain, prior, layers applied and left out, the
+//! canonical overlay, profiles, params, T). The same content hash means the same routes. A delta carries only the changed
 //! blocks and is checked by the content hash it produces.
 
 use crate::codec::{self, Reader, put_varint};
@@ -26,8 +26,13 @@ use crate::{Error, Result};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const MAJOR: u16 = 0;
+pub const MAJOR: u16 = 1;
 pub const MINOR: u16 = 0;
+/// The fusion and cost rules' version, in every recipe. It changes whenever the same inputs
+/// would give different surface content: a new rule, a changed constant, a changed default
+/// profile. Two builds with the same fuse version and the same inputs agree, whatever their
+/// crate versions. (0 was experiment E14's rules, unversioned.)
+pub const FUSE_VERSION: u16 = 1;
 pub const MAGIC: &[u8; 4] = b"WIS0";
 pub const DELTA_MAGIC: &[u8; 4] = b"WISD";
 /// Source of a post: the base.
@@ -234,6 +239,9 @@ pub struct AppliedRef {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
+    /// [`FUSE_VERSION`] of the build that made the surface. A reader with another fuse version
+    /// still reads and routes on it; it just cannot rebuild the same surface.
+    pub fuse_version: u16,
     pub incident: [u8; 16],
     pub spacing: u32,
     pub epoch_s: u32,
@@ -241,6 +249,7 @@ pub struct Header {
     /// The first epoch start after T at which the content can change; `i64::MAX` if none.
     pub same_until: i64,
     pub terrain: [u8; 32],
+    /// Hash of the land-cover prior ([`Prior`]), a fixed input; not a previous surface.
     pub prior: [u8; 32],
     pub overlay: [u8; 32],
     pub allow_research: u8,
@@ -257,6 +266,7 @@ pub struct Header {
 impl Header {
     fn encode(&self) -> Vec<u8> {
         let mut o = Vec::new();
+        o.extend_from_slice(&self.fuse_version.to_le_bytes());
         o.extend_from_slice(&self.incident);
         o.extend_from_slice(&self.spacing.to_le_bytes());
         o.extend_from_slice(&self.epoch_s.to_le_bytes());
@@ -287,6 +297,7 @@ impl Header {
     }
 
     fn decode(r: &mut Reader) -> Result<Header> {
+        let fuse_version = r.u16()?;
         let incident = r.take(16)?.try_into().unwrap();
         let (spacing, epoch_s) = (r.u32()?, r.u32()?);
         let (t, same_until) = (r.i64()?, r.i64()?);
@@ -322,6 +333,7 @@ impl Header {
             return Err(Error::invalid("bad surface header"));
         }
         Ok(Header {
+            fuse_version,
             incident,
             spacing,
             epoch_s,
@@ -341,7 +353,7 @@ impl Header {
 
     /// What routes depend on besides the blocks: spacing, terrain (the heights), profile tables.
     fn content_prefix(&self, h: &mut blake3::Hasher) {
-        h.update(b"wis0/content");
+        h.update(b"wis1/content");
         h.update(&MAJOR.to_le_bytes());
         h.update(&self.spacing.to_le_bytes());
         h.update(&self.terrain);
@@ -375,7 +387,7 @@ impl Surface {
     /// and the profile tables), the contract versions and the AOI.
     pub fn recipe_hash(&self) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
-        h.update(b"wis0/recipe");
+        h.update(b"wis1/recipe");
         h.update(&MAJOR.to_le_bytes());
         h.update(&MINOR.to_le_bytes());
         h.update(&crate::layer::MAJOR.to_le_bytes());
@@ -406,6 +418,14 @@ impl Surface {
         o.extend_from_slice(&self.h.encode());
         o.extend_from_slice(&self.recipe_hash());
         o.extend_from_slice(&self.content_hash());
+        o.extend_from_slice(&self.block_section());
+        o
+    }
+
+    /// The end of the file after the hashes: block count, block index and payloads. It is
+    /// the same bytes whenever the blocks are, whatever the header holds.
+    pub fn block_section(&self) -> Vec<u8> {
+        let mut o = Vec::new();
         put_varint(&mut o, self.blocks.len() as u64);
         let pays: Vec<Vec<u8>> = self.blocks.values().map(|(_, b)| b.payload()).collect();
         for ((k, (_, b)), p) in self.blocks.iter().zip(&pays) {
@@ -481,6 +501,13 @@ pub fn delta(old: &Surface, new: &Surface) -> Vec<u8> {
     o.extend_from_slice(&new.h.encode());
     o.extend_from_slice(&new.recipe_hash());
     o.extend_from_slice(&new.content_hash());
+    o.extend_from_slice(&delta_ops(old, new));
+    o
+}
+
+/// The end of a delta after the hashes: the block ops, the same bytes whenever the blocks are.
+pub fn delta_ops(old: &Surface, new: &Surface) -> Vec<u8> {
+    let mut o = Vec::new();
     let mut ch: Vec<(u64, Option<&SBlock>)> = Vec::new();
     for (k, (_, b)) in &new.blocks {
         if old.blocks.get(k).map(|x| x.1.hash) != Some(b.hash) {
@@ -643,7 +670,7 @@ pub struct Incident<'a> {
     pub prior: &'a Prior,
     /// In any order: fusion orders them.
     pub layers: Vec<&'a HashedLayer>,
-    /// In the set's order: later items win.
+    /// In any order: fusion applies them by observed time ([`fuse::canonical_overlay`]).
     pub overlay: Vec<OverlayItem>,
     pub rules: &'a [Rules],
     /// Epoch length in seconds (900 = 15 minutes).
@@ -666,6 +693,16 @@ impl Incident<'_> {
     /// The surface at epoch start T, built in full.
     pub fn surface(&self, t: i64) -> Result<Surface> {
         self.build(t, None, None)
+    }
+
+    /// The surface for the host's time `now` (UTC seconds): at the start of the epoch that
+    /// holds `now`. A device that was suspended for hours calls this once on waking; a surface
+    /// depends on its inputs and T only, so there is nothing to replay.
+    pub fn surface_at(&self, now: i64) -> Result<Surface> {
+        if self.epoch_s <= 0 {
+            return Err(Error::invalid("the epoch length must be positive"));
+        }
+        self.surface(epoch_of(now, self.epoch_s))
     }
 
     /// The surface at epoch start T from `prev`, re-fusing only the blocks whose inputs changed
@@ -715,8 +752,12 @@ impl Incident<'_> {
                 }
             }
         }
-        if before.overlay != self.overlay {
-            for it in before.overlay.iter().chain(&self.overlay) {
+        let (oa, ob): (BTreeSet<_>, BTreeSet<_>) = (
+            before.overlay.iter().map(|it| it.bytes()).collect(),
+            self.overlay.iter().map(|it| it.bytes()).collect(),
+        );
+        for it in before.overlay.iter().chain(&self.overlay) {
+            if oa.contains(&it.bytes()) != ob.contains(&it.bytes()) {
                 changed.extend(overlay_blocks(it, sp));
             }
         }
@@ -774,6 +815,7 @@ impl Incident<'_> {
             .map(|l| &l.layer().m)
             .collect();
         let h = Header {
+            fuse_version: FUSE_VERSION,
             incident: self.id,
             spacing: self.terrain.spacing().ticks() as u32,
             epoch_s: self.epoch_s as u32,

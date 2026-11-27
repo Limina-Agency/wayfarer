@@ -20,8 +20,9 @@
 //! so producers can write layers on any device; they are re-exported here as [`lattice`],
 //! [`layer`] and [`codec`].
 //!
-//! Status: experimental. The file formats follow contract drafts v0 and change until they are
-//! pinned as v1; the profile values are assumptions until the field trial.
+//! Status: experimental. The file formats follow contract drafts (layers v0, surface and terrain
+//! file v1) and change until they are pinned; the profile values are assumptions until the
+//! field trial.
 //!
 //! ```
 //! use wayfarer_terrain::{lattice::{BlockId, Spacing}, terrain::Terrain};
