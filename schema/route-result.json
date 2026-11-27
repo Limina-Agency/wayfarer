@@ -951,6 +951,103 @@
         "other"
       ]
     },
+    "RouteAccessConfidence": {
+      "description": "How far to trust a terrain stretch, over the posts its path crosses\n(`docs/design/incident-surface.md` section 7).",
+      "type": "object",
+      "properties": {
+        "atEdge": {
+          "description": "The path touches the edge of the surface: a larger area might give a\nfaster stretch.",
+          "type": "boolean"
+        },
+        "layerPermille": {
+          "description": "Share of the length on posts a layer decided, and the team, per mille.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxRisk": {
+          "description": "Highest closure risk on the path (1/255) and the share of its length\nwith any risk, per mille.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "meanCertainty": {
+          "description": "Length-weighted mean and least certainty of the fused land cover\n(1/255).",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "minCertainty": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "riskyPermille": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "teamPermille": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "meanCertainty",
+        "minCertainty",
+        "layerPermille",
+        "teamPermille",
+        "maxRisk",
+        "riskyPermille",
+        "atEdge"
+      ]
+    },
+    "RouteAccessPricing": {
+      "description": "What the pricer of a stretch reports about it (portals:\n`docs/design/portals.md`).",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "How far to trust a terrain stretch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteAccessConfidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "description": "Who priced it: `terrain` for a least-cost search over an incident\nsurface.",
+          "type": "string"
+        },
+        "surfaceHash": {
+          "description": "The surface's content hash (hex), for a terrain stretch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "description": "The candidates the pricer ranked behind the ones the endpoint kept.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteAccessTruncation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
     "RouteAccessQualifier": {
       "description": "The qualifier of a legal right that is not plain `yes`.",
       "oneOf": [
@@ -1033,6 +1130,17 @@
         "point": {
           "description": "The requested point.",
           "$ref": "#/$defs/GeoPoint"
+        },
+        "pricing": {
+          "description": "What a pricer reported, for a priced stretch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteAccessPricing"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1045,6 +1153,31 @@
         "cost",
         "paceMps",
         "costFactor"
+      ]
+    },
+    "RouteAccessTruncation": {
+      "description": "Candidates a pricer ranked but the endpoint did not keep. The search over\nthe kept candidates is exact; a cut candidate could still have given a\ncheaper route if its key, less the worst kept key, is less than the road\ncost it would save.",
+      "type": "object",
+      "properties": {
+        "bestCutKeyS": {
+          "description": "The best cut candidate's key and the worst kept one's, in seconds:\naccess, switch and the rest of the edge.",
+          "type": "number",
+          "format": "double"
+        },
+        "cut": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "worstKeptKeyS": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "cut",
+        "bestCutKeyS",
+        "worstKeptKeyS"
       ]
     },
     "RouteAlternative": {

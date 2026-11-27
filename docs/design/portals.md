@@ -1,9 +1,9 @@
 # Portals: routes that start or end on open ground (W3)
 
 Status: proposal, mostly built. The priced-access seam (section 2), the
-terrain fields (section 3.1) and portal generation (section 3) are built.
-Truncation reporting (section 4) and the Tatra parity runs (section 5) are
-next. Written against
+terrain fields (section 3.1), portal generation (section 3) and what results
+report (section 4) are built. The Tatra parity runs (section 5) are next.
+Written against
 `main` at `e1d070c` (0.6.0). Off-road plan W3, "portals and blending": PLAN
 section 8 ("0.8 incident-surface portals: each cell a road passes through,
 cheapest per directed edge, truncation reported"). The terrain side is
@@ -224,18 +224,36 @@ request's `costFactor` applies only to X1's straight lines. The distance is
 the path's length on the lattice plus the two offsets. Its confidence,
 `search::route_conf` of the path, comes with the result summary (next).
 
-## 4. Truncation (next)
+## 4. What results report, and truncation (built)
 
-A search over the kept candidates is exact. A cut candidate could still have
-given a cheaper route if its key, minus the best kept candidate's key, is
-less than the network cost it would save, which is unknown. The result
-reports both:
+Each stretch of a leg's `offNetwork` summary that a pricer priced carries a
+`pricing` object (`RouteAccessPricing`, additive in `route-result.json`):
 
-- `truncated: { cut: n, bestCutKey, worstKeptKey }` on the leg's off-network
-  summary, when `n > 0`;
-- the oracle tests compare against a run with no cut (`max_candidates` = all)
-  and check that the same route comes back whenever `bestCutKey − worstKeptKey`
-  exceeds the route's cost spread. This is the plan's "truncation reported".
+```json
+"pricing": {
+  "source": "terrain",
+  "surfaceHash": "<the surface's content hash, hex>",
+  "confidence": { "meanCertainty": 255, "minCertainty": 255,
+                  "layerPermille": 0, "teamPermille": 0,
+                  "maxRisk": 0, "riskyPermille": 0, "atEdge": false },
+  "truncated": { "cut": 9, "bestCutKeyS": 151.2, "worstKeptKeyS": 148.7 }
+}
+```
+
+- `confidence` is `search::route_conf` of the stretch's path: the fused
+  land cover's certainty, the shares decided by layers and by the team, and
+  closure risk. `atEdge` says the path touches the surface's edge, so a
+  larger area might give a faster stretch.
+- `truncated` appears when the pricer ranked more candidates than the
+  endpoint keeps (`maxCandidates`). A search over the kept candidates is
+  exact. A cut candidate could still have given a cheaper route if its key,
+  less the worst kept key, is less than the road cost it would save, which
+  is unknown. The counts are among the up to 64 candidates the correlator
+  handed over.
+- The test checks that a run with every candidate (`maxCandidates` 64)
+  is never dearer and reports no cut. Checking that the same route comes
+  back whenever the key gap exceeds the route's cost spread is for the Tatra
+  runs (section 5).
 
 ## 5. Tests and measurements
 
