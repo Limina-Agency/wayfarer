@@ -9,9 +9,8 @@ description = "Off-road terrain for Wayfarer: terrain files on the global lattic
 readme = "README.md"
 keywords = ["routing", "terrain", "search-and-rescue", "gis"]
 categories = ["science::geo", "algorithms"]
-# Experimental: the layer and incident-surface contracts are drafts (v0) until the field trial.
-# Not published until they are pinned as v1.
-publish = false
+# Experimental: published from 0.6 with the v1 drafts of the incident surface and terrain file;
+# the profile values stay assumptions until the field trial.
 
 [lints]
 workspace = true

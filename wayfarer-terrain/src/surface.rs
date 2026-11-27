@@ -160,8 +160,69 @@ fn u8s(v: &[u8]) -> Vec<u16> {
     v.iter().map(|&x| x as u16).collect()
 }
 
-/// Surface blocks from fused blocks: top class, certainty, block-local source, and per
-/// profile the cost rules.
+/// A surface block from a fused block: top class, certainty, block-local source, and per
+/// profile the cost rules. `k` is the block's index in the terrain.
+pub fn cost_block(
+    ter: &Terrain,
+    k: usize,
+    fb: &FusedBlock,
+    applied: &[fuse::Applied],
+    rules: &[Rules],
+) -> SBlock {
+    let id = ter.blocks()[k];
+    let (steep, lines) = (ter.steep(k), ter.lines(k));
+    let used: BTreeSet<u8> = fb
+        .src
+        .iter()
+        .copied()
+        .filter(|&s| s != SRC_BASE && s != SRC_TEAM)
+        .collect();
+    let table: Vec<[u8; 32]> = used.iter().map(|&s| applied[s as usize - 1].hash).collect();
+    let local: BTreeMap<u8, u8> = used
+        .iter()
+        .enumerate()
+        .map(|(n, &s)| (s, n as u8 + 1))
+        .collect();
+    let src = fb.src.iter().map(|s| *local.get(s).unwrap_or(s)).collect();
+    let top =
+        fb.p.iter()
+            .map(|p| {
+                let mx = *p.iter().max().expect("16 classes");
+                p.iter()
+                    .position(|&v| v == mx)
+                    .expect("the maximum is in the array") as u8
+            })
+            .collect();
+    let prof = rules
+        .iter()
+        .map(|r| {
+            let mut pp = ProfPlanes {
+                t: vec![0; BLOCK_POSTS],
+                risk: vec![0; BLOCK_POSTS],
+                why: vec![0; BLOCK_POSTS],
+            };
+            for q in 0..BLOCK_POSTS {
+                let c = cell(
+                    r, &fb.p[q], &fb.haz[q], &fb.lev[q], fb.mask[q], steep[q], lines[q],
+                );
+                (pp.t[q], pp.risk[q], pp.why[q]) = (c.t, c.risk, c.why);
+            }
+            pp
+        })
+        .collect();
+    let mut sb = SBlock {
+        table,
+        top,
+        cert: fb.cert.clone(),
+        src,
+        prof,
+        hash: [0; 32],
+    };
+    sb.rehash(id);
+    sb
+}
+
+/// Surface blocks from fused blocks ([`cost_block`] for each).
 pub fn build_blocks(
     ter: &Terrain,
     fused: &[(BlockId, FusedBlock)],
@@ -174,59 +235,7 @@ pub fn build_blocks(
             let k = ter
                 .block_index(*id)
                 .expect("fused blocks come from the terrain");
-            let (steep, lines) = (ter.steep(k), ter.lines(k));
-            let used: BTreeSet<u8> = fb
-                .src
-                .iter()
-                .copied()
-                .filter(|&s| s != SRC_BASE && s != SRC_TEAM)
-                .collect();
-            let table: Vec<[u8; 32]> = used
-                .iter()
-                .map(|&s| rec.applied[s as usize - 1].hash)
-                .collect();
-            let local: BTreeMap<u8, u8> = used
-                .iter()
-                .enumerate()
-                .map(|(n, &s)| (s, n as u8 + 1))
-                .collect();
-            let src = fb.src.iter().map(|s| *local.get(s).unwrap_or(s)).collect();
-            let top =
-                fb.p.iter()
-                    .map(|p| {
-                        let mx = *p.iter().max().expect("16 classes");
-                        p.iter()
-                            .position(|&v| v == mx)
-                            .expect("the maximum is in the array") as u8
-                    })
-                    .collect();
-            let prof = rules
-                .iter()
-                .map(|r| {
-                    let mut pp = ProfPlanes {
-                        t: vec![0; BLOCK_POSTS],
-                        risk: vec![0; BLOCK_POSTS],
-                        why: vec![0; BLOCK_POSTS],
-                    };
-                    for q in 0..BLOCK_POSTS {
-                        let c = cell(
-                            r, &fb.p[q], &fb.haz[q], &fb.lev[q], fb.mask[q], steep[q], lines[q],
-                        );
-                        (pp.t[q], pp.risk[q], pp.why[q]) = (c.t, c.risk, c.why);
-                    }
-                    pp
-                })
-                .collect();
-            let mut sb = SBlock {
-                table,
-                top,
-                cert: fb.cert.clone(),
-                src,
-                prof,
-                hash: [0; 32],
-            };
-            sb.rehash(*id);
-            (*id, sb)
+            (*id, cost_block(ter, k, fb, &rec.applied, rules))
         })
         .collect()
 }
@@ -786,18 +795,20 @@ impl Incident<'_> {
         for r in self.rules {
             r.check()?;
         }
-        let (fused, rec) = fuse::fuse(
+        // Each block is costed as soon as it is fused, so only the blocks in flight hold
+        // fusion state: peak memory grows with the surface, not with the fusion state.
+        let (built, rec) = fuse::fuse_with(
             self.terrain,
             self.prior,
             &self.layers,
             &self.overlay,
             &self.params(t),
             only,
+            |k, applied, fb| cost_block(self.terrain, k, &fb, applied, self.rules),
         );
         if rec.applied.len() > 253 {
             return Err(Error::invalid("a surface sources at most 253 layers"));
         }
-        let built = build_blocks(self.terrain, &fused, &rec, self.rules);
         let mut blocks = match (prev, only) {
             (Some(p), Some(_)) => p.blocks.clone(),
             _ => BTreeMap::new(),
@@ -853,4 +864,56 @@ impl Incident<'_> {
         };
         Ok(Surface { h, blocks })
     }
+}
+
+// ---- reading one post ----------------------------------------------------------------------------
+
+/// Everything the base and the surface say about one post, for a host's own ranking (landing
+/// zones, say): the terrain's values, the fused top class and its certainty, where that came
+/// from, and per profile the time per metre, the risk that the cell is closed and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Post {
+    /// Height in decimetres, or [`crate::terrain::DEM_NONE`].
+    pub dm: i32,
+    /// Steepness-max class 0-15, or [`crate::terrain::STEEP_NONE`].
+    pub steep: u8,
+    /// The base land-cover code and its confidence bit.
+    pub cover: u8,
+    pub conf: u8,
+    /// The base linear-feature bits ([`crate::lines`]).
+    pub lines: u16,
+    /// The fused top land-cover class and its certainty (1/255).
+    pub top: u8,
+    pub cert: u8,
+    /// The layer that decided the post (its hash), `None` for the base or the team overlay.
+    pub layer: Option<[u8; 32]>,
+    /// Whether a team overlay item decided the post.
+    pub team: bool,
+    /// Per profile, in the surface's order: (time per metre in the profile's unit, 0 =
+    /// impassable; risk the cell is closed, 1/255; why it is closed, `cost::WHY_*`).
+    pub profiles: Vec<(u16, u8, u8)>,
+}
+
+/// The [`Post`] at global post (i, j), if both the terrain and the surface hold its block.
+pub fn post(ter: &Terrain, s: &Surface, i: i64, j: i64) -> Option<Post> {
+    let (id, q) = BlockId::of_post(i, j);
+    let k = ter.block_index(id)?;
+    let (_, b) = s.blocks.get(&id.key())?;
+    let src = b.src[q];
+    Some(Post {
+        dm: ter.dm(k)[q],
+        steep: ter.steep(k)[q],
+        cover: ter.cover(k)[q],
+        conf: ter.conf(k)[q],
+        lines: ter.lines(k)[q],
+        top: b.top[q],
+        cert: b.cert[q],
+        layer: (src != SRC_BASE && src != SRC_TEAM).then(|| b.table[src as usize - 1]),
+        team: src == SRC_TEAM,
+        profiles: b
+            .prof
+            .iter()
+            .map(|p| (p.t[q], p.risk[q], p.why[q]))
+            .collect(),
+    })
 }

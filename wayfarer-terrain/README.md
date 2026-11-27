@@ -74,3 +74,18 @@ fn plan(terrain_file: &[u8], layer_files: &[Vec<u8>], t: i64) -> wayfarer_terrai
 deltas and walker routes on the real Tatra base. It compares them with the
 experiment's files byte for byte. Set `WAYFARER_E14_PREP` and `WAYFARER_E14_OUT`
 to run it; see the test's header.
+
+## Speed and memory
+
+`examples/bench.rs` builds a surface on a synthetic incident area of any size and reports
+build time, surface size, a walker route and peak heap. It needs no data:
+
+```sh
+cargo run --release -p wayfarer-terrain --example bench -- --km2 900
+RAYON_NUM_THREADS=1 cargo run --release -p wayfarer-terrain --example bench -- --km2 900
+```
+
+`tests/memory.rs` holds the budget in CI. It counts peak heap for the inputs, the surface
+build and one walker route: at most 96 MB for 451 km² and 128 MB for 900 km² (an IPP ± 15 km
+AOI). Blocks are costed as soon as they are fused, so fusion state never exists for the
+whole area at once.
