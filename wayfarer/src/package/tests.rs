@@ -9997,6 +9997,210 @@ fn priced_access_routes_and_matrices_match_the_reference() {
     assert!(compared >= 40, "{compared}");
 }
 
+/// A flat synthetic terrain and its surface over `large_grid_graph`, 1"
+/// posts on 3 × 3 blocks around 0° N, 0° E, grassland everywhere: with a
+/// fence on every post of the column the north-south road at 0.0054° E runs
+/// through when `fenced`.
+#[cfg(feature = "terrain")]
+fn grid_terrain_pricer(fenced: bool) -> crate::portals::TerrainPricer {
+    use wayfarer_terrain::incident::{Incident, Settings};
+    use wayfarer_terrain::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing};
+    use wayfarer_terrain::profile::Rules;
+    use wayfarer_terrain::terrain::Terrain;
+    let spacing = Spacing::new(120).unwrap();
+    let fence_column = (0.0054_f64 * 432_000.0 / 120.0).round() as i64;
+    let mut blocks = Vec::new();
+    for bi in -1..=1 {
+        for bj in -1..=1 {
+            blocks.push(BlockId { bi, bj });
+        }
+    }
+    let n = blocks.len() * BLOCK_POSTS;
+    let (mut dm, steep, cover, conf, mut lines) = (
+        vec![0; n],
+        vec![0; n],
+        vec![3; n],
+        vec![1; n],
+        vec![0u16; n],
+    );
+    for (k, block) in blocks.iter().enumerate() {
+        for q in 0..BLOCK_POSTS {
+            let (i, j) = (
+                block.i0() + (q / BLOCK) as i64,
+                block.j0() + (q % BLOCK) as i64,
+            );
+            // A gentle rise to the north-east: slopes cost by direction.
+            dm[k * BLOCK_POSTS + q] = (2_000 + 3 * i + 2 * j) as i32;
+            if fenced && j == fence_column {
+                lines[k * BLOCK_POSTS + q] = wayfarer_terrain::lines::FENCE;
+            }
+        }
+    }
+    let terrain = Terrain::new(spacing, blocks, dm, steep, cover, conf, lines).unwrap();
+    let mut incident = Incident::new(
+        wayfarer_terrain::surface::NO_INCIDENT,
+        &terrain,
+        None,
+        vec![Rules::walker_default(), Rules::vehicle()],
+        Settings::default(),
+    )
+    .unwrap();
+    incident.surface_at(1_795_510_800).unwrap();
+    crate::portals::TerrainPricer::from_incident(&incident).unwrap()
+}
+
+#[cfg(feature = "terrain")]
+fn with_terrain(
+    pricer: &std::sync::Arc<crate::portals::TerrainPricer>,
+) -> impl Fn(&mut LegRequest) + '_ {
+    move |request: &mut LegRequest| {
+        request.options.off_network = Some(crate::access::RouteOffNetworkOptions {
+            pricer: Some(crate::access::AccessPricerHandle(pricer.clone())),
+            ..Default::default()
+        });
+    }
+}
+
+/// Portals (`docs/design/portals.md`): endpoints on open ground are priced by
+/// the terrain. Engine and oracle agree on routes and matrices, totals are the
+/// road's plus the terrain stretches with their switch costs, the drawn
+/// stretch runs from the requested point over lattice posts to the join, a
+/// point on a road keeps X1's straight line, and no portal lies on a fenced
+/// post.
+#[cfg(feature = "terrain")]
+#[test]
+fn terrain_portals_match_the_reference() {
+    let dir = tempdir().unwrap();
+    let reader = persist(&large_grid_graph(), &dir.path().join("portals.mrt"));
+    let (oracle, compact) = engines(&reader);
+    let on_fenced_road = |point: GeoPoint| (point.lng - 0.0054).abs() < 1e-9;
+    let mut fenced_road_used = 0;
+    let mut compared = 0;
+    for fenced in [false, true] {
+        let pricer = std::sync::Arc::new(grid_terrain_pricer(fenced));
+        for profile in [MobilityProfile::OnFoot, MobilityProfile::Wheeled] {
+            let switch_s = if profile == MobilityProfile::OnFoot {
+                pricer.walker.switch_cost_s
+            } else {
+                pricer.vehicle.switch_cost_s
+            };
+            // block points, and one 44 m east of the fenced road
+            let mut points = block_points();
+            points.push(GeoPoint::new(0.0045, 0.0058));
+            for &origin in &points {
+                for &destination in &points {
+                    if origin == destination {
+                        continue;
+                    }
+                    let context =
+                        format!("fenced {fenced} {profile:?} {origin:?} -> {destination:?}");
+                    let actual = route(
+                        &compact,
+                        origin,
+                        destination,
+                        profile,
+                        with_terrain(&pricer),
+                    )
+                    .unwrap_or_else(|| panic!("{context}: no route"));
+                    let expected =
+                        route(&oracle, origin, destination, profile, with_terrain(&pricer))
+                            .unwrap_or_else(|| panic!("{context}: no oracle route"));
+                    for (left, right) in [
+                        (expected.cost, actual.cost),
+                        (expected.duration_s, actual.duration_s),
+                        (expected.distance_m, actual.distance_m),
+                    ] {
+                        assert!(
+                            (left - right).abs() <= 1e-4 * left.max(1.0),
+                            "{context}: {left} vs {right}"
+                        );
+                    }
+                    compared += 1;
+                    for end in [&actual.origin, &actual.destination] {
+                        let priced = end
+                            .access
+                            .as_ref()
+                            .and_then(|access| access.priced.as_ref())
+                            .unwrap_or_else(|| panic!("{context}: not priced"));
+                        assert!(priced.duration_s > switch_s, "{context}");
+                        assert_eq!(priced.cost, priced.duration_s, "{context}");
+                        assert!(priced.path.len() >= 2, "{context}");
+                        let straight = wayfarer_package::haversine_m(
+                            end.access.as_ref().unwrap().point,
+                            end.snapped_point,
+                        );
+                        assert!(priced.distance_m >= straight - 1e-6, "{context}");
+                        assert!(priced.distance_m <= straight * 1.2 + 40.0, "{context}");
+                        // Grass on a gentle slope: about 0.8 m/s on foot, 3.3 m/s by car.
+                        let pace = priced.distance_m / (priced.duration_s - switch_s);
+                        let flat = if profile == MobilityProfile::OnFoot {
+                            0.83
+                        } else {
+                            3.33
+                        };
+                        assert!(
+                            pace > 0.7 * flat && pace < 1.3 * flat,
+                            "{context}: {pace} m/s"
+                        );
+                        if on_fenced_road(end.snapped_point) {
+                            assert!(!fenced, "{context}: a portal on a fenced post");
+                            fenced_road_used += 1;
+                        }
+                    }
+                    let summary = actual.off_network.clone().expect("access summary");
+                    let (start, end) = (summary.origin.unwrap(), summary.destination.unwrap());
+                    let road_m = actual.legs[0]
+                        .edges
+                        .iter()
+                        .map(|edge| edge.distance_m)
+                        .sum::<f64>();
+                    assert!(
+                        (actual.distance_m - road_m - start.distance_m - end.distance_m).abs()
+                            <= 1e-6 * actual.distance_m,
+                        "{context}"
+                    );
+                    assert_eq!(actual.geometry.first(), Some(&origin), "{context}");
+                    assert_eq!(actual.geometry.last(), Some(&destination), "{context}");
+                }
+            }
+            let mut matrix =
+                crate::RouteMatrixRequest::new(block_points(), block_points(), profile);
+            matrix.options.off_network = Some(crate::access::RouteOffNetworkOptions {
+                pricer: Some(crate::access::AccessPricerHandle(pricer.clone())),
+                ..Default::default()
+            });
+            assert_matrix_parity(&oracle.matrix(matrix.clone()), &compact.matrix(matrix));
+        }
+        // A point on a road snaps as X1 does: no terrain price.
+        let on_road = GeoPoint::new(0.0018, 0.0009);
+        let routed = route(
+            &compact,
+            on_road,
+            block_points()[3],
+            MobilityProfile::OnFoot,
+            with_terrain(&pricer),
+        )
+        .unwrap();
+        assert!(
+            routed
+                .origin
+                .access
+                .as_ref()
+                .is_some_and(|access| access.priced.is_none())
+        );
+        assert!(
+            routed
+                .destination
+                .access
+                .as_ref()
+                .is_some_and(|access| access.priced.is_some())
+        );
+    }
+    assert!(compared >= 120, "{compared}");
+    // Without the fence some routes leave or join the road at 0.0054° E.
+    assert!(fenced_road_used > 0);
+}
+
 /// Every candidate within the radius pays its whole stretch, so the join may
 /// move off the nearest road to a nearer point of a better one, and a
 /// route's cost is never below its stretches'.

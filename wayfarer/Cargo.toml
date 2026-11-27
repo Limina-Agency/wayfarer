@@ -37,6 +37,8 @@ rustc-hash = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Portal generation (`wayfarer::portals`): access priced by an incident surface.
+wayfarer-terrain = { workspace = true, optional = true }
 
 [features]
 # JSON Schema derives for the request and result types (`schemars`).
@@ -53,6 +55,9 @@ reference = [
 # Debug switches read from the environment (WAYFARER_DEBUG, _VERIFY,
 # _UNIDIRECTIONAL) for the parity harnesses and profiling.
 debug-env = []
+# Portals (`wayfarer::portals`): off-network access priced by a least-cost
+# search over an incident surface (`docs/design/portals.md`).
+terrain = ["dep:wayfarer-terrain"]
 # Prototype, not a supported API: a bounds-guided (potential-guided) search
 # across a virtual seam cut inside one package (`wayfarer::regions`, lane
 # `REG`, EXP-5b step 1). Changes no default code path.
@@ -68,7 +73,7 @@ wayfarer-compiler = { path = "../wayfarer-compiler" }
 wayfarer-road-graph = { workspace = true, features = ["snapshot"] }
 # Path only (no version), so publishing drops it: a versioned self-dependency
 # would need this crate on crates.io before its first release.
-wayfarer = { path = ".", features = ["reference", "debug-env"] }
+wayfarer = { path = ".", features = ["reference", "debug-env", "terrain"] }
 petgraph = { workspace = true }
 tempfile = "3"
 

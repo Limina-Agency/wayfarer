@@ -117,7 +117,9 @@ pub struct AccessQuery<'a> {
     pub role: AccessRole,
     /// The resolved options: radius, candidate count, pace and factor.
     pub policy: AccessPolicy,
-    /// The candidates within the radius, priced by the straight-line formula.
+    /// The candidates within the radius, priced by the straight-line formula:
+    /// up to [`ACCESS_MAX_CANDIDATES`] of them, more than the policy's
+    /// candidate count, so that the pricer chooses among them.
     pub candidates: Vec<CorrelatedLocation>,
     /// The package, for edge shapes and attributes.
     pub view: &'a crate::graph_view::PackageGraphView,
@@ -128,7 +130,8 @@ pub struct AccessQuery<'a> {
 /// keeps, each with a [`CandidateAccess`] whose [`CandidateAccess::priced`]
 /// it may set: the searches, the oracle and the results then read that price.
 /// It must return the same candidates for the same query, so engine and
-/// oracle agree, and at most [`ACCESS_MAX_CANDIDATES`] of them.
+/// oracle agree, best first: the endpoint keeps the first
+/// [`AccessPolicy::candidate_limit`] of them.
 pub trait AccessPricer: Send + Sync {
     fn price(&self, query: AccessQuery<'_>) -> Vec<CorrelatedLocation>;
 }
