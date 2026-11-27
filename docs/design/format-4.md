@@ -28,6 +28,13 @@ per-post line mask is derived when a surface is built and not stored
 (section 5.1), and terrain in a separate file or in the package is an open
 decision (section 6).
 
+No prebuilt terrain file ships (Anton, 2026-11-27). Apps compile their own
+from DEM and land-cover sources they choose and download, with the
+compiler's terrain path (ROADMAP FEAT-X14: a CLI command, a library call
+and a C entry point). The `wayfarer-terrain` crate that reads them goes to
+crates.io in 0.6, before these layouts freeze, so a 0.6 terrain file names
+its draft layout version and a reader refuses another.
+
 ## 1. What it builds on from format 3
 
 - **The container.** The tagged section table, the REQUIRED and IDENTITY
@@ -254,15 +261,15 @@ terrain hash; v1 should name these inputs instead. The bit layout is that contra
   format-3 packages after the freeze, and every format-3 engine would still
   open them (routing on the road graph only). A version 4 instead makes
   engines that read only format 3 refuse those packages, unless terrain
-  ships as a separate terrain file.
+  is a separate terrain file.
 - **Terrain in a separate terrain file or in package sections** (section 3),
   for Anton to decide. The ids and layouts here are the same either way.
   - *A separate terrain file* (the engine plan's recommendation): built from
     DEM and land-cover sources alone, reused across OSM refreshes, and a
     package used with it keeps its identity, so a terrain update leaves the
-    package as it is. It can be shipped, cached and shared
+    package as it is. An app can compile, cache and share it
     per region on its own, and it is what the engine reads from sidecar
-    files until format 4. The cost: a second file to download and match
+    files until format 4. The cost: a second file to compile and match
     (by its hash, which S3 provenance and the incident surface's recipe
     record), and a `PackageParams` key that says which kind a container is.
   - *Sections in the package*: one file and one identity, but a land-cover

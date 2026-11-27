@@ -223,7 +223,9 @@ CLI commands and C entry points) is developed on its own branch,
 into `main` until the next major release is being prepared. Off-road
 terrain (DEM, land cover, linear features, cost surfaces) is explored by a
 terrain lane on open data (`exp/terrain-*` branches, sidecar terrain
-files) and lands in package format 4 (7.2). What `main` gains in the
+files). The `wayfarer-terrain` crate and a terrain compile path ship in
+0.6 (decided 2026-11-27); format 4 (7.2) then fixes the layouts. No
+prebuilt terrain file ships: apps compile their own. What `main` gains in the
 meantime is what both build on: costed access legs (FEAT-X1), the walking
 pace model (#99) and the analysis tools (FEAT-A).
 
@@ -548,8 +550,12 @@ window with a migration note. X2 proper, X3a and the DEM grid need sections
 and land in format 4 (`docs/design/format-4.md`); format 3 freezes without
 them. Until then the terrain lane reads terrain from sidecar files on the
 global lattice, so X3 and the terrain crate (FEAT-X7 to X10) can be built
-without a format change, and it measures sources, encodings and cost
-surfaces on open data before format 4's layouts are fixed. Nothing here needs the regions work,
+without a format change. The crate and the compile path (FEAT-X14) ship
+in 0.6 (decided 2026-11-27). Wayfarer ships no prebuilt terrain file: an
+app compiles its own from DEM and land-cover sources it chooses, with the
+compiler's terrain command, library call or C entry point (FEAT-X14).
+The terrain lane measures sources, encodings and cost surfaces on open
+data before format 4's layouts are fixed. Nothing here needs the regions work,
 and the regions work doesn't need it, but two hooks must be in the 1.0
 formats: connectors and endpoint candidates are region-qualified on the
 wire, and the DEM and raster grids use one global lattice (fixed arc-second
@@ -876,19 +882,20 @@ Sub-lanes run independently of each other.
 | FEAT-X3 | Terrain-aware access pace: Tobler on the coarse DEM grid, land cover (M) | P1 | FEAT-T4, FEAT-X3a |
 | FEAT-X5b | Open-ground shortcuts mid-route (XL, research, 1.x: needs a bound model beyond CCH gates) | P2 | FEAT-X11 |
 | FEAT-X6 | R7 `off_network` rebuilt on X1: `costed` opt-in with X1, default flipped in the API window with a migration note (S–M) | P1 | FEAT-X1, API window |
-| FEAT-X7 | Terrain store and reader (M): a new `wayfarer-terrain` crate behind `experimental-terrain` that memory-maps a terrain file on the global lattice (heights in decimetres at 1″, steepness-max, land cover with its confidence bit, linear features) and pages only the blocks it touches; reads the terrain lane's sidecar files until format 4 (E1, E3, E5) | P1 | REG-11 |
+| FEAT-X7 | Terrain store and reader (M): a new `wayfarer-terrain` crate, published to crates.io from 0.6, behind `experimental-terrain` in the engine, that memory-maps a terrain file on the global lattice (heights in decimetres at 1″, steepness-max, land cover with its confidence bit, linear features) and pages only the blocks it touches; reads terrain files that apps compile with FEAT-X14 (E1, E3, E5) | P1 | REG-11 |
 | FEAT-X8 | Layer store (M): reads and validates layer files by hash (footprint, validity window, confidence, purpose), and a writer so host producers emit valid files (`docs/design/terrain-layers.md`, E10) | P1 | FEAT-X7 |
 | FEAT-X9 | Fusion and incident surface (L): replaces X4's per-request raster. Layer fusion and the cost rules, a parallel build, incremental re-fusion of the touched blocks, surface files and deltas, content and recipe hashes, epochs and `same_until` (`docs/design/incident-surface.md`, E10, E14) | P1 | FEAT-X8 |
 | FEAT-X10 | Surface search (M): 16-connected integer Dijkstra and A* on the surface, canonical paths, route confidence; landmarks (ALT) for long 4×4 searches (E5, E14) | P1 | FEAT-X9 |
 | FEAT-X11 | Portals (L): joins open ground to the road graph, a portal per road-crossed cell, exit legality per profile, a switch cost, seeds into the CCH search as X1 does, truncation reported; the first piece a user sees | P1 | FEAT-X1, FEAT-X10 |
 | FEAT-X12 | Off-network isochrones and SAR readers (L): a joint road-and-surface Dijkstra (was X5a); team reach, track coverage and probability v2 in `wayfarer-sar` read the surface | P2 (P1 for SAR) | FEAT-X11, FEAT-A1 |
 | FEAT-X13 | Incident API and FFI (M): open terrain, add layers and overlays, build or update a surface at an epoch, route and isochrone with confidence, read, verify and apply surface files; the same calls in C ABI 2 with opaque handles and byte buffers | P1 | FEAT-X9, FEAT-X11 |
-| FEAT-X14 | Compiler stage 1 (L, TERR lane): DEM reader (GEM-15, GLO-30), WorldCover with OSM on top and multipolygon assembly, linear features, steepness-max, written as the terrain file or format 4's sections; byte-identical builds. It produces FEAT-T4's grid and X3a's land cover | P1 | format 4 layouts, REG-11 |
+| FEAT-X14 | Terrain compile path (L, TERR lane): DEM reader (GEM-15, GLO-30, SRTM, NASADEM, any geographic GeoTIFF), WorldCover with OSM on top and multipolygon assembly, linear features, steepness-max, written as a terrain file (later format 4's sections); byte-identical builds. Apps compile their own terrain with it, since no prebuilt file ships: a `wayfarer` CLI command, a `wayfarer-compiler` call and a C entry point, taking an area and source files the app downloads. It produces FEAT-T4's grid and X3a's land cover | P1 | REG-11 |
 
 X4 (least-cost access paths over a per-request raster) and X5a are folded
-into FEAT-X9 to X12. Order: X7 to X10 on sidecar terrain files, then X11 as
-the first user-facing feature, X13 so a host can call it, X12, and X14 once
-format 4's layouts are fixed.
+into FEAT-X9 to X12. Order: X7 to X10 and X14 in 0.6 (the crate on
+crates.io and the compile path, layouts still marked experimental), then
+X11 as the first user-facing feature, X13 so a host can call it, and X12.
+Format 4 freezes the layouts X14 writes.
 
 **`FEAT-P` Profiles**
 
@@ -1052,9 +1059,11 @@ The ones that decide ordering:
 - **FEAT-T4, FEAT-X3a → FEAT-X3.** Terrain-aware access legs need the DEM
   grid and land cover (format 4, or the sidecar files before it).
 - **FEAT-X7 to X10 → FEAT-X11 → FEAT-X12.** The terrain crate, layers,
-  fusion and surface search run on sidecar terrain files and don't wait for
-  format 4; portals need them and X1; off-network isochrones need portals.
-  Only compiler stage 1 (FEAT-X14) waits for format 4's layouts.
+  fusion and surface search read terrain files compiled by FEAT-X14 and
+  don't wait for format 4; portals need them and X1; off-network
+  isochrones need portals. Format 4 freezes the layouts; until then a
+  terrain file says its draft layout version and an engine refuses
+  another.
 - **QW-3, QW-2 → FEAT-X1.** Access costs as potential offsets, and snapping
   that doesn't grow with the radius squared.
 
@@ -1068,12 +1077,12 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
 | 0.5 | Tranche 1, under way: first route roughly halved without a format change (parallel CCH topology #98, parallel checks at open #102, then an opt-in background warm-up); FEAT-X1 costed access legs with the X6 `costed` flag after QW-2 and QW-3 (#83, #93); FEAT-A10 (#91) and A1 polygons; the route request options; FEAT-D2 (clip); FEAT-P0a and P0d (#97); format 3 built behind the switch (FMT 1 to FMT 5 on `main`); also on `main`: FEAT-A2 core, FEAT-G0 and G4a, parallel customization, matrix and compile speed-ups, the walking pace model (#99) |
-| 0.6 | Tranche 2: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D3 (several extracts); lean leg records; stored potentials and the last format-3 layouts behind the switch; API-0b (builders, `apiVersion` and `warnings`, one release tag) |
+| 0.6 | Tranche 2: FEAT-X1b, X2a, A3, A8, A5; terrain: the `wayfarer-terrain` crate on crates.io (FEAT-X7 to X10, experimental) and the terrain compile path for apps (FEAT-X14), no prebuilt terrain file; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D3 (several extracts); lean leg records; stored potentials and the last format-3 layouts behind the switch; API-0b (builders, `apiVersion` and `warnings`, one release tag) |
 | 0.7 | Tranche 3: format 3 as the default, with stored CCH topology and metrics (the first route costs about one search); format 2 still read through 0.8 |
 | 0.8 – 0.9 | Format-3 optional sections as each is ready (FEAT-P1, P2 extras, G4b, W4); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), with the default isochrone order (cost or fastest time), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
-| Format 4 | Terrain, once the terrain lane's measurements are in and before 0.80: FEAT-T1/T2/T4/T5, X2, X3a then X3, and compiler stage 1 (FEAT-X14) writing the terrain file; the incident surface (FEAT-X7 to X13) runs on sidecar terrain files before it |
+| Format 4 | Terrain, once the terrain lane's measurements are in and before 0.80: FEAT-T1/T2/T4/T5, X2, X3a then X3, and the frozen layouts that FEAT-X14 writes; the terrain crate and compile path (FEAT-X7 to X10, X14) ship before it in 0.6 |
 | Next major release | The search-and-rescue planning crate (`wayfarer-sar`: reach, team plans, coverage) merges from its branch when that release is prepared |
 | … | further items as they are ready |
 
@@ -1168,9 +1177,12 @@ entries are collected in the release PR.
 18. ~~Format 3 shape.~~ Answered (format-3 decision D5): optional sections
     with a per-section REQUIRED flag, u16 profile access with a slot table.
 19. **Elevation data.** Partly answered (2026-11-24): terrain storage waits
-    for format 4, with sidecar files until then. The default DEM (GEM-15,
-    CC BY 4.0; Copernicus GLO-30; SRTM/NASADEM) is chosen from the terrain
-    lane's measurements.
+    for format 4, with sidecar files until then. Answered further
+    (2026-11-27): no prebuilt terrain file ships; apps compile their own
+    with FEAT-X14, so which DEM an app uses, and whether it may
+    redistribute the result, is the app's choice. The compile path's
+    default DEM (GEM-15, CC BY 4.0; Copernicus GLO-30; SRTM/NASADEM) is
+    chosen from the terrain lane's measurements.
 20. **Isochrone semantics.** Keep cost-ordered time contours or move to
     fastest-time (FEAT-A10)? Proposal: an option now, the default in API-7.
 21. **Guidance rendering.** Hybrid (keys are the contract, bundled
