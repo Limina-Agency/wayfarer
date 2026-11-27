@@ -17,7 +17,9 @@ off-road plan:
 
 The formats follow the drafts `docs/design/terrain-layers.md` (layer contract v0)
 and `docs/design/incident-surface.md` (incident surface v1 draft: a fuse version in
-the recipe, an overlay that is a set applied by observed time, an AOI cut). The
+the recipe, an overlay that is a set applied by observed time, an AOI cut). Overlay
+items are boxes, polygons (filled even-odd, holes allowed) or lines (the supercover
+feature lines use), each with one exact integer rule for the posts it marks. The
 terrain file is the sidecar format in `terrain.rs` (v1: a sources and attribution
 text, the hash folded per block), used until format 4 fixes the layouts.
 Everything is integer arithmetic or `libm`, so the same inputs give the same

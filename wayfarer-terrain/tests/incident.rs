@@ -4,7 +4,7 @@
 //!
 //! After an intended change, run with `UPDATE_GOLDEN=1` to print the new table.
 
-use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Prior};
+use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Prior, Shape};
 use wayfarer_terrain::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing};
 use wayfarer_terrain::layer::{
     FEAT_DEBRIS, FEAT_FALLEN, FEAT_PASSAGE, FEAT_WASHOUT, Feature, GridBlock, Kind,
@@ -180,10 +180,12 @@ fn e7(r: i64, c: i64) -> (i32, i32) {
 fn tick_box(r0: i64, r1: i64, c0: i64, c1: i64, effect: Effect) -> OverlayItem {
     let (i0, j0) = (BI0 as i64 * BLOCK as i64, BJ0 as i64 * BLOCK as i64);
     OverlayItem {
-        lat0: (i0 + r0) * SP,
-        lat1: (i0 + r1) * SP,
-        lon0: (j0 + c0) * SP,
-        lon1: (j0 + c1) * SP,
+        shape: Shape::Box {
+            lat0: (i0 + r0) * SP,
+            lat1: (i0 + r1) * SP,
+            lon0: (j0 + c0) * SP,
+            lon1: (j0 + c1) * SP,
+        },
         observed_at: T0,
         effect,
     }
@@ -439,7 +441,7 @@ const GOLDEN: &[(&str, &str)] = &[
     ),
     (
         "recipe_team",
-        "b11b948d725c89cf5dc4b807e07acc78bc7eeb7b5fbc383ecc0eac1f2b67a08f",
+        "0874655cdc17ee187be8785629473131e632cd49bf4a95488054d94f01c4d582",
     ),
     (
         "content_fading",
@@ -447,7 +449,7 @@ const GOLDEN: &[(&str, &str)] = &[
     ),
     (
         "recipe_fading",
-        "bf7dee2f06873ee3f9a3aa88d9a0e79672b70c66a6f8fdb4fdc31f45e87d5153",
+        "7c81c81eea0097d8185b764dc5aec1b98877a69a4e28672f37ed2dd653afe01f",
     ),
     (
         "content_expired",
@@ -455,7 +457,7 @@ const GOLDEN: &[(&str, &str)] = &[
     ),
     (
         "recipe_expired",
-        "ef327d2e51d2dc827474bde671efda177278220700183f4a166bbbf50922506f",
+        "0e2bb038c1b8ae4dde22d56ef6ade3d85c1e2e59786be6526e14584c8486af88",
     ),
     (
         "route_base_0",
@@ -742,17 +744,22 @@ fn overlay_is_a_set() {
     // A later block over part of the clear box: the later observation wins.
     let mut late = tick_box(56, 60, 196, 200, Effect::Block);
     late.observed_at = T0 + 60;
-    let items = vec![fx.overlay[0], fx.overlay[1], late];
+    let items = vec![fx.overlay[0].clone(), fx.overlay[1].clone(), late.clone()];
     let a = inc(items.clone()).surface(t).unwrap();
-    let mut shuffled = vec![late, fx.overlay[1], fx.overlay[0], late];
+    let mut shuffled = vec![
+        late.clone(),
+        fx.overlay[1].clone(),
+        fx.overlay[0].clone(),
+        late.clone(),
+    ];
     let b = inc(shuffled.clone()).surface(t).unwrap();
     assert_eq!(a, b, "order and duplicates do not matter");
     assert_eq!(a.recipe_hash(), b.recipe_hash());
 
     // The later block closes posts the earlier clear box opened; observed earlier, it would not.
-    let mut early = late;
+    let mut early = late.clone();
     early.observed_at = T0 - 60;
-    let c = inc(vec![fx.overlay[0], fx.overlay[1], early])
+    let c = inc(vec![fx.overlay[0].clone(), fx.overlay[1].clone(), early])
         .surface(t)
         .unwrap();
     assert_ne!(
@@ -773,10 +780,19 @@ fn overlay_is_a_set() {
 
     // A box in degrees, corners in any order, lands on the same ticks every time.
     let deg = |ticks: i64| ticks as f64 / 432_000.0;
-    let it = fx.overlay[0];
+    let it = fx.overlay[0].clone();
+    let Shape::Box {
+        lat0,
+        lat1,
+        lon0,
+        lon1,
+    } = it.shape
+    else {
+        panic!("a box")
+    };
     let from = OverlayItem::from_degrees(
-        (deg(it.lat1), deg(it.lat0)),
-        (deg(it.lon0), deg(it.lon1)),
+        (deg(lat1), deg(lat0)),
+        (deg(lon0), deg(lon1)),
         it.observed_at,
         it.effect,
     )
@@ -914,4 +930,74 @@ fn incident_id_is_recipe_only() {
         "the id never changes a route"
     );
     assert_eq!(a.block_section(), m.block_section());
+}
+
+/// Polygon and line items: an update that adds or drops one rebuilds only the blocks it marks
+/// and equals a full build, and the posts it marks are the team's.
+#[test]
+fn overlay_polygons_and_lines() {
+    let fx = fixture();
+    let rules = [Rules::walker_default()];
+    let prior = Prior::default();
+    let inc = |overlay: Vec<OverlayItem>| Incident {
+        id: *b"wayfarer-test\0\0\0",
+        terrain: &fx.ter,
+        prior: &prior,
+        layers: fx.layers.iter().collect(),
+        overlay,
+        rules: &rules,
+        epoch_s: E,
+        allow_research: false,
+        feature_min_conf: 128,
+        level_min_w: 128,
+    };
+    let t = T0 + 5 * E;
+    let (i0, j0) = (BI0 as i64 * BLOCK as i64, BJ0 as i64 * BLOCK as i64);
+    let at = |r: i64, c: i64| ((i0 + r) * SP, (j0 + c) * SP);
+    // A triangle across blocks (0, 0) and (0, 1), and a trail across (1, 2) and (2, 2).
+    let tri = OverlayItem {
+        shape: Shape::Polygon(vec![vec![at(10, 40), at(40, 40), at(10, 100)]]),
+        observed_at: T0 + 30,
+        effect: Effect::Block,
+    };
+    let trail = OverlayItem {
+        shape: Shape::Line(vec![at(70, 140), at(150, 170)]),
+        observed_at: T0 + 30,
+        effect: Effect::SetHazard(wayfarer_terrain::layer::HAZARDS[0].0, 255),
+    };
+    let base = inc(fx.overlay.clone()).surface(t).unwrap();
+    let mut with = fx.overlay.clone();
+    with.extend([tri.clone(), trail.clone()]);
+    let full = inc(with.clone()).surface(t).unwrap();
+    let upd = inc(with.clone())
+        .update(t, &base, &inc(fx.overlay.clone()))
+        .unwrap();
+    assert_eq!(upd, full, "an update that adds shapes equals a full build");
+    let back = inc(fx.overlay.clone())
+        .update(t, &full, &inc(with.clone()))
+        .unwrap();
+    assert_eq!(back, base, "dropping them again equals the base");
+    let changed: Vec<BlockId> = full
+        .blocks
+        .values()
+        .filter(|(id, b)| base.blocks[&id.key()].1.hash() != b.hash())
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(!changed.is_empty());
+    let mut marked: Vec<BlockId> = tri.blocks(SP).into_iter().chain(trail.blocks(SP)).collect();
+    marked.sort();
+    marked.dedup();
+    assert!(changed.iter().all(|b| marked.contains(b)));
+
+    let post = |r: i64, c: i64| wayfarer_terrain::surface::post(&fx.ter, &full, i0 + r, j0 + c);
+    // Inside the triangle, near its corner and across the block edge; outside its long side.
+    for (r, c) in [(11, 41), (20, 60), (12, 90)] {
+        let p = post(r, c).unwrap();
+        assert!(p.team, "({r}, {c}) is in the triangle");
+        assert_eq!(p.profiles[0].0, 0, "a team block closes the post");
+    }
+    assert!(!post(35, 90).unwrap().team, "east of the long side");
+    // On the trail at both ends.
+    assert!(post(70, 140).unwrap().team && post(150, 170).unwrap().team);
+    assert!(!post(70, 170).unwrap().team);
 }

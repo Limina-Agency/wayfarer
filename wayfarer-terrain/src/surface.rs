@@ -18,7 +18,7 @@
 use crate::codec::{self, Reader, put_varint};
 use crate::cost::cell;
 use crate::fuse::{self, FusedBlock, HashedLayer, LeftOut, OverlayItem, Params, Prior, Record};
-use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId, ceil_div};
+use crate::lattice::{BLOCK_POSTS, BlockId, ceil_div};
 use crate::layer::{Kind, LICENCE_RESEARCH, Layer, Manifest};
 use crate::profile::Rules;
 use crate::terrain::Terrain;
@@ -651,21 +651,7 @@ pub fn touched_blocks(l: &Layer, spacing: i64) -> BTreeSet<BlockId> {
 
 /// Blocks an overlay item covers.
 pub fn overlay_blocks(it: &OverlayItem, spacing: i64) -> BTreeSet<BlockId> {
-    let mut s = BTreeSet::new();
-    let (i0, i1) = (ceil_div(it.lat0, spacing), ceil_div(it.lat1, spacing) - 1);
-    let (j0, j1) = (ceil_div(it.lon0, spacing), ceil_div(it.lon1, spacing) - 1);
-    if i0 > i1 || j0 > j1 {
-        return s;
-    }
-    for bi in i0.div_euclid(BLOCK as i64)..=i1.div_euclid(BLOCK as i64) {
-        for bj in j0.div_euclid(BLOCK as i64)..=j1.div_euclid(BLOCK as i64) {
-            s.insert(BlockId {
-                bi: bi as i32,
-                bj: bj as i32,
-            });
-        }
-    }
-    s
+    it.blocks(spacing)
 }
 
 pub fn kind_u8(k: Kind) -> u8 {
@@ -794,6 +780,9 @@ impl Incident<'_> {
         }
         for r in self.rules {
             r.check()?;
+        }
+        for it in &self.overlay {
+            it.check()?;
         }
         // Each block is costed as soon as it is fused, so only the blocks in flight hold
         // fusion state: peak memory grows with the surface, not with the fusion state.
