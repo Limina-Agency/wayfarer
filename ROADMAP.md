@@ -454,7 +454,8 @@ PERF-13, PERF-14 and PERF-16 landed in 0.3 and 0.4 (2.2); what is left is in
 - **Map matching output (P2).** Per-sample attributes (road, speed, name),
   like Valhalla's `trace_attributes`.
 - **Off-network legs blended with the network (P1, staged).** See 6.2.1.
-  The full terrain cost surface is its P2 end.
+  The incident surface, a fused terrain cost surface per incident, is its
+  SAR end.
 - **Traffic input (P2).** Speed overlays already exist; a bulk speed-file
   input would cover live or historical traffic without a recompile.
 
@@ -506,26 +507,49 @@ it. The plan grows it in stages, each usable on its own:
    cover is its own item (X3a, L): the compiler assembles no polygons today,
    and forests and lakes are mostly multipolygon relations, rasterized at
    25–50 m into 4-bit classes.
-4. **X4, least-cost access paths (P2).** A raster search: a fixed-point
-   friction raster (DEM and land cover) within 3 km of the point, a Dijkstra
-   from the point, and the cheapest cell on each reachable edge fed to the
-   search as a candidate seed (like X1) with the traced path as geometry.
-   Integer costs and ties broken by a global cell index keep it
-   deterministic. EXP-2 prototyped nothing yet.
-5. **X5, off the network beyond the endpoints.** X5a (P2): isochrones that
+4. **The incident surface (P1 for SAR; replaces X4 and X5a).** Instead of
+   a friction raster built per request around each point, every off-road
+   query of an incident reads one cached cost surface. It is built in three
+   stages:
+   - *Base* (compile time): heights, steepness-max, land cover with its
+     confidence bit, and linear features on the global lattice, in a
+     terrain file or format 4's sections (`docs/design/format-4.md`);
+     sidecar files made by the terrain lane's prep until then.
+   - *Layers*: newer data that models, drones and hosts make after compile
+     time (land-cover refreshes, flood probability and depth, rubble,
+     fallen trees, hazard rasters, voxel-graph projections), as hashed layer
+     files on the same lattice (`docs/design/terrain-layers.md`). The
+     engine reads and validates them; producing them stays in the host.
+   - *Fusion*: the base, the layers active at the incident epoch and the
+     team overlay set, fused and costed per profile into the incident
+     surface: per post a time per metre, a risk and a closure reason, with
+     a content hash, a recipe hash over every input, 15-minute epochs and
+     deltas of changed blocks (`docs/design/incident-surface.md`).
+
+   Queries run a 16-connected integer Dijkstra or A* on the surface, report
+   route confidence, and join the road graph through portals: each cell a
+   road crosses is a candidate seed into the CCH search, like X1, with exit
+   legality and a switch cost per profile and truncation reported. The
+   terrain lane's E14 built it on a 20 × 20 km Tatra area (720,896 posts,
+   walker and 4×4): 86-218 ms for a full build on one core, 8-216 ms to
+   re-fuse after a layer, 0.64 MB as a file without layers and 1.75 MB
+   after a dense land-cover refresh, byte-identical on x86_64, i686 and
+   aarch64. The pieces are FEAT-X7 to X14 below.
+5. **X5, off the network beyond the endpoints.** X5a, isochrones that
    spread off the network from every reached node (team coverage on foot),
-   a joint network-and-raster Dijkstra. X5b (1.x, research): routes that
-   leave the network mid-route and rejoin it; the CCH bounds can't cover a
-   raster, so this needs a new bound model.
+   becomes a joint road-and-surface Dijkstra on the incident surface
+   (FEAT-X12). X5b (1.x, research): routes that leave the network mid-route
+   and rejoin it; the CCH bounds can't cover the surface, so this needs a
+   new bound model.
 
 X1 is additive and can land any time. R7 then becomes X1 with SAR reporting
 (FEAT-X6): a `costed` opt-in with X1, then the default flips inside the API
 window with a migration note. X2 proper, X3a and the DEM grid need sections
 and land in format 4 (`docs/design/format-4.md`); format 3 freezes without
 them. Until then the terrain lane reads terrain from sidecar files on the
-global lattice, so X3 and X4 can be tried without a format change, and it
-measures sources, encodings and cost surfaces on open data before format
-4's layouts are fixed. Nothing here needs the regions work,
+global lattice, so X3 and the terrain crate (FEAT-X7 to X10) can be built
+without a format change, and it measures sources, encodings and cost
+surfaces on open data before format 4's layouts are fixed. Nothing here needs the regions work,
 and the regions work doesn't need it, but two hooks must be in the 1.0
 formats: connectors and endpoint candidates are region-qualified on the
 wire, and the DEM and raster grids use one global lattice (fixed arc-second
@@ -850,10 +874,21 @@ Sub-lanes run independently of each other.
 | FEAT-X2 | Access legs don't cross water, rail or fences, from a linear-features section in format 4 (M–L) | P1 | format 4 |
 | FEAT-X3a | Land cover: WorldCover with OSM on top (the terrain lane's E3), rasterized onto the global lattice, in format 4 (L) | P1 | format 4, REG-11 |
 | FEAT-X3 | Terrain-aware access pace: Tobler on the coarse DEM grid, land cover (M) | P1 | FEAT-T4, FEAT-X3a |
-| FEAT-X4 | Least-cost access paths over a local friction raster, fed as candidate seeds (L) | P2 | FEAT-X3 |
-| FEAT-X5a | Isochrones spreading off the network (L) | P2 | FEAT-X4 |
-| FEAT-X5b | Open-ground shortcuts mid-route (XL, research, 1.x: needs a bound model beyond CCH gates) | P2 | FEAT-X4 |
+| FEAT-X5b | Open-ground shortcuts mid-route (XL, research, 1.x: needs a bound model beyond CCH gates) | P2 | FEAT-X11 |
 | FEAT-X6 | R7 `off_network` rebuilt on X1: `costed` opt-in with X1, default flipped in the API window with a migration note (S–M) | P1 | FEAT-X1, API window |
+| FEAT-X7 | Terrain store and reader (M): a new `wayfarer-terrain` crate behind `experimental-terrain` that memory-maps a terrain file on the global lattice (heights in decimetres at 1″, steepness-max, land cover with its confidence bit, linear features) and pages only the blocks it touches; reads the terrain lane's sidecar files until format 4 (E1, E3, E5) | P1 | REG-11 |
+| FEAT-X8 | Layer store (M): reads and validates layer files by hash (footprint, validity window, confidence, purpose), and a writer so host producers emit valid files (`docs/design/terrain-layers.md`, E10) | P1 | FEAT-X7 |
+| FEAT-X9 | Fusion and incident surface (L): replaces X4's per-request raster. Layer fusion and the cost rules, a parallel build, incremental re-fusion of the touched blocks, surface files and deltas, content and recipe hashes, epochs and `same_until` (`docs/design/incident-surface.md`, E10, E14) | P1 | FEAT-X8 |
+| FEAT-X10 | Surface search (M): 16-connected integer Dijkstra and A* on the surface, canonical paths, route confidence; landmarks (ALT) for long 4×4 searches (E5, E14) | P1 | FEAT-X9 |
+| FEAT-X11 | Portals (L): joins open ground to the road graph, a portal per road-crossed cell, exit legality per profile, a switch cost, seeds into the CCH search as X1 does, truncation reported; the first piece a user sees | P1 | FEAT-X1, FEAT-X10 |
+| FEAT-X12 | Off-network isochrones and SAR readers (L): a joint road-and-surface Dijkstra (was X5a); team reach, track coverage and probability v2 in `wayfarer-sar` read the surface | P2 (P1 for SAR) | FEAT-X11, FEAT-A1 |
+| FEAT-X13 | Incident API and FFI (M): open terrain, add layers and overlays, build or update a surface at an epoch, route and isochrone with confidence, read, verify and apply surface files; the same calls in C ABI 2 with opaque handles and byte buffers | P1 | FEAT-X9, FEAT-X11 |
+| FEAT-X14 | Compiler stage 1 (L, TERR lane): DEM reader (GEM-15, GLO-30), WorldCover with OSM on top and multipolygon assembly, linear features, steepness-max, written as the terrain file or format 4's sections; byte-identical builds. It produces FEAT-T4's grid and X3a's land cover | P1 | format 4 layouts, REG-11 |
+
+X4 (least-cost access paths over a per-request raster) and X5a are folded
+into FEAT-X9 to X12. Order: X7 to X10 on sidecar terrain files, then X11 as
+the first user-facing feature, X13 so a host can call it, X12, and X14 once
+format 4's layouts are fixed.
 
 **`FEAT-P` Profiles**
 
@@ -934,7 +969,7 @@ Design in 6.7. Hooks before 1.0; bundles, cells and the server in 1.x.
 | REG-8 | `wayfarer-server`: JSON API over bundles with a cell cache, and an immutable cell endpoint | P2 (1.x) | REG-5a, EXP-4 |
 | REG-9 | Device cell cache: fetch by area or corridor, check by hash, byte budget, route over the cells held; the cells are REG-13's byte ranges as hash-named blobs | P2 (1.x) | REG-7, REG-8, REG-13 |
 | REG-10 | Stored potentials: CCH topology and stored-column metrics as optional mapped sections, derived arrays built per cell (open without the 8 s preparation on Poland) | P1 (1.x) | REG-3 |
-| REG-11 | One global lattice for the DEM grid and rasters (FEAT-T4, X3a, X4). Designed (#69) | P1 | before format 3 |
+| REG-11 | One global lattice for the DEM grid and rasters (FEAT-T4, X3a, X7 to X9). Designed (#69) | P1 | before format 3 |
 | REG-12 | Search state sized by what a search touches: paged edge labels, node bounds and potential slots; floor-scaled stored metrics instead of own metrics on the mobile profile. No format change; removes 0.9 GiB of Poland's 2.5 GiB first-route heap. **Done in 0.3** (#44) | P1 | — |
 | REG-13 | Paged package: cell-major numbering in the format-3 compiler (hook), then `CellDirectory` with per-cell hashes, lazy per-cell validation and `memoryBudgetBytes` (1.x). Target: Poland on a phone with tens of MB resident | P1 | REG-3, REG-10 |
 
@@ -973,7 +1008,7 @@ and a user who needs it.
 | Id | Item | Graduates to |
 |---|---|---|
 | EXP-1 | Speed-up prototypes from PERF-2 that lose the comparison, kept for reference or removed | — |
-| EXP-2 | Cross-country movement: terrain cost surface joined to the graph, for SAR on foot | FEAT-X (X4, X5) |
+| EXP-2 | Cross-country movement: terrain cost surface joined to the graph, for SAR on foot | FEAT-X (X9 to X12) |
 | EXP-3 | WASM build for browser offline routing | FFI |
 | EXP-4 | Optional HTTP server binary (own API, maybe a Valhalla/OSRM-compatible subset) | REG-8 |
 | EXP-5 | Multiple packages per engine, routing across adjacent packages | REG-5a |
@@ -1016,6 +1051,10 @@ The ones that decide ordering:
   from sidecar files on the global lattice.
 - **FEAT-T4, FEAT-X3a → FEAT-X3.** Terrain-aware access legs need the DEM
   grid and land cover (format 4, or the sidecar files before it).
+- **FEAT-X7 to X10 → FEAT-X11 → FEAT-X12.** The terrain crate, layers,
+  fusion and surface search run on sidecar terrain files and don't wait for
+  format 4; portals need them and X1; off-network isochrones need portals.
+  Only compiler stage 1 (FEAT-X14) waits for format 4's layouts.
 - **QW-3, QW-2 → FEAT-X1.** Access costs as potential offsets, and snapping
   that doesn't grow with the radius squared.
 
@@ -1034,7 +1073,7 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.8 – 0.9 | Format-3 optional sections as each is ready (FEAT-P1, P2 extras, G4b, W4); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), with the default isochrone order (cost or fastest time), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
-| Format 4 | Terrain, once the terrain lane's measurements are in and before 0.80: FEAT-T1/T2/T4/T5, X2, X3a then X3, then X4 and X5a on the incident cost surface |
+| Format 4 | Terrain, once the terrain lane's measurements are in and before 0.80: FEAT-T1/T2/T4/T5, X2, X3a then X3, and compiler stage 1 (FEAT-X14) writing the terrain file; the incident surface (FEAT-X7 to X13) runs on sidecar terrain files before it |
 | Next major release | The search-and-rescue planning crate (`wayfarer-sar`: reach, team plans, coverage) merges from its branch when that release is prepared |
 | … | further items as they are ready |
 
