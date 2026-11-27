@@ -6,7 +6,8 @@
 //! RAYON_NUM_THREADS=1 cargo run --release -p wayfarer-terrain --example bench -- --km2 900
 //! ```
 //!
-//! With no `--km2` it runs 451, 900 and 2,500 km². Peak heap is counted by a global allocator:
+//! With no `--km2` it runs 451, 900 and 2,500 km². The build time is the median of three
+//! builds after a warm-up. Peak heap is counted by a global allocator:
 //! "inputs" is the terrain and the layers the host holds, "build" is the peak above them while
 //! the surface is built, and "route" the peak above the surface while a route is searched.
 
@@ -14,7 +15,7 @@
 mod synth;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 use wayfarer_terrain::fuse::Prior;
 use wayfarer_terrain::profile::Rules;
@@ -24,11 +25,14 @@ use wayfarer_terrain::surface::Incident;
 struct Counting;
 static NOW: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+/// Off while timing: the shared counters would serialise the threads' allocations. The timed
+/// builds free everything they allocate, so the count stays right.
+static COUNT: AtomicBool = AtomicBool::new(true);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(l) };
-        if !p.is_null() {
+        if !p.is_null() && COUNT.load(Relaxed) {
             let n = NOW.fetch_add(l.size(), Relaxed) + l.size();
             PEAK.fetch_max(n, Relaxed);
         }
@@ -36,7 +40,9 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         unsafe { System.dealloc(p, l) };
-        NOW.fetch_sub(l.size(), Relaxed);
+        if COUNT.load(Relaxed) {
+            NOW.fetch_sub(l.size(), Relaxed);
+        }
     }
 }
 
@@ -76,9 +82,19 @@ fn run(km2: f64) {
         feature_min_conf: 128,
         level_min_w: 128,
     };
-    let t1 = Instant::now();
+    // The first build counts the peak heap and warms up; the median of three more is the time.
     let (s, build) = peak_above(|| inc.surface(synth::T0).unwrap());
-    let built = t1.elapsed();
+    COUNT.store(false, Relaxed);
+    let mut times: Vec<f64> = (0..3)
+        .map(|_| {
+            let t1 = Instant::now();
+            std::hint::black_box(inc.surface(synth::T0).unwrap());
+            t1.elapsed().as_secs_f64()
+        })
+        .collect();
+    times.sort_by(f64::total_cmp);
+    let built = times[1];
+    COUNT.store(true, Relaxed);
     let file = s.write().len();
     let ((g, r), search) = peak_above(|| {
         let g = Grid::new(&a.terrain, &s).unwrap();
@@ -97,7 +113,7 @@ fn run(km2: f64) {
 peak heap: inputs {:.0} MB, build +{:.0} MB, grid and route +{:.0} MB  [generated in {:.1} s]",
         g.h,
         g.w,
-        built.as_secs_f64() * 1e3,
+        built * 1e3,
         file as f64 / 1e6,
         rt.as_secs_f64() * 1e3,
         if route.is_some() { "found" } else { "none" },

@@ -834,3 +834,37 @@ fn aoi_cut_and_host_time() {
     // The host passes its own time; the surface is the one at the start of that epoch.
     assert_eq!(inc(&fx.ter).surface_at(t + E - 1).unwrap(), full);
 }
+
+/// The per-post read: base values from the terrain, fused values and their source from the
+/// surface.
+#[test]
+fn read_one_post() {
+    let fx = fixture();
+    let rules = [Rules::walker_default(), Rules::vehicle()];
+    let prior = Prior::default();
+    let s = Incident {
+        id: *b"wayfarer-test\0\0\0",
+        terrain: &fx.ter,
+        prior: &prior,
+        layers: fx.layers.iter().collect(),
+        overlay: fx.overlay.clone(),
+        rules: &rules,
+        epoch_s: E,
+        allow_research: false,
+        feature_min_conf: 128,
+        level_min_w: 128,
+    }
+    .surface(T0 + 5 * E)
+    .unwrap();
+    let (i0, j0) = (BI0 as i64 * BLOCK as i64, BJ0 as i64 * BLOCK as i64);
+    // Inside the team's block box.
+    let p = wayfarer_terrain::surface::post(&fx.ter, &s, i0 + 59, j0 + 161).unwrap();
+    assert!(p.team && p.layer.is_none());
+    assert_eq!(p.profiles.len(), 2);
+    assert_eq!(p.profiles[0].0, 0, "the walker cannot pass a team block");
+    // On the river, decided by the flood layer or the land-cover refresh.
+    let p = wayfarer_terrain::surface::post(&fx.ter, &s, i0 + 30, j0 + 200).unwrap();
+    assert_ne!(p.lines & RIVER, 0);
+    assert!(p.layer.is_some());
+    assert!(wayfarer_terrain::surface::post(&fx.ter, &s, i0 - 1, j0).is_none());
+}

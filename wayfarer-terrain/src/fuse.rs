@@ -17,7 +17,7 @@
 //! All arithmetic is integer with one rounding rule per step, and each post depends only on its
 //! own inputs, so any block order, thread count or incremental re-fusion gives the same bytes.
 
-use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId, TICKS_PER_DEG, ticks_of_deg};
+use crate::lattice::{BLOCK, BLOCK_POSTS, BlockId, TICKS_PER_DEG, ceil_div, ticks_of_deg};
 use crate::layer::{
     self, FEAT_DEBRIS, FEAT_FALLEN, FEAT_PASSAGE, FEAT_WASHOUT, HAZARDS, Kind, LEVELS,
     LICENCE_RESEARCH, Layer, NCLASS, NHAZ, NLEV,
@@ -645,29 +645,31 @@ fn fuse_block(
         }
     }
     // Team overlay items, last, in canonical order: a later observation wins.
+    let rows = |lo: i64, hi: i64, first: i64| {
+        // Posts p of this block with lo <= p * s < hi, as offsets 0..64 into the block.
+        let a = (ceil_div(lo, s) - first).max(0);
+        let b = (ceil_div(hi, s) - first).min(BLOCK as i64);
+        a as usize..b.max(a) as usize
+    };
     for it in overlay {
-        for q in 0..BLOCK_POSTS {
-            let (la, lo) = (
-                (id.i0() + (q / BLOCK) as i64) * s,
-                (id.j0() + (q % BLOCK) as i64) * s,
-            );
-            if la < it.lat0 || la >= it.lat1 || lo < it.lon0 || lo >= it.lon1 {
-                continue;
-            }
-            match it.effect {
-                Effect::Block => fb.mask[q] |= M_TEAM_BLOCK,
-                Effect::Clear => {
-                    fb.haz[q] = [0; NHAZ];
-                    fb.lev[q] = [(0, 0); NLEV];
-                    fb.mask[q] &= !(M_DEBRIS | M_FALLEN | M_WASHOUT | M_TEAM_BLOCK);
-                }
-                Effect::SetHazard(code, v) => {
-                    if let Some(sl) = hazard_slot(code) {
-                        fb.haz[q][sl] = v;
+        for r in rows(it.lat0, it.lat1, id.i0()) {
+            for c in rows(it.lon0, it.lon1, id.j0()) {
+                let q = r * BLOCK + c;
+                match it.effect {
+                    Effect::Block => fb.mask[q] |= M_TEAM_BLOCK,
+                    Effect::Clear => {
+                        fb.haz[q] = [0; NHAZ];
+                        fb.lev[q] = [(0, 0); NLEV];
+                        fb.mask[q] &= !(M_DEBRIS | M_FALLEN | M_WASHOUT | M_TEAM_BLOCK);
+                    }
+                    Effect::SetHazard(code, v) => {
+                        if let Some(sl) = hazard_slot(code) {
+                            fb.haz[q][sl] = v;
+                        }
                     }
                 }
+                fb.src[q] = 255;
             }
-            fb.src[q] = 255;
         }
     }
     for q in 0..BLOCK_POSTS {

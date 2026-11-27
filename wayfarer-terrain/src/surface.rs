@@ -858,3 +858,55 @@ impl Incident<'_> {
         Ok(Surface { h, blocks })
     }
 }
+
+// ---- reading one post ----------------------------------------------------------------------------
+
+/// Everything the base and the surface say about one post, for a host's own ranking (landing
+/// zones, say): the terrain's values, the fused top class and its certainty, where that came
+/// from, and per profile the time per metre, the risk that the cell is closed and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Post {
+    /// Height in decimetres, or [`crate::terrain::DEM_NONE`].
+    pub dm: i32,
+    /// Steepness-max class 0-15, or [`crate::terrain::STEEP_NONE`].
+    pub steep: u8,
+    /// The base land-cover code and its confidence bit.
+    pub cover: u8,
+    pub conf: u8,
+    /// The base linear-feature bits ([`crate::lines`]).
+    pub lines: u16,
+    /// The fused top land-cover class and its certainty (1/255).
+    pub top: u8,
+    pub cert: u8,
+    /// The layer that decided the post (its hash), `None` for the base or the team overlay.
+    pub layer: Option<[u8; 32]>,
+    /// Whether a team overlay item decided the post.
+    pub team: bool,
+    /// Per profile, in the surface's order: (time per metre in the profile's unit, 0 =
+    /// impassable; risk the cell is closed, 1/255; why it is closed, `cost::WHY_*`).
+    pub profiles: Vec<(u16, u8, u8)>,
+}
+
+/// The [`Post`] at global post (i, j), if both the terrain and the surface hold its block.
+pub fn post(ter: &Terrain, s: &Surface, i: i64, j: i64) -> Option<Post> {
+    let (id, q) = BlockId::of_post(i, j);
+    let k = ter.block_index(id)?;
+    let (_, b) = s.blocks.get(&id.key())?;
+    let src = b.src[q];
+    Some(Post {
+        dm: ter.dm(k)[q],
+        steep: ter.steep(k)[q],
+        cover: ter.cover(k)[q],
+        conf: ter.conf(k)[q],
+        lines: ter.lines(k)[q],
+        top: b.top[q],
+        cert: b.cert[q],
+        layer: (src != SRC_BASE && src != SRC_TEAM).then(|| b.table[src as usize - 1]),
+        team: src == SRC_TEAM,
+        profiles: b
+            .prof
+            .iter()
+            .map(|p| (p.t[q], p.risk[q], p.why[q]))
+            .collect(),
+    })
+}
