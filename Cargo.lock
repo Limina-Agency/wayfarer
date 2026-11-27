@@ -1320,6 +1320,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfarer-terrain-compiler"
+version = "0.4.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "ctrlc",
+ "flate2",
+ "libm",
+ "rayon",
+ "tempfile",
+ "thiserror",
+ "wayfarer-package",
+ "wayfarer-terrain",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

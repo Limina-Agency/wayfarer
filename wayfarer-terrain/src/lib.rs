@@ -49,6 +49,7 @@ pub mod profile;
 pub mod search;
 pub mod surface;
 pub mod terrain;
+pub mod terrain_writer;
 
 pub use wayfarer_layer::{Error, Result, hex};
 

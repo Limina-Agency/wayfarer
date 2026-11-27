@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["wayfarer-package", "wayfarer-costing", "wayfarer", "wayfarer-service", "wayfarer-sar", "wayfarer-ffi", "wayfarer-compiler", "wayfarer-cli", "wayfarer-road-graph", "wayfarer-line-network", "wayfarer-layer", "wayfarer-terrain"]
+members = ["wayfarer-package", "wayfarer-costing", "wayfarer", "wayfarer-service", "wayfarer-sar", "wayfarer-ffi", "wayfarer-compiler", "wayfarer-cli", "wayfarer-road-graph", "wayfarer-line-network", "wayfarer-layer", "wayfarer-terrain", "wayfarer-terrain-compiler"]
 
 [workspace.package]
 version = "0.4.0"
@@ -48,6 +48,7 @@ wayfarer-service = { path = "wayfarer-service", version = "0.4.0" }
 wayfarer-sar = { path = "wayfarer-sar", version = "0.4.0" }
 wayfarer-layer = { path = "wayfarer-layer", version = "0.4.0" }
 wayfarer-terrain = { path = "wayfarer-terrain", version = "0.4.0" }
+wayfarer-terrain-compiler = { path = "wayfarer-terrain-compiler", version = "0.4.0" }
 zstd = "0.14"
 
 [workspace.lints.rust]
@@ -68,6 +69,11 @@ too_many_arguments = "allow"
 # Packages are hashed on every check; unoptimized BLAKE3 makes debug builds
 # and tests crawl.
 [profile.dev.package.blake3]
+opt-level = 3
+
+# The terrain compile's tests compile regions of a few hundred thousand posts (64 samples
+# each); optimized, they take seconds instead of minutes. Overflow checks stay on.
+[profile.dev.package.wayfarer-terrain-compiler]
 opt-level = 3
 
 # Release builds (the published `wayfarer` binaries and C libraries, and the
