@@ -1,0 +1,27 @@
+[package]
+name = "wayfarer-terrain-compiler"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Stage 1 of Wayfarer's off-road terrain: compiles GEM-15, GLO-30 and WorldCover COG tiles into a terrain file on the global lattice, one block row at a time"
+readme = "README.md"
+keywords = ["routing", "terrain", "dem", "geotiff", "search-and-rescue"]
+categories = ["science::geo"]
+# Experimental, like wayfarer-terrain, whose terrain file it writes. It joins wayfarer-compiler
+# once that crate can depend on a published wayfarer-terrain.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+flate2 = { workspace = true }
+libm = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+wayfarer-terrain = { workspace = true }
+
+[dev-dependencies]
+blake3 = { workspace = true }
