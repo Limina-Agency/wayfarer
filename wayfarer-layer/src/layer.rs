@@ -267,22 +267,75 @@ impl Manifest {
     }
 }
 
-/// One 64 × 64 block of a grid layer. `vals[slot][post]`; absent posts hold zeros.
+/// One slot's values over a block's posts, held at the slot's width: one byte per post for a
+/// u8 slot (class and hazard layers), two for a u16 slot (level layers).
+#[derive(Clone, Debug)]
+pub enum Plane {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+}
+
+impl Plane {
+    /// A plane of zeros for every post of a block, `width` 1 or 2 bytes per value.
+    pub fn zeros(width: usize) -> Plane {
+        if width == 1 {
+            Plane::U8(vec![0; BLOCK_POSTS])
+        } else {
+            Plane::U16(vec![0; BLOCK_POSTS])
+        }
+    }
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        match self {
+            Plane::U8(v) => v.len(),
+            Plane::U16(v) => v.len(),
+        }
+    }
+    pub fn get(&self, p: usize) -> u16 {
+        match self {
+            Plane::U8(v) => v[p] as u16,
+            Plane::U16(v) => v[p],
+        }
+    }
+    /// Sets post `p`.
+    ///
+    /// # Panics
+    /// If the plane is u8 and `v` is above 255.
+    pub fn set(&mut self, p: usize, v: u16) {
+        match self {
+            Plane::U8(x) => x[p] = u8::try_from(v).expect("a u8 slot holds 0-255"),
+            Plane::U16(x) => x[p] = v,
+        }
+    }
+}
+
+/// Planes are equal when they hold the same values, whatever their width.
+impl PartialEq for Plane {
+    fn eq(&self, o: &Plane) -> bool {
+        self.len() == o.len() && (0..self.len()).all(|p| self.get(p) == o.get(p))
+    }
+}
+impl Eq for Plane {}
+
+/// One 64 × 64 block of a grid layer. `vals[slot]` holds the slot's values per post; absent
+/// posts hold zeros.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GridBlock {
     pub id: BlockId,
     pub present: [u64; 64],
     pub conf: Vec<u8>,
-    pub vals: Vec<Vec<u16>>,
+    pub vals: Vec<Plane>,
 }
 
 impl GridBlock {
-    pub fn new(id: BlockId, slots: usize) -> Self {
+    /// An empty block with `slots` planes of `width` bytes per value, as
+    /// [`Manifest::slots`] gives them.
+    pub fn new(id: BlockId, slots: usize, width: usize) -> Self {
         GridBlock {
             id,
             present: [0; 64],
             conf: vec![0; BLOCK_POSTS],
-            vals: vec![vec![0; BLOCK_POSTS]; slots],
+            vals: (0..slots).map(|_| Plane::zeros(width)).collect(),
         }
     }
     pub fn has(&self, p: usize) -> bool {
@@ -368,15 +421,15 @@ impl Layer {
                 if !b.has(p) {
                     b.conf[p] = 0;
                     for v in b.vals.iter_mut() {
-                        v[p] = 0;
+                        v.set(p, 0);
                     }
                     continue;
                 }
-                if width == 1 && b.vals.iter().any(|v| v[p] > 255) {
+                if width == 1 && b.vals.iter().any(|v| v.get(p) > 255) {
                     return Err(Error::invalid("u8 slot above 255"));
                 }
                 if self.m.kind == Kind::Class {
-                    let s: u32 = b.vals.iter().map(|v| v[p] as u32).sum();
+                    let s: u32 = b.vals.iter().map(|v| v.get(p) as u32).sum();
                     if s != Q {
                         return Err(Error::invalid(format!(
                             "class probabilities sum to {s} at block {:?} post {p}",
@@ -430,9 +483,9 @@ impl Layer {
                     buf.push(b.conf[p]);
                     for v in &b.vals {
                         if width == 1 {
-                            buf.push(v[p] as u8)
+                            buf.push(v.get(p) as u8)
                         } else {
-                            buf.extend_from_slice(&v[p].to_le_bytes())
+                            buf.extend_from_slice(&v.get(p).to_le_bytes())
                         }
                     }
                 }
@@ -559,7 +612,7 @@ fn encode_block(b: &GridBlock, width: usize, force: Option<u8>) -> Vec<u8> {
     let conf: Vec<u16> = idx.iter().map(|&p| b.conf[p] as u16).collect();
     encode_plane(&mut o, &conf, 1, force);
     for v in &b.vals {
-        let vv: Vec<u16> = idx.iter().map(|&p| v[p]).collect();
+        let vv: Vec<u16> = idx.iter().map(|&p| v.get(p)).collect();
         encode_plane(&mut o, &vv, width, force);
     }
     o
@@ -661,7 +714,7 @@ fn decode_plane(r: &mut Reader, n: usize, width: usize) -> Option<Vec<u16>> {
 }
 
 fn decode_block(b: &[u8], id: BlockId, slots: usize, width: usize) -> Option<GridBlock> {
-    let mut g = GridBlock::new(id, slots);
+    let mut g = GridBlock::new(id, slots, width);
     let mut r = Reader::new(b, 0, "layer block");
     let tag = r.u8().ok()?;
     if tag & 0x7F != 0 {
@@ -682,7 +735,7 @@ fn decode_block(b: &[u8], id: BlockId, slots: usize, width: usize) -> Option<Gri
     for s in 0..slots {
         let v = decode_plane(&mut r, idx.len(), width)?;
         for (k, &q) in idx.iter().enumerate() {
-            g.vals[s][q] = v[k];
+            g.vals[s].set(q, v[k]);
         }
     }
     r.at_end().then_some(g)
@@ -801,13 +854,13 @@ mod tests {
 
     #[test]
     fn round_trip_and_hash_independent_of_coding() {
-        let mut b = GridBlock::new(BlockId { bi: 3, bj: -2 }, 2);
+        let mut b = GridBlock::new(BlockId { bi: 3, bj: -2 }, 2, 1);
         for p in 0..BLOCK_POSTS {
             if p % 7 != 0 {
                 b.set_present(p);
                 b.conf[p] = (p % 200) as u8;
-                b.vals[0][p] = if p < 2000 { 9 } else { (p % 3) as u16 };
-                b.vals[1][p] = 4;
+                b.vals[0].set(p, if p < 2000 { 9 } else { (p % 3) as u16 });
+                b.vals[1].set(p, 4);
             }
         }
         let mut l = Layer {
@@ -860,9 +913,9 @@ mod tests {
 
     #[test]
     fn class_sum_checked() {
-        let mut b = GridBlock::new(BlockId { bi: 0, bj: 0 }, NCLASS);
+        let mut b = GridBlock::new(BlockId { bi: 0, bj: 0 }, NCLASS, 1);
         b.set_present(5);
-        b.vals[3][5] = 254;
+        b.vals[3].set(5, 254);
         let mut l = Layer {
             m: manifest(Kind::Class, vec![]),
             blocks: vec![b],
