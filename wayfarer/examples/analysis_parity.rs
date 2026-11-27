@@ -917,7 +917,12 @@ fn load_reference(path: &std::path::Path) -> ReferenceEngine<'static> {
     );
     let (bytes, _) = wayfarer_compiler::package_build::package_bytes(
         &graph,
-        &wayfarer_compiler::package_build::PackageBuildOptions::default(),
+        // Format 2 keeps the graph's ids, which the oracle reads the package
+        // by; format 3 would renumber the package's copy by CCH rank.
+        &wayfarer_compiler::package_build::PackageBuildOptions {
+            package_format: wayfarer_package::format::PackageFormat::V2,
+            ..Default::default()
+        },
     )
     .expect("the reference road graph builds a routing package");
     let package = Arc::new(RoutingPackage::from_bytes(&bytes).expect("open the built package"));
