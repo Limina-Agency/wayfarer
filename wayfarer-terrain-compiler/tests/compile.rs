@@ -126,6 +126,7 @@ fn sources(reversed: bool) -> Sources {
     Sources {
         heights: vec![gem, vec![file("glo.tif", &f.glo)]],
         land_cover: vec![file("wc.tif", &f.wc)],
+        osm: None,
         attribution: "synthetic".into(),
     }
 }
