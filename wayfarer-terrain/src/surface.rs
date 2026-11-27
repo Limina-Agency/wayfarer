@@ -1,4 +1,4 @@
-//! The incident surface (`docs/design/incident-surface.md`, contract v1 draft).
+//! The incident surface (`docs/design/incident-surface.md`, contract v1).
 //!
 //! The incident surface is the stored result of fusion: the base, the layers and the team
 //! overlay active at an incident epoch T, costed per profile. A query reads only this surface

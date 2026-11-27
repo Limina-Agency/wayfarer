@@ -12,7 +12,7 @@ incident surface and searching it is `wayfarer-terrain`'s job.
 
 A layer's identity is the blake3 hash of its canonical form, not of the file bytes, and the one
 float step (`layer::quantise_probs`) is exact in f64. Two devices that write the same layer get
-the same hash. The format follows the draft `docs/design/terrain-layers.md` (contract v0) and
-changes until it is pinned as v1.
+the same hash. The format follows `docs/design/terrain-layers.md` (contract v1, wire version
+0.1: the same bytes as the v0 draft, so earlier layers keep their hashes).
 
 See the crate documentation for an example that writes a flood layer and reads it back.

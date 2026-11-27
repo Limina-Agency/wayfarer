@@ -15,9 +15,9 @@ off-road plan:
 3. **Query.** 16-connected integer Dijkstra and A* run on the surface, with pace by
    grade from the heights, canonical paths and route confidence.
 
-The formats follow the drafts `docs/design/terrain-layers.md` (layer contract v0)
-and `docs/design/incident-surface.md` (incident surface v1 draft: a fuse version in
-the recipe, an overlay that is a set applied by observed time, an AOI cut). Overlay
+The formats follow the v1 contracts `docs/design/terrain-layers.md` and
+`docs/design/incident-surface.md` (a fuse version in the recipe, an overlay that is
+a set applied by observed time, an AOI cut). Overlay
 items are boxes, polygons (filled even-odd, holes allowed) or lines (the supercover
 feature lines use), each with one exact integer rule for the posts it marks. The
 terrain file is the sidecar format in `terrain.rs` (v1: a sources and attribution

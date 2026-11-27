@@ -1,4 +1,4 @@
-//! Terrain layer files for Wayfarer (`docs/design/terrain-layers.md`, contract draft v0).
+//! Terrain layer files for Wayfarer (`docs/design/terrain-layers.md`, contract v1).
 //!
 //! A layer is what a producer (a model on a phone or a Mac, a hazard raster, a drone survey)
 //! hands to the engine's fusion: values per post of the global arc-second lattice with a
@@ -12,8 +12,8 @@
 //! [`layer::quantise_probs`]) is exact in f64, so two devices that write the same layer get
 //! the same hash.
 //!
-//! Status: experimental. The format follows contract draft v0 and changes until it is pinned
-//! as v1.
+//! Status: experimental. The format follows contract v1 (wire version 0.1, the same bytes as
+//! the v0 draft, so earlier layers keep their hashes); a change to the bytes is a new major.
 //!
 //! ```
 //! use wayfarer_layer::lattice::BlockId;
