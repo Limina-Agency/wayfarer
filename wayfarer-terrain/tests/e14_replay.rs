@@ -17,7 +17,7 @@ use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Prior, Shape};
 use wayfarer_terrain::lattice::{BlockId, Spacing};
 use wayfarer_terrain::profile::Rules;
 use wayfarer_terrain::search::{Graph, Grid, Search, path};
-use wayfarer_terrain::surface::{Incident, Surface, apply_delta, delta, delta_ops};
+use wayfarer_terrain::surface::{Inputs, Surface, apply_delta, delta, delta_ops};
 use wayfarer_terrain::terrain::Terrain;
 
 const SP: i64 = 120;
@@ -165,7 +165,7 @@ fn e14_replay() {
         ("fading", T0 + 2 * DAY + 3 * H, all.clone(), team.clone()),
         ("expired", T0 + 6 * DAY - 3 * H, all, team),
     ];
-    let incident = |layers: &[usize], overlay: &[OverlayItem]| Incident {
+    let incident = |layers: &[usize], overlay: &[OverlayItem]| Inputs {
         id: *b"E14-tatra-test\0\0",
         terrain: &ter,
         prior: &prior,

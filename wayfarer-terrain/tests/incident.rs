@@ -13,7 +13,7 @@ use wayfarer_terrain::layer::{
 use wayfarer_terrain::lines::*;
 use wayfarer_terrain::profile::Rules;
 use wayfarer_terrain::search::{Graph, Grid, Search, path, route};
-use wayfarer_terrain::surface::{Incident, Surface, apply_delta, delta, epoch_of};
+use wayfarer_terrain::surface::{Inputs, Surface, apply_delta, delta, epoch_of};
 use wayfarer_terrain::terrain::{STEEP_NONE, Terrain};
 use wayfarer_terrain::{cost, hex};
 
@@ -508,7 +508,7 @@ fn timeline() {
     let fx = fixture();
     let rules = [Rules::walker_default(), Rules::vehicle()];
     let prior = Prior::default();
-    let inc = |st: &Step| Incident {
+    let inc = |st: &Step| Inputs {
         id: *b"wayfarer-test\0\0\0",
         terrain: &fx.ter,
         prior: &prior,
@@ -728,7 +728,7 @@ fn overlay_is_a_set() {
     let rules = [Rules::walker_default(), Rules::vehicle()];
     let prior = Prior::default();
     let all: Vec<&HashedLayer> = fx.layers.iter().collect();
-    let inc = |overlay: Vec<OverlayItem>| Incident {
+    let inc = |overlay: Vec<OverlayItem>| Inputs {
         id: *b"wayfarer-test\0\0\0",
         terrain: &fx.ter,
         prior: &prior,
@@ -828,7 +828,7 @@ fn aoi_cut_and_host_time() {
     );
     assert!(fx.ter.cut(i0, i0, j0, j0 + 1).is_err());
 
-    let inc = |ter| Incident {
+    let inc = |ter| Inputs {
         id: *b"wayfarer-test\0\0\0",
         terrain: ter,
         prior: &prior,
@@ -858,7 +858,7 @@ fn read_one_post() {
     let fx = fixture();
     let rules = [Rules::walker_default(), Rules::vehicle()];
     let prior = Prior::default();
-    let s = Incident {
+    let s = Inputs {
         id: *b"wayfarer-test\0\0\0",
         terrain: &fx.ter,
         prior: &prior,
@@ -894,7 +894,7 @@ fn incident_id_is_recipe_only() {
     let rules = [Rules::walker_default()];
     let prior = Prior::default();
     let build = |id: [u8; 16]| {
-        Incident {
+        Inputs {
             id,
             terrain: &fx.ter,
             prior: &prior,
@@ -939,7 +939,7 @@ fn overlay_polygons_and_lines() {
     let fx = fixture();
     let rules = [Rules::walker_default()];
     let prior = Prior::default();
-    let inc = |overlay: Vec<OverlayItem>| Incident {
+    let inc = |overlay: Vec<OverlayItem>| Inputs {
         id: *b"wayfarer-test\0\0\0",
         terrain: &fx.ter,
         prior: &prior,
@@ -1000,4 +1000,108 @@ fn overlay_polygons_and_lines() {
     // On the trail at both ends.
     assert!(post(70, 140).unwrap().team && post(150, 170).unwrap().team);
     assert!(!post(70, 170).unwrap().team);
+}
+
+/// The owned incident: every surface it returns equals a full build from the same inputs,
+/// whatever changed since its last build, and its cell read agrees with the surface.
+#[test]
+fn owned_incident_matches_a_full_build() {
+    use wayfarer_terrain::incident::{Incident, Settings};
+    let fx = fixture();
+    let rules = vec![Rules::walker_default(), Rules::vehicle()];
+    let prior = Prior::default();
+    let id = *b"wayfarer-test\0\0\0";
+    let settings = Settings {
+        epoch_s: E,
+        ..Settings::default()
+    };
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<Incident>();
+    let mut inc = Incident::new(id, &fx.ter, None, rules.clone(), settings).unwrap();
+    let full = |layers: &[usize], overlay: &[OverlayItem], t: i64| {
+        Inputs {
+            id,
+            terrain: &fx.ter,
+            prior: &prior,
+            layers: layers.iter().map(|&k| &fx.layers[k]).collect(),
+            overlay: overlay.to_vec(),
+            rules: &rules,
+            epoch_s: E,
+            allow_research: false,
+            feature_min_conf: 128,
+            level_min_w: 128,
+        }
+        .surface(t)
+        .unwrap()
+    };
+    let all: Vec<usize> = (0..fx.layers.len()).collect();
+    let t = T0 + 5 * E;
+
+    let s0 = inc.surface_at(t + 17).unwrap();
+    assert_eq!(
+        *s0,
+        full(&[], &[], t),
+        "no layers, at the epoch that holds now"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&s0, &inc.surface_at(t + 100).unwrap()),
+        "same inputs, same epoch"
+    );
+
+    for &k in &all {
+        let h = inc.add_layer(&fx.layers[k].layer().write()).unwrap();
+        assert_eq!(h, fx.layers[k].hash());
+    }
+    assert_eq!(
+        *inc.surface_at(t).unwrap(),
+        full(&all, &[], t),
+        "layers added"
+    );
+
+    let mut shuffled = fx.overlay.clone();
+    shuffled.reverse();
+    inc.set_overlay(shuffled).unwrap();
+    assert_eq!(
+        *inc.surface_at(t).unwrap(),
+        full(&all, &fx.overlay, t),
+        "overlay set"
+    );
+
+    assert!(inc.remove_layer(&fx.layers[0].hash()));
+    assert!(!inc.remove_layer(&fx.layers[0].hash()));
+    let rest: Vec<usize> = all[1..].to_vec();
+    let later = T0 + 40 * H;
+    let s = inc.surface_at(later + 5).unwrap();
+    assert_eq!(
+        *s,
+        full(&rest, &fx.overlay, later),
+        "a layer removed, hours later"
+    );
+
+    // The cell read: the surface's post, plus the fused state of that block.
+    let (i0, j0) = (BI0 as i64 * BLOCK as i64, BJ0 as i64 * BLOCK as i64);
+    let c = inc.cell_at(i0 + 59, j0 + 161).unwrap().unwrap();
+    assert!(c.post.team);
+    assert_ne!(c.effects & wayfarer_terrain::fuse::M_TEAM_BLOCK, 0);
+    assert_eq!(
+        c.post,
+        wayfarer_terrain::surface::post(&fx.ter, &s, i0 + 59, j0 + 161).unwrap()
+    );
+    assert!(inc.cell_at(i0 - 1, j0).unwrap().is_none());
+
+    // A route on the last surface, between two posts in degrees.
+    let deg = |r: i64, c: i64| {
+        (
+            ((i0 + r) * SP) as f64 / 432_000.0,
+            ((j0 + c) * SP) as f64 / 432_000.0,
+        )
+    };
+    let r = inc
+        .route("walker", deg(10, 10), deg(150, 230))
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.points.first(), Some(&deg(10, 10)));
+    assert_eq!(r.points.last(), Some(&deg(150, 230)));
+    assert!(inc.route("nobody", deg(10, 10), deg(20, 20)).is_err());
+    assert!(inc.route("walker", deg(-5, 10), deg(20, 20)).is_err());
 }
