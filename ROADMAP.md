@@ -2,13 +2,13 @@
 
 Status: proposal, written against 0.1.3 (2026-11-17), updated on
 2026-11-19 after the 0.2.0 release, on 2026-11-23 after 0.4.0 and on
-2026-11-24 with the plan to 0.7: format 3 ships in 0.7, the work to it runs
-as three tranches (0.5, 0.6, 0.7, section 7.13), off-road terrain goes to
-format 4 (`docs/design/format-4.md`), and the search-and-rescue planning
-crate stays on its own branch until the next major release is prepared
-(3.2). Section
-2.1 says what 0.2.0 shipped, 2.2 what 0.3.0 and 0.4.0 shipped and what is
-on `main` for 0.5; items in section 7 that are done say so and name their
+2026-11-24 with the plan to 0.7 (three tranches, section 7.13; off-road
+terrain in format 4, `docs/design/format-4.md`), and on 2026-11-27 for
+0.6.0: there was no 0.5, and 0.6 ships Tranche 1, format 3 by default, the
+search-and-rescue planning crate (3.2) and the experimental terrain crates;
+Tranche 2 moves to 0.7. Section
+2.1 says what 0.2.0 shipped, 2.2 what 0.3.0, 0.4.0 and 0.6.0 shipped; items
+in section 7 that are done say so and name their
 pull requests. The API-0 decisions (`docs/design/api-0-decisions.md`) and
 the format-3 decisions (`docs/design/format-3.md`, section 13) are folded
 into sections 4, 7 and 9.
@@ -105,7 +105,7 @@ leg building (turning a found path into geometry, maneuvers and attributes)
 is the next speed win (PERF-13). The tail-latency and landmark-size
 weaknesses above are resolved.
 
-### 2.2 Shipped in 0.3.0 (2026-11-22) and 0.4.0 (2026-11-23)
+### 2.2 Shipped in 0.3.0 (2026-11-22), 0.4.0 (2026-11-23) and 0.6.0 (2026-11-27)
 
 Measured on a 4-core cloud machine with 15 GiB (`CHANGELOG.md` has the
 details and the migration notes).
@@ -145,22 +145,26 @@ details and the migration notes).
   REG-11, the REG-13 hook), and API-0 (#89): audience, public crates, one
   release line, wire versioning, the 1.x promise and deprecations.
 
-On `main` for 0.5 (2026-11-23): vehicle matrices pairwise at any size (#79),
-overlay isochrone seeds (#80), compile headroom (#81), format 3's section
-table behind an off-by-default compiler switch (#82), two-phase snapping
-(QW-2, #83), `wayfarer nearest` and distance contours in the CLI (#84),
-multi-origin isochrones (FEAT-A2 core, #85), parallel customization (#86),
-structured guidance with modifiers, exit numbers and signs (FEAT-G0,
-FEAT-G4a, #87), path-order sums (#90), and fastest-time isochrones as an
-option (FEAT-A10, #91). Since then (2026-11-24): format 3 profile slots,
-versioned attribute-class records, region info and identity, and
-cell-major numbering, all behind the compiler switch (FMT 2 to FMT 5, #88,
-#92, #96, #101); approach offsets in the CCH potentials (QW-3, #93);
-discounted matrices bounded by the request's own costs (M4, M5, #94);
-bicycle-only ways closed to walkers and busways to cars (FEAT-P0a, P0d,
-#97); the first-route work's parallel CCH topology build and parallel
-checks at open (#98, #102); a walking pace model with team GPX calibration
-(#99); and the terrain layouts moved to a format 4 draft (#95).
+Shipped in 0.6.0 (2026-11-27). There was no 0.5 release: Tranche 1 and
+part of Tranche 3 ship together in 0.6. Vehicle matrices pairwise at any
+size (#79), overlay isochrone seeds (#80), compile headroom (#81),
+two-phase snapping (QW-2, #83), `wayfarer nearest` and distance contours in
+the CLI (#84), multi-origin isochrones (FEAT-A2 core, #85), parallel
+customization (#86), structured guidance with modifiers, exit numbers and
+signs (FEAT-G0, FEAT-G4a, #87), path-order sums (#90), fastest-time
+isochrones as an option (FEAT-A10, #91), approach offsets in the CCH
+potentials (QW-3, #93), discounted matrices bounded by the request's own
+costs (M4, M5, #94), bicycle-only ways closed to walkers and busways to cars
+(FEAT-P0a, P0d, #97), the parallel CCH topology build, parallel checks at
+open and the background warm-up (#98, #102, #105), a walking pace model
+with team GPX calibration (#99), isochrone polygons (FEAT-A1, #107), costed
+off-network access legs with the SAR `costed` flag (FEAT-X1, X6, #108), and
+**package format 3 written by default** (FMT 1 to FMT 7, #82 to #110),
+format 2 still read and written on request. New crates: search and rescue
+planning (`wayfarer-sar`, #111) and the experimental off-road terrain
+crates (`wayfarer-layer`, `wayfarer-terrain`, FEAT-X7 to X10, #112 to #119)
+with the terrain compile path for apps (`wayfarer-terrain-compiler`,
+FEAT-X14, #116, not yet on crates.io).
 
 ## 3. Gap analysis
 
@@ -219,8 +223,8 @@ These are where Wayfarer can lead rather than catch up:
 **How this work is organised (2026-11-24).** Search-and-rescue planning
 (reach prediction, team plans and coverage in a `wayfarer-sar` crate, with
 CLI commands and C entry points) is developed on its own branch,
-`feat/sar-reach-and-coverage`, kept rebased on `main`, and is not merged
-into `main` until the next major release is being prepared. Off-road
+`feat/sar-reach-and-coverage`, kept rebased on `main`, and merges into
+`main` with 0.6 (#111). Off-road
 terrain (DEM, land cover, linear features, cost surfaces) is explored by a
 terrain lane on open data (`exp/terrain-*` branches, sidecar terrain
 files). The `wayfarer-terrain` crate and a terrain compile path ship in
@@ -760,7 +764,7 @@ of **gates** at fixed versions says when breaking changes stop.
 | Tooling on | by 0.5 | Semver, schema and C header diffs run on every PR (informational) |
 | API redesign window | 0.10 – 0.39 | The API lane's breaking items land here, one area per release |
 | Breaking cut-off | 0.80 | After this, only the hardening review may break anything |
-| Format 3 | 0.7 | Built behind an off-by-default compiler switch through 0.5 and 0.6, then the default in 0.7, with stored potentials so the first route costs about one search. It carries the changes to existing layouts and the optional-section table; non-terrain content sections (bicycle data, truck limits, directional destinations, conditional turns, cells) follow as optional sections without another bump (7.12) |
+| Format 3 | 0.6 | Built behind an off-by-default compiler switch on `main`, then the default from 0.6 (#110); stored potentials follow as optional sections so the first route costs about one search. It carries the changes to existing layouts and the optional-section table; non-terrain content sections (bicycle data, truck limits, directional destinations, conditional turns, cells) follow as optional sections without another bump (7.12) |
 | Format 4 | after the terrain experiments, before 0.80 | Terrain: road elevation, the DEM grid, land cover, linear features and steepness (`docs/design/format-4.md`), with layouts set from the terrain lane's measurements. Whether it is a version bump or optional sections added to format 3 is still open; the layouts are the same either way |
 | Freeze | 0.90 | API, wire format, C ABI, package format and costing model frozen; diffs become blocking; releases are candidates |
 | 1.0 | — | Stability contract (section 4) published and enforced |
@@ -1076,14 +1080,13 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.2 | Released 2026-11-19: PERF-2 to PERF-7 and PERF-10 (CCH potentials, format 2, via-edge alternatives, faster matrices), part of FFI-1 (Windows, i686), fixes #8, #13, #22 |
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
-| 0.5 | Tranche 1, under way: first route roughly halved without a format change (parallel CCH topology #98, parallel checks at open #102, then an opt-in background warm-up); FEAT-X1 costed access legs with the X6 `costed` flag after QW-2 and QW-3 (#83, #93); FEAT-A10 (#91) and A1 polygons; the route request options; FEAT-D2 (clip); FEAT-P0a and P0d (#97); format 3 built behind the switch (FMT 1 to FMT 5 on `main`); also on `main`: FEAT-A2 core, FEAT-G0 and G4a, parallel customization, matrix and compile speed-ups, the walking pace model (#99) |
-| 0.6 | Tranche 2: FEAT-X1b, X2a, A3, A8, A5; terrain: the `wayfarer-terrain` crate on crates.io (FEAT-X7 to X10, experimental) and the terrain compile path for apps (FEAT-X14), no prebuilt terrain file; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D3 (several extracts); lean leg records; stored potentials and the last format-3 layouts behind the switch; API-0b (builders, `apiVersion` and `warnings`, one release tag) |
-| 0.7 | Tranche 3: format 3 as the default, with stored CCH topology and metrics (the first route costs about one search); format 2 still read through 0.8 |
+| 0.5 | Not released: its Tranche 1 work shipped in 0.6 |
+| 0.6 | Released 2026-11-27: Tranche 1 (first route: parallel CCH topology #98, parallel checks #102, background warm-up #105; FEAT-X1 and X6 #108; FEAT-A1, A2 core, A10; FEAT-P0a and P0d; FEAT-G0 and G4a; the walking pace model #99); package format 3 written by default (#110, from Tranche 3), format 2 still read; `wayfarer-sar` (#111); terrain: `wayfarer-layer` and `wayfarer-terrain` on crates.io (FEAT-X7 to X10, experimental, contracts v1) and the terrain compile path for apps (FEAT-X14, #116), no prebuilt terrain file |
+| 0.7 | Tranche 2, moved from 0.6: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D2 (clip) and D3 (several extracts); lean leg records; API-0b (builders, `apiVersion` and `warnings`, one release tag); the terrain compiler's OSM stage. Tranche 3's rest: stored CCH topology and metrics as optional format-3 sections (the first route costs about one search); format 2 still read through 0.8 |
 | 0.8 – 0.9 | Format-3 optional sections as each is ready (FEAT-P1, P2 extras, G4b, W4); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), with the default isochrone order (cost or fastest time), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |
 | Format 4 | Terrain, once the terrain lane's measurements are in and before 0.80: FEAT-T1/T2/T4/T5, X2, X3a then X3, and the frozen layouts that FEAT-X14 writes; the terrain crate and compile path (FEAT-X7 to X10, X14) ship before it in 0.6 |
-| Next major release | The search-and-rescue planning crate (`wayfarer-sar`: reach, team plans, coverage) merges from its branch when that release is prepared |
 | … | further items as they are ready |
 
 After the API window closes, releases carry PERF, FFI, FEAT and QA items until
@@ -1101,10 +1104,10 @@ functions. One thread per lane, one PR in flight per lane.
 | Request safety | `limits.rs`, `queries.rs`, `correlator.rs`, request validation in `trip.rs`, `matrix.rs` and `isochrone.rs` | QA-9 request limits; isochrone origin fixes; two-phase snapping | 0.3, 0.4 |
 | Profiles, access, time | road-graph tags, types and restriction resolution, `wayfarer-costing`, restriction masks in the compiler and `graph_access.rs` | FEAT-P0c, then P0b and the parser fixes; P0a/P0d; W0 | 0.3, 0.4 |
 | Legs, guidance, output | `guidance.rs`, `route_leg.rs`, `navigation.rs`, result assembly in `trip.rs`, polyline code | FEAT-G3 and multi-leg maneuvers; PERF-13; FFI-6 with `include`; G0 and G4a | 0.3, 0.4 |
-| Search core and memory | `package/search.rs`, `search/patch.rs`, `package/cch.rs`, `package/mod.rs` open path, `reference.rs` | REG-12; PERF-14 to PERF-16; approach offsets; FEAT-X1 | 0.4, 0.5 |
-| First route | the CCH topology build, open-time checks, warm-up, stored potentials | parallel topology (#98) and checks (#102); background warm-up; stored topology and metrics in format 3 | 0.5 – 0.7 |
+| Search core and memory | `package/search.rs`, `search/patch.rs`, `package/cch.rs`, `package/mod.rs` open path, `reference.rs` | REG-12; PERF-14 to PERF-16; approach offsets; FEAT-X1 | 0.4, 0.6 |
+| First route | the CCH topology build, open-time checks, warm-up, stored potentials | parallel topology (#98) and checks (#102); background warm-up; stored topology and metrics in format 3 | 0.6, 0.7 |
 | Terrain (exploration) | `exp/terrain-*` branches, sidecar terrain files, experiment notes | DEM and land-cover readers, pace calibration, cost surfaces, switching rules, the ML layer contract | until format 4 |
-| Search and rescue planning | `wayfarer-sar` on `feat/sar-reach-and-coverage`, kept rebased on `main` | reach prediction, team plans, coverage, CLI and C entry points | merges at the next major release |
+| Search and rescue planning | `wayfarer-sar` | reach prediction, team plans, coverage, CLI and C entry points | 0.6 (#111) |
 | Analysis tools | `isochrone.rs`, `types/analysis.rs`, new trip and polygon modules | FEAT-A4, A9, A11, A7; A2; A10, A1, A3, A8, A5 | 0.4 – 0.8 |
 | Compiler options and data | compiler way collection, `CompileRequest`, CLI compile | input fixes; `#[non_exhaustive]` and baked profiles; D2; D3 | 0.4 – 0.7 |
 | Regions and scale | new `regions` module behind `experimental-regions`, `cch_order.rs`, design docs | EXP-5b step 1; REG-2; the format-3 design; EXP-5b step 2 | 0.5 – 0.11 |

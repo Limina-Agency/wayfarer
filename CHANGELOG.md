@@ -5,6 +5,165 @@ engine, service and C ABI crates) and `wayfarer-compiler-v*` (the compiler, the
 `wayfarer` binary and their crates). Each entry names the package format, the
 costing model and the C ABI version a release reads or writes.
 
+## 0.6.0 (2026-11-27)
+
+Both lines. **Package format 3** written (reads 2 and 3), costing model 1, C
+ABI version 1 (additive). There was no 0.5.0: everything on `main` since
+0.4.0 ships here, with search and rescue planning and the first off-road
+terrain crates.
+
+### Migrating from 0.4
+
+- **Recompiled packages are format 3, which 0.4 engines don't open** (#110).
+  0.6 opens 0.4's format-2 packages and routes on them as before, so there is
+  no need to recompile at once. To keep a package that older engines read,
+  compile format 2 on request: `CompileRequest::package_format`
+  (`PackageFormat::V2`) or `wayfarer compile --package-format 2`; it is the
+  same bytes as before. Format-3 drafts that development builds wrote before
+  0.6 are refused as outdated: recompile them.
+- **A recompile changes ids and hashes.** A format-3 package numbers nodes by
+  CCH rank (#101), so edge and node ids differ from format 2, and its dataset
+  hash is an identity hash over the header and the identity sections (#82):
+  routes and costs are the same under the new ids. Rebind overlay sets bound
+  by edge id or dataset hash, or they fall back to their geometry. Format 3
+  also stores every node's OSM id (#96). Info, verify and compile results
+  gain `contentHash` beside `datasetHash` (C ABI, CLI and host protocol).
+- **Walking routes change after a recompile** (#97, P0a and P0d): `on_foot`
+  takes foot access only, so cycleways and `foot=no` ways close to walkers
+  (`legged` keeps them), and bus or HGV access alone no longer opens a way
+  to cars. Emergency vehicles keep busways through a new mode bit
+  (`MobilityMode::EMERGENCY`). 24 of Małopolskie's walking gate cases cost
+  more; no other profile changes.
+- **Exit numbers and signs** (#87): the compiler keeps `motorway_junction`
+  nodes, so a recompile moves the dataset hash, and maneuvers gain direction
+  modifiers, exit numbers, toward and via lists and the facts of the road
+  they enter. Boarding a ferry is its own maneuver (`route.ferry`). "Toward"
+  text comes from destination tags only, and an unnamed road is entered onto
+  its ref, so instruction text changes on some maneuvers.
+- **Last bits of costs** (#79, #90): a found path's cost, duration and
+  distance are summed in path order, and vehicle matrices stay pairwise at
+  any size, so costs can differ from 0.4 in the last bits. Paths and
+  statuses are the same; matrix rows now equal pairwise cells bit for bit.
+- **Overlay isochrones** from a farther origin candidate start their time at
+  zero, as plain isochrones do (#80): time contours reach a little farther.
+- **Every new request field is optional and off by default:** `offNetwork`
+  on any request (#108), isochrone `origins`, `order: "time"`,
+  `startOffsetS`, `includeOrigins` and `polygons` (#85, #91, #107). Routes
+  and matrices report the radius snapping widened to, only when it widened
+  (#83).
+- **Opening:** `prefetch()` builds the first drive's work first and faults
+  the file in last (#105). The C ABI's open takes `"warmUp": true` to warm
+  up on a thread of its own (`RoutingPackage::warm_up_in_background`), and
+  the service uses it. On the Mobile profile the CCH customization arrays
+  are dropped after each customization and built again when needed (#86).
+- **New crates:** `wayfarer-sar` (search and rescue planning, #111) and the
+  experimental `wayfarer-layer` and `wayfarer-terrain` (#112 to #119) are
+  published. `wayfarer-terrain-compiler` (#116) is not published yet: build
+  it from the tag. No terrain file ships; an app compiles its own.
+- **Rust API (breaking):** see Changes; struct literals of the request and
+  result types named there need the new fields, and `::new` and `Default`
+  are unchanged.
+
+### Changes
+
+- **Added: package format 3** (#82, #88, #92, #96, #101, #109, #110; REG-3,
+  FMT 1 to FMT 7, `docs/design/format-3.md`). A tagged section table with
+  per-section blake3 hashes, where readers skip unknown optional sections
+  and refuse unknown required ones; profile slots with u16 masks (up to 14
+  profiles); versioned attribute-class records that newer readers and older
+  records both read; a region info section and OSM node ids; nodes numbered
+  by CCH rank, with each dissection cell one range of ranks and the cell
+  tree stored; u64 byte offsets and u32 cost tuple rows; the request grid on
+  64 × 64 blocks of the global 12″ lattice. `wayfarer info` lists unknown
+  sections. Fixtures `fixtures/routing/format-2/` and `format-3/` are both
+  read in CI; new fuzz targets `package_table` and `leg_attrs`.
+- **Added: costed off-network access legs** (#108; FEAT-X1, X6,
+  `docs/design/off-road.md`). With `offNetwork` in a request's options, a
+  point off the roads snaps to up to `maxCandidates` directed edges within
+  `maxRadiusM` and each candidate pays `costFactor × d / paceMps` to reach
+  (defaults: 500 m and 2 for walkers, 250 m and 1.5 for vehicles). Totals
+  include both stretches; route geometry starts and ends at the requested
+  points, with an `off_network_access` shape segment, an `access_leg`
+  overlay, a maneuver and an `offNetwork` summary per stretch. Routes, trips,
+  matrices and isochrones all take it. SAR's `off_network.costed` makes the
+  off-network leg an access leg in the totals.
+- **Added: isochrones from several origins** (#85; FEAT-A2 core), at most
+  64. Each origin snaps as `origin` does; an origin trapped behind
+  destination-only roads gets its own relaxed search.
+- **Added: fastest-time isochrones** (#91; FEAT-A10). `order: "time"`
+  orders labels by travel time, so a time contour holds exactly what is
+  reachable within it. Extra origins take `startOffsetS`, and
+  `includeOrigins` reports which origin reaches each edge first.
+- **Added: isochrone polygons** (#107; FEAT-A1). `polygons` puts a GeoJSON
+  MultiPolygon on each bucket: the area within a short walk of the roads it
+  reaches, drawn on one grid per request (`resolutionM`, `spreadM`,
+  `denoise`). New `GeoJsonMultiPolygon`, `RouteIsochronePolygonOptions`
+  and `MAX_ISOCHRONE_POLYGON_GRID_NODES`.
+- **Added: structured guidance** (#87): see Migrating. Navigation input
+  carries each shape segment's speed limit and progress reports the active
+  edge's. `docs/guidance.md` is the renderer key table.
+- **Added: walking pace model** (#99). `wayfarer_costing::pace`, an
+  integer model (slope curve, trail factors from `highway` and
+  `sac_scale`, P10/P50/P90 spread) fitted on OSM public GPS traces, and
+  `wayfarer::pace_calibration`, which fits a team's own pace from its GPX
+  tracks. CLI: `wayfarer pace default` and `wayfarer pace calibrate`. No
+  route reads it yet; stored costs are unchanged.
+- **Added: search and rescue planning** (#111; new crate `wayfarer-sar`,
+  `docs/design/sar-planning.md`). `predict_reach` (fast, typical and slow
+  reach from a last known position, edge probabilities, likely routes and
+  corridors, zones), `plan_teams` (segment probabilities, a team × segment
+  arrival matrix, a first assignment and territories) and `apply_coverage`
+  (tracks and measured effort to probability of detection, with the Bayes
+  update), with GeoJSON output. CLI `wayfarer sar reach|teams|coverage`;
+  C ABI `wayfarer_sar_reach`, `wayfarer_sar_plan_teams` (cancellable) and
+  `wayfarer_sar_coverage` in the library's `sar` build, with schemas in
+  `schema/sar-*.json`. Every public type is `#[non_exhaustive]`. On
+  Małopolskie a 3-hour reach takes 0.8 s.
+- **Added: off-road terrain, experimental** (#112 to #119; new crates
+  `wayfarer-layer`, `wayfarer-terrain`, `wayfarer-terrain-compiler`).
+  - `wayfarer-layer`: the terrain layer file a model, hazard raster or drone
+    survey writes (contract v1, wire version 0.1,
+    `docs/design/terrain-layers.md`), with only `blake3`, `flate2` and
+    `thiserror` as dependencies so it builds on phones.
+  - `wayfarer-terrain`: the terrain file on the global arc-second lattice;
+    fusion of layers and a team overlay (boxes, even-odd polygons and
+    supercover lines) into an incident surface (contract v1,
+    `docs/design/incident-surface.md`) with content and recipe hashes and
+    delta updates; 16-connected Dijkstra and A* with pace by grade. An
+    owned `incident::Incident` holds the inputs for a host and re-fuses
+    only what changed. Blocks are costed as they are fused: a 900 km²
+    surface and a walker route take 89 MB of peak heap. Everything is
+    integer arithmetic or `libm`, pinned by hashes in CI.
+  - `wayfarer-terrain-compiler` (not published): compiles GEM-15, GLO-30
+    and WorldCover COG tiles into a terrain file one block row at a time,
+    from Rust (`compile_to_file`, `TerrainJob`, cancellable, with progress)
+    or the `wayfarer-terrain` binary. Małopolskie compiles in 33 s at
+    110 MiB of heap on 4 cores, the same bytes on every target and thread
+    count.
+- **Faster first route** (#98, #102, #105, #86; POT 1 to POT 3, OM-5,
+  OM-6). The CCH topology builds in parallel (on three or more threads),
+  open checks run in parallel (on one thread they took 88 ms on
+  Małopolskie and about 1 s on Poland), the top of the elimination tree customizes in parallel,
+  and the opt-in background warm-up does the first drive's work first.
+  Metrics are the same bits on any number of threads.
+- **Faster matrices and snapping** (#79, #83, #93, #94): vehicle matrices
+  stay pairwise with potentials (a 1 × 1,500 Kraków drive on Małopolskie
+  takes 0.4 s instead of 14 s); snapping scores only the candidates that
+  can make the limit; CCH potentials start from the candidates' offsets;
+  discounted matrices bound their cells with a metric from the request's
+  own costs, and matrix paths are moved instead of cloned.
+- **Compile headroom** (#81): the road-graph builder emits segment batches
+  in parallel, topology edges are handed over in batches (Poland's compile
+  peak 4.15 to 3.76 GiB), and a cancel now stops the CCH order (it waited
+  170 s on Germany). Output is byte-identical.
+- **Added: CLI** `wayfarer nearest` and `--distance-m` contours on
+  `wayfarer isochrone` (#84).
+- **CI:** the Kraków gate, its timings and the fuzz targets run every night
+  (#103); the i686 job tests the layer and terrain crates.
+- **Docs:** `ROADMAP.md` (#104, #115), the API-0 decisions (#89), stored
+  CCH potentials (#106), the format 4 terrain draft (#95, #115) and the v1
+  layer and incident surface contracts (#119).
+
 ## 0.4.0 (2026-11-23)
 
 Both lines. Package format 2 (reads 2 only), costing model 1, C ABI version 1,

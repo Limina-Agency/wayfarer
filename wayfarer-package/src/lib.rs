@@ -59,7 +59,7 @@
 //! hash apart from the content hash, implied ids numbered by CCH rank,
 //! `PackageParams`) is the format a 0.5 compile writes. This build still
 //! opens format 2, and writes it when asked ([`format::PackageFormat::V2`])
-//! for engines older than 0.5. The drafts of format 3 that development
+//! for engines older than 0.6. The drafts of format 3 that development
 //! builds wrote are refused as `Outdated`.
 
 pub mod barrier;

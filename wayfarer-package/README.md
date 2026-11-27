@@ -78,7 +78,7 @@ versioned separately:
   and raising the minimum drops a format. Format 3
   (`docs/design/format-3.md`) adds optional sections without a new format:
   an engine skips an unknown section unless it is marked REQUIRED. The
-  format-3 drafts that development builds wrote before 0.5 are refused.
+  format-3 drafts that development builds wrote before 0.6 are refused.
 - A package records the costing model its stored costs were baked with. An
   engine re-costs a package of an older model from its stored costing inputs
   and refuses a newer one, so a change to stored costs ships the compiler and

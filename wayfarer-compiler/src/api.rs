@@ -83,7 +83,7 @@ pub struct CompileRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiles: Option<Vec<MobilityProfile>>,
     /// The package format: format 3 unless set. Format 2 is for engines
-    /// older than 0.5, which don't open format 3; it is not part of the JSON
+    /// older than 0.6, which don't open format 3; it is not part of the JSON
     /// request.
     #[doc(hidden)]
     #[serde(skip)]
