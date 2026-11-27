@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::geometry::{GeoJsonLineString, decode_polyline6};
 use crate::types::{
     GeoPoint, LegResult, RouteManeuver, RouteManeuverKind, RouteShapeDynamicOverlay,
-    RouteShapeQualityFlag, RouteShapeSegment,
+    RouteShapeSegment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -98,6 +98,22 @@ pub struct RouteNavigationInput {
     pub duration_seconds: Option<f64>,
 }
 
+/// A shape segment's duration: its edge's, or an access stretch's own (a
+/// connector has none).
+fn segment_duration_s(
+    segment: &RouteShapeSegment,
+    edge: Option<&crate::types::RouteEdgeAttribution>,
+) -> f64 {
+    match edge {
+        Some(edge) => edge.duration_s,
+        None => segment
+            .dynamic_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.duration_seconds)
+            .unwrap_or(0.0),
+    }
+}
+
 impl RouteNavigationInput {
     /// The navigation input of a route: its geometry, maneuvers and shape
     /// segments, each graph segment with its edge's duration (connectors
@@ -110,17 +126,13 @@ impl RouteNavigationInput {
         let mut shape_segment_durations_seconds = Vec::new();
         let mut shape_segment_speed_limits_kph = Vec::new();
         for shape in &route.shape_segments {
-            let edge = if shape
-                .segment
-                .quality_flags
-                .contains(&RouteShapeQualityFlag::SsvgConnector)
-            {
+            let edge = if crate::access::is_off_graph_segment(&shape.segment) {
                 None
             } else {
                 edges.next()
             };
             shape_segments.push(shape.segment.clone());
-            shape_segment_durations_seconds.push(edge.map_or(0.0, |edge| edge.duration_s));
+            shape_segment_durations_seconds.push(segment_duration_s(&shape.segment, edge));
             shape_segment_speed_limits_kph.push(edge.and_then(|edge| edge.maxspeed_kph));
         }
         Self {
@@ -147,16 +159,13 @@ impl RouteNavigationInput {
                 let mut segment = segment.clone();
                 segment.begin_shape_index += shape_offset;
                 segment.end_shape_index += shape_offset;
-                let edge = if segment
-                    .quality_flags
-                    .contains(&RouteShapeQualityFlag::SsvgConnector)
-                {
+                let edge = if crate::access::is_off_graph_segment(&segment) {
                     None
                 } else {
                     edges.next()
                 };
+                shape_segment_durations_seconds.push(segment_duration_s(&segment, edge));
                 shape_segments.push(segment);
-                shape_segment_durations_seconds.push(edge.map_or(0.0, |edge| edge.duration_s));
                 shape_segment_speed_limits_kph.push(edge.and_then(|edge| edge.maxspeed_kph));
             }
             shape_offset += leg.geometry.len().saturating_sub(1);
@@ -1209,6 +1218,7 @@ mod tests {
             connector_type: Some(RouteDynamicVirtualEdgeKind::Endpoint),
             source_chunk_ids: vec!["chunk_1".to_string()],
             distance_meters: Some(12.0),
+            duration_seconds: None,
             cost: Some(24.0),
             source_endpoint: Some(RouteDynamicEndpointKind::Origin),
             source_point: Some(point(20.0)),

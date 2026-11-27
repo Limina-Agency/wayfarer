@@ -127,8 +127,10 @@ char *wayfarer_versions(void);
 
 /* Opens the package at `path` (UTF-8, also on Windows: see "Paths and
  * text"). `options_json` is NULL or {"memoryProfile": "desktop" |
- * "mobile"}. On success `*package` is the handle and `*out_json` the package
- * info. */
+ * "mobile", "warmUp": bool}. On success `*package` is the handle and
+ * `*out_json` the package info. With "warmUp": true it returns at once and a
+ * library thread builds what a first drive needs (about 0.3 s on a regional
+ * package); a request that comes earlier waits only for what is left. */
 int32_t wayfarer_open(const char *path,
                               const char *options_json,
                               WayfarerPackage **package,

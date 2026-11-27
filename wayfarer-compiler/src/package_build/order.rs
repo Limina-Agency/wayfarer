@@ -103,6 +103,33 @@ pub(crate) fn within_node_edge_key(
     )
 }
 
+/// Whether `graph`'s ids are those of a package order: node `i` has id `i`,
+/// edge `i` id `PACKAGE_EDGE_ID_BASE + i` and shared info `i` id `i + 1`,
+/// edges are grouped by source and every node has an edge. A graph
+/// [`renumber_in_package_order`] has renumbered is; the package build
+/// renumbers any other graph it writes in format 3. It reads every id once.
+pub fn has_package_order_ids(graph: &RoadGraph) -> bool {
+    let network = &graph.graph;
+    let sources = network.sources();
+    let mut used = vec![false; network.node_count()];
+    for node in sources.iter().chain(network.targets()) {
+        if let Some(slot) = used.get_mut(*node as usize) {
+            *slot = true;
+        }
+    }
+    sources.is_sorted()
+        && !used.contains(&false)
+        && (0..network.node_count()).all(|node| network.node_id(node) == node as i64)
+        && (0..network.edge_count())
+            .all(|edge| network.edge_id(edge) == PACKAGE_EDGE_ID_BASE + edge as u64)
+        && graph
+            .shared_edge_infos
+            .edges()
+            .iter()
+            .enumerate()
+            .all(|(index, info)| info.shared_edge_info_id == index as u64 + 1)
+}
+
 /// Gives `graph` the ids its package should have, and stores its nodes,
 /// edges and shared infos in that order: node, edge and shared-info ids
 /// become positions in the package's order (nodes and shared infos no edge
@@ -150,6 +177,32 @@ pub fn renumber_in_package_order(graph: &mut RoadGraph) -> Result<(), RoutingPac
         )
     });
     drop(node_used);
+    renumber_in_node_order(graph, nodes, EdgeOrder::ByKey)
+}
+
+/// How [`renumber_in_node_order`] orders a node's out-edges.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeOrder {
+    /// By [`within_node_edge_key`], with targets by their new positions.
+    ByKey,
+    /// As they are stored now.
+    Kept,
+}
+
+/// Renumbers `graph` with node `nodes[i]` as node `i` (`nodes` lists every
+/// node once), a node's out-edges in `edge_order`, and its shared infos and
+/// components in the order that follows, as [`renumber_in_package_order`]
+/// does for its node order.
+fn renumber_in_node_order(
+    graph: &mut RoadGraph,
+    nodes: Vec<u32>,
+    edge_order: EdgeOrder,
+) -> Result<(), RoutingPackageError> {
+    let network = &graph.graph;
+    let node_count = network.node_count();
+    let edge_count = network.edge_count();
+    let (sources, targets) = (network.sources(), network.targets());
+    debug_assert_eq!(nodes.len(), node_count);
     // New id (= position) per current node.
     let mut node_position = vec![0u32; node_count];
     for (position, raw) in nodes.iter().enumerate() {
@@ -194,10 +247,13 @@ pub fn renumber_in_package_order(graph: &mut RoadGraph) -> Result<(), RoutingPac
         .into_par_iter()
         .map(|raw| (node_position[sources[raw as usize] as usize], raw))
         .collect::<Vec<_>>();
-    order.par_sort_unstable_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| within_node_key(a.1).cmp(&within_node_key(b.1)))
-    });
+    match edge_order {
+        EdgeOrder::ByKey => order.par_sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| within_node_key(a.1).cmp(&within_node_key(b.1)))
+        }),
+        EdgeOrder::Kept => order.par_sort_unstable(),
+    }
     let edge_raw = order.into_iter().map(|(_, raw)| raw).collect::<Vec<_>>();
     drop(node_position);
     // Position per current edge id (a dense lookup, as the package build's).
@@ -325,6 +381,26 @@ pub fn renumber_in_package_order(graph: &mut RoadGraph) -> Result<(), RoutingPac
         }
     }
     Ok(())
+}
+
+/// Renumbers `graph`, already in package order
+/// ([`renumber_in_package_order`]), by CCH rank: node `i` becomes the node of
+/// rank `i` in `order` (rank → node, over the nodes edges use, which come
+/// first), the nodes no edge uses stay after them, a node's out-edges keep
+/// their order, and shared infos and components follow as in the package
+/// order. Format 3 numbers nodes this way (`docs/design/format-3.md`,
+/// section 8.3).
+pub(crate) fn renumber_by_rank(
+    graph: &mut RoadGraph,
+    order: &[u32],
+) -> Result<(), RoutingPackageError> {
+    let node_count = graph.graph.node_count();
+    let nodes = order
+        .iter()
+        .copied()
+        .chain(order.len() as u32..node_count as u32)
+        .collect::<Vec<_>>();
+    renumber_in_node_order(graph, nodes, EdgeOrder::Kept)
 }
 
 #[cfg(test)]

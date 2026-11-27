@@ -56,12 +56,12 @@ compactly or derived from others, so read them through the accessors:
 | Data | Accessor | Layout |
 |---|---|---|
 | Exact node positions | `Sections::node_lat_lng` | Only the nodes that are not their E7 position (`NodeLatLngNodes`, sorted); the others read their E7 position. |
-| Costing inputs | `si_cost_flags[cost_tuple(shared)]` (likewise classes, speeds) | A table of distinct (flags, classes, speeds) tuples and a `u16` tuple per shared info (`SharedInfoCostTuple`). |
+| Costing inputs | `si_cost_flags[cost_tuple(shared)]` (likewise classes, speeds) | A table of distinct (flags, classes, speeds) tuples and a tuple row per shared info (`CostTuples`): `u16` in format 2 (`SharedInfoCostTuple`), `u32` in format 3 (`SharedInfoCostTuple32`). |
 | Way ids | `si_way.get(shared)`, `si_way.same_way(a, b)` | `u32`, with `WAY_ID_WIDE` marking ids kept apart (`SharedInfoWayWide*`): synthetic negative ids. |
 | Edge id → edge | `Sections::edge_for_id` | Not stored: built from `EdgeId` on first use and kept by the `PackageFile`. |
 | Name and ref tokens | `si_name[shared]`, `si_ref[shared]` (`ClassTokens`) | One token per attribute class (`SharedAttrClass`): the class key holds the name and ref. |
 | Route refs | `si_route_refs.get(shared)` | Offsets per attribute class into `SharedInfoRouteRefPool`. |
-| Shapes | `Sections::shared_shape`, `Sections::edge_shape` | `ShapeStart` holds every `SHAPE_START_STRIDE`th (16th) offset; the shapes between are skipped (`skip_shape`). |
+| Shapes | `Sections::shared_shape`, `Sections::edge_shape` | `ShapeStart` (`u32`, format 2) or `ShapeStart64` (`u64`, format 3) holds every `SHAPE_START_STRIDE`th (16th) offset (`ByteOffsets`); the shapes between are skipped (`skip_shape`). |
 | Node unit vectors | `Sections::xyz` | Fixed point (`NodeXyzFixed`), within `FIXED_XYZ_MARGIN_M` of the exact vector. |
 | In-edges, edge sources, end headings | `Sections::in_edges`, `Sections::edge_source`, `Sections::heading_end` | Derived from each edge's twin (`EdgeTwin`, the reverse edge of the same shared info) and the edges without one (`LoneInEdge`, `LoneHeadingEnd`). |
 
@@ -70,14 +70,15 @@ compactly or derived from others, so read them through the accessors:
 Version 0.x: the API may change between minor releases. The file format is
 versioned separately:
 
-- `ROUTING_PACKAGE_FORMAT_VERSION` (2 today) changes whenever the layout or
-  the meaning of a section changes. A build opens the formats
-  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=2; 0.2.0
+- `ROUTING_PACKAGE_FORMAT_VERSION` (3 since 0.5) changes whenever the layout
+  or the meaning of a section changes. A build opens the formats
+  `MIN_READ_FORMAT_VERSION..=ROUTING_PACKAGE_FORMAT_VERSION` (2..=3; 0.2.0
   dropped format 1, whose landmark sections are now reserved); a
   layout change keeps reading the previous format for at least one release,
-  and raising the minimum drops a format. Format 3 is being built behind a
-  compiler switch: its draft packages open only in a build of the same draft
-  revision (`FORMAT_3_DRAFT_REVISION`).
+  and raising the minimum drops a format. Format 3
+  (`docs/design/format-3.md`) adds optional sections without a new format:
+  an engine skips an unknown section unless it is marked REQUIRED. The
+  format-3 drafts that development builds wrote before 0.5 are refused.
 - A package records the costing model its stored costs were baked with. An
   engine re-costs a package of an older model from its stored costing inputs
   and refuses a newer one, so a change to stored costs ships the compiler and

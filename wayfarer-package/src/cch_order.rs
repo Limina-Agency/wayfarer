@@ -107,6 +107,31 @@ struct Dissection<'a> {
     stopped: AtomicBool,
 }
 
+/// A cell of the nested dissection: its subcells (the parts its separator
+/// leaves, or its connected components) and its separator, in order (a leaf
+/// cell's nodes in minimum-degree order).
+#[derive(Default)]
+struct Cell {
+    children: Vec<Cell>,
+    separator: Vec<u32>,
+}
+
+impl Cell {
+    /// The cell's order: its children's, then its separator.
+    fn flatten(self, order: &mut Vec<u32>) {
+        let mut stack = vec![(self, false)];
+        while let Some((mut cell, expanded)) = stack.pop() {
+            if expanded {
+                order.extend(cell.separator);
+                continue;
+            }
+            let children = std::mem::take(&mut cell.children);
+            stack.push((cell, true));
+            stack.extend(children.into_iter().rev().map(|child| (child, false)));
+        }
+    }
+}
+
 /// A cell's induced graph in local indexes.
 struct LocalGraph {
     first: Vec<u32>,
@@ -220,17 +245,21 @@ impl Dissection<'_> {
         parts
     }
 
-    /// The order (lowest rank first) of a cell.
-    fn order(&self, nodes: Vec<u32>, depth: usize) -> Vec<u32> {
+    /// The dissection of a cell: its subcells and its separator, whose
+    /// post-order ([`Cell::flatten`]) is the cell's order, lowest rank first.
+    fn order(&self, nodes: Vec<u32>, depth: usize) -> Cell {
         if self.stopped.load(Ordering::Relaxed) || (nodes.len() >= STOP_CHECK_CELL && (self.stop)())
         {
             self.stopped.store(true, Ordering::Relaxed);
-            return Vec::new();
+            return Cell::default();
         }
         if nodes.len() <= LEAF_CELL {
             let id = self.claim(&nodes);
             let lg = self.local_graph(&nodes, id);
-            return min_degree_order(&nodes, &lg);
+            return Cell {
+                children: Vec::new(),
+                separator: min_degree_order(&nodes, &lg),
+            };
         }
         let id = self.claim(&nodes);
         let lg = self.local_graph(&nodes, id);
@@ -238,11 +267,14 @@ impl Dissection<'_> {
         if parts.len() > 1 {
             drop(lg);
             // Components are cells of their own within the parent's.
-            let orders = parts
+            let children = parts
                 .into_par_iter()
                 .map(|part| self.order(part, depth))
                 .collect::<Vec<_>>();
-            return orders.concat();
+            return Cell {
+                children,
+                separator: Vec::new(),
+            };
         }
         let separator = self.separator(&nodes, &lg);
         if depth == 0 {
@@ -261,13 +293,14 @@ impl Dissection<'_> {
             .collect::<Vec<_>>();
         drop(lg);
         drop(nodes);
-        let orders = parts
+        let children = parts
             .into_par_iter()
             .map(|part| self.order(part, depth + 1))
             .collect::<Vec<_>>();
-        let mut order = orders.concat();
-        order.extend(separator_nodes);
-        order
+        Cell {
+            children,
+            separator: separator_nodes,
+        }
     }
 
     /// A node separator of a connected cell (local indexes): the best of
@@ -686,6 +719,272 @@ pub fn elimination_order_until(
     xyz_fixed: &[i32],
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Option<(Vec<u32>, OrderStats)> {
+    let Dissected {
+        mut chains,
+        root,
+        stats,
+        ..
+    } = dissect(graph, xyz_fixed, stop)?;
+    root.flatten(&mut chains);
+    debug_assert_eq!(chains.len(), graph.first.len().saturating_sub(1));
+    Some((chains, stats))
+}
+
+/// One node of the dissection tree of a cell-major order
+/// ([`cell_major_order_until`]), as format 3's `CchCellTree` stores it: the
+/// cell's rank range `first_rank..end_rank` holds the chain nodes it owns
+/// (`first_rank..chains_end`), its children's ranges, then its separator
+/// (`separator_start..end_rank`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellTreeEntry {
+    /// The parent's index in the tree (post-order), [`NO_PARENT`] for the
+    /// root.
+    pub parent: u32,
+    pub first_rank: u32,
+    pub chains_end: u32,
+    pub separator_start: u32,
+    pub end_rank: u32,
+}
+
+/// [`CellTreeEntry::parent`] of the root.
+pub const NO_PARENT: u32 = u32::MAX;
+/// The bytes of one [`CellTreeEntry`].
+pub const CELL_TREE_ENTRY_BYTES: usize = 20;
+
+impl CellTreeEntry {
+    pub fn to_bytes(self) -> [u8; CELL_TREE_ENTRY_BYTES] {
+        let mut bytes = [0u8; CELL_TREE_ENTRY_BYTES];
+        let values = [
+            self.parent,
+            self.first_rank,
+            self.chains_end,
+            self.separator_start,
+            self.end_rank,
+        ];
+        for (at, value) in values.iter().enumerate() {
+            bytes[at * 4..at * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8; CELL_TREE_ENTRY_BYTES]) -> Self {
+        let at =
+            |index: usize| u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().unwrap());
+        Self {
+            parent: at(0),
+            first_rank: at(1),
+            chains_end: at(2),
+            separator_start: at(3),
+            end_rank: at(4),
+        }
+    }
+}
+
+/// Whether `tree` is the dissection tree of a cell-major order of
+/// `node_count` nodes: entries in post-order, each child's range inside its
+/// parent's, between the parent's chain nodes and its separator, the
+/// children in rank order and leaving no gap, and the root (the last entry)
+/// ending at `node_count`. An empty tree is valid (no core to dissect).
+pub fn is_cell_tree(tree: &[CellTreeEntry], node_count: usize) -> bool {
+    let Some(root) = tree.last() else {
+        return true;
+    };
+    if root.parent != NO_PARENT || root.end_rank as usize != node_count {
+        return false;
+    }
+    // Where the next child of each entry must start.
+    let mut next_child = tree
+        .iter()
+        .map(|entry| entry.chains_end)
+        .collect::<Vec<_>>();
+    for (index, entry) in tree.iter().enumerate() {
+        if !(entry.first_rank <= entry.chains_end
+            && entry.chains_end <= entry.separator_start
+            && entry.separator_start <= entry.end_rank)
+        {
+            return false;
+        }
+        // Every child came before its parent and closed its gap.
+        if next_child[index] != entry.separator_start {
+            return false;
+        }
+        if index + 1 == tree.len() {
+            break;
+        }
+        let parent = entry.parent as usize;
+        if entry.parent == NO_PARENT
+            || parent <= index
+            || parent >= tree.len()
+            || next_child[parent] != entry.first_rank
+        {
+            return false;
+        }
+        next_child[parent] = entry.end_rank;
+    }
+    // Post-order: each entry's children are the subtrees right before it,
+    // so every subtree is one run of entries.
+    let mut child_count = vec![0usize; tree.len()];
+    for entry in &tree[..tree.len() - 1] {
+        child_count[entry.parent as usize] += 1;
+    }
+    let mut open = Vec::new();
+    for (index, count) in child_count.into_iter().enumerate() {
+        let Some(first) = open.len().checked_sub(count) else {
+            return false;
+        };
+        if open[first..]
+            .iter()
+            .any(|child: &usize| tree[*child].parent as usize != index)
+        {
+            return false;
+        }
+        open.truncate(first);
+        open.push(index);
+    }
+    open.len() == 1
+}
+
+/// A cell-major CCH elimination order of `graph` (rank → node), its
+/// dissection tree in post-order, and the order's stats; given up (`None`)
+/// once `stop` returns true. It has the same fill and elimination tree as
+/// [`elimination_order_until`]'s and differs only in where the nodes of
+/// degree ≤ 2 go: each goes to the deepest dissection cell that owns one of
+/// its neighbours when it is eliminated, at the start of that cell's range,
+/// so every cell, at every level, is one range of ranks. Chain nodes of
+/// components without a core come first. Within each group nodes keep their
+/// relative order.
+pub fn cell_major_order_until(
+    graph: &NodeGraph,
+    xyz_fixed: &[i32],
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Option<(Vec<u32>, Vec<CellTreeEntry>, OrderStats)> {
+    let n = graph.first.len().saturating_sub(1);
+    let Dissected {
+        chains,
+        chain_neighbours,
+        root,
+        stats,
+    } = dissect(graph, xyz_fixed, stop)?;
+    // The tree in an arena, in pre-order: each cell's parent, depth,
+    // children and separator.
+    struct Node {
+        parent: u32,
+        depth: u32,
+        children: Vec<u32>,
+        separator: Vec<u32>,
+    }
+    let mut arena = Vec::<Node>::new();
+    let mut owner = vec![NO_NODE; n];
+    // No core (every node has degree ≤ 2 in the end): no tree.
+    let mut stack = if root.children.is_empty() && root.separator.is_empty() {
+        Vec::new()
+    } else {
+        vec![(root, NO_NODE, 0u32)]
+    };
+    while let Some((cell, parent, depth)) = stack.pop() {
+        let index = arena.len() as u32;
+        if parent != NO_NODE {
+            arena[parent as usize].children.push(index);
+        }
+        for node in &cell.separator {
+            owner[*node as usize] = index;
+        }
+        arena.push(Node {
+            parent,
+            depth,
+            children: Vec::new(),
+            separator: cell.separator,
+        });
+        // Children are pushed in reverse so that they are numbered, and
+        // listed in their parent, in order.
+        stack.extend(
+            cell.children
+                .into_iter()
+                .rev()
+                .map(|child| (child, index, depth + 1)),
+        );
+    }
+    // A chain node's owner: the deeper of its neighbours' owners when it
+    // was eliminated (its later chain neighbours are resolved first).
+    for (at, node) in chains.iter().enumerate().rev() {
+        let mut best = NO_NODE;
+        for neighbour in chain_neighbours[at] {
+            if neighbour == NO_NODE {
+                continue;
+            }
+            let candidate = owner[neighbour as usize];
+            if candidate != NO_NODE
+                && (best == NO_NODE || arena[candidate as usize].depth > arena[best as usize].depth)
+            {
+                best = candidate;
+            }
+        }
+        owner[*node as usize] = best;
+    }
+    // Each cell's chain nodes, in elimination order.
+    let mut owned = vec![Vec::new(); arena.len()];
+    let mut order = Vec::with_capacity(n);
+    for node in &chains {
+        match owner[*node as usize] {
+            NO_NODE => order.push(*node),
+            cell => owned[cell as usize].push(*node),
+        }
+    }
+    drop(owner);
+    // Ranks: each cell's chains, its children, its separator; the tree in
+    // post-order.
+    let mut post_index = vec![NO_NODE; arena.len()];
+    let mut entries = Vec::with_capacity(arena.len());
+    let mut first = vec![(0u32, 0u32); arena.len()];
+    let mut stack = Vec::new();
+    if !arena.is_empty() {
+        stack.push((0u32, false));
+    }
+    while let Some((index, done)) = stack.pop() {
+        let at = index as usize;
+        if !done {
+            let first_rank = order.len() as u32;
+            order.extend(std::mem::take(&mut owned[at]));
+            first[at] = (first_rank, order.len() as u32);
+            stack.push((index, true));
+            stack.extend(arena[at].children.iter().rev().map(|child| (*child, false)));
+            continue;
+        }
+        let separator_start = order.len() as u32;
+        order.extend(std::mem::take(&mut arena[at].separator));
+        post_index[at] = entries.len() as u32;
+        entries.push(CellTreeEntry {
+            parent: arena[at].parent,
+            first_rank: first[at].0,
+            chains_end: first[at].1,
+            separator_start,
+            end_rank: order.len() as u32,
+        });
+    }
+    for entry in &mut entries {
+        if entry.parent != NO_NODE {
+            entry.parent = post_index[entry.parent as usize];
+        }
+    }
+    debug_assert_eq!(order.len(), n);
+    debug_assert!(is_cell_tree(&entries, n));
+    Some((order, entries, stats))
+}
+
+/// The nodes of degree ≤ 2 in elimination order, with their (up to two)
+/// neighbours when eliminated, and the core's dissection.
+struct Dissected {
+    chains: Vec<u32>,
+    chain_neighbours: Vec<[u32; 2]>,
+    root: Cell,
+    stats: OrderStats,
+}
+
+fn dissect(
+    graph: &NodeGraph,
+    xyz_fixed: &[i32],
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Option<Dissected> {
     if stop() {
         return None;
     }
@@ -701,7 +1000,8 @@ pub fn elimination_order_until(
         first[u] as usize..(first[u] + len[u]) as usize
     };
     let mut eliminated = vec![false; n];
-    let mut order = Vec::with_capacity(n);
+    let mut order = Vec::new();
+    let mut chain_neighbours = Vec::new();
     let mut stack = (0..n as u32)
         .rev()
         .filter(|node| len[*node as usize] <= 2)
@@ -716,6 +1016,9 @@ pub fn elimination_order_until(
         let mut neighbours = [0u32; 2];
         let count = len[vi] as usize;
         neighbours[..count].copy_from_slice(&head[list(&len, vi)]);
+        let mut recorded = [NO_NODE; 2];
+        recorded[..count].copy_from_slice(&neighbours[..count]);
+        chain_neighbours.push(recorded);
         len[vi] = 0;
         for a in &neighbours[..count] {
             let range = list(&len, *a as usize);
@@ -775,14 +1078,21 @@ pub fn elimination_order_until(
         stop,
         stopped: AtomicBool::new(false),
     };
-    let core_order = dissection.order(core, 0);
+    let root = if core.is_empty() {
+        Cell::default()
+    } else {
+        dissection.order(core, 0)
+    };
     if dissection.stopped.load(Ordering::Relaxed) {
         return None;
     }
     stats.top_separator = dissection.top_separator.load(Ordering::Relaxed) as usize;
-    order.extend(core_order);
-    debug_assert_eq!(order.len(), n);
-    Some((order, stats))
+    Some(Dissected {
+        chains: order,
+        chain_neighbours,
+        root,
+        stats,
+    })
 }
 
 /// Rank per node of an elimination `order` (rank → node).
@@ -869,6 +1179,201 @@ mod tests {
         let asked = AtomicU32::new(0);
         let stop = || asked.fetch_add(1, Ordering::Relaxed) >= 1;
         assert!(elimination_order_until(&graph, &xyz, &stop).is_none());
+    }
+
+    /// The filled graph of `order` as node pairs (lower node first) and
+    /// each node's parent in the elimination tree (`NO_NODE` for a root).
+    fn fill(
+        graph: &NodeGraph,
+        order: &[u32],
+    ) -> (std::collections::BTreeSet<(u32, u32)>, Vec<u32>) {
+        let n = order.len();
+        let rank = ranks(order);
+        let mut up = (0..n)
+            .map(|_| std::collections::BTreeSet::new())
+            .collect::<Vec<_>>();
+        for node in 0..n as u32 {
+            for w in graph.neighbours(node) {
+                if rank[*w as usize] > rank[node as usize] {
+                    up[rank[node as usize] as usize].insert(rank[*w as usize]);
+                }
+            }
+        }
+        let mut arcs = std::collections::BTreeSet::new();
+        let mut parent = vec![NO_NODE; n];
+        for r in 0..n {
+            let set = std::mem::take(&mut up[r]);
+            for w in &set {
+                let (a, b) = (order[r], order[*w as usize]);
+                arcs.insert((a.min(b), a.max(b)));
+            }
+            if let Some(p) = set.iter().next().copied() {
+                parent[order[r] as usize] = order[p as usize];
+                for w in set.iter().skip(1) {
+                    up[p as usize].insert(*w);
+                }
+            }
+        }
+        (arcs, parent)
+    }
+
+    /// A grid with holes, dangling chains, a tree and isolated paths and
+    /// cycles: every kind of node of degree ≤ 2.
+    fn ragged(side: u32, seed: u64) -> (NodeGraph, Vec<i32>) {
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut pairs = Vec::new();
+        let mut positions = Vec::new();
+        for row in 0..side {
+            for column in 0..side {
+                positions.push((
+                    50.0 + f64::from(row) * 1e-3,
+                    19.0 + f64::from(column) * 1e-3,
+                ));
+                let node = row * side + column;
+                if column + 1 < side && next() % 5 != 0 {
+                    pairs.push((node, node + 1));
+                }
+                if row + 1 < side && next() % 5 != 0 {
+                    pairs.push((node, node + side));
+                }
+            }
+        }
+        let mut add =
+            |positions: &mut Vec<(f64, f64)>, from: Option<u32>, length: u32, ring: bool| {
+                let start = positions.len() as u32;
+                for at in 0..length {
+                    positions.push((
+                        49.0 + f64::from(start + at) * 1e-4,
+                        18.0 + f64::from(at) * 1e-4,
+                    ));
+                    if at > 0 {
+                        pairs.push((start + at - 1, start + at));
+                    }
+                }
+                if let Some(from) = from {
+                    pairs.push((from, start));
+                }
+                if ring {
+                    pairs.push((start, start + length - 1));
+                }
+            };
+        for at in 0..side {
+            add(
+                &mut positions,
+                Some(at * 7 % (side * side)),
+                1 + at % 5,
+                false,
+            );
+        }
+        add(&mut positions, None, 9, false);
+        add(&mut positions, None, 6, true);
+        add(&mut positions, None, 1, false);
+        let n = positions.len();
+        let mut targets = vec![Vec::new(); n];
+        for (a, b) in &pairs {
+            targets[*a as usize].push(*b);
+            targets[*b as usize].push(*a);
+        }
+        let mut first_out = vec![0u32];
+        let mut target = Vec::new();
+        for list in &targets {
+            target.extend(list);
+            first_out.push(target.len() as u32);
+        }
+        let xyz = positions
+            .iter()
+            .flat_map(|(lat, lng)| crate::format::fixed_xyz(crate::format::unit_xyz(*lat, *lng)))
+            .collect();
+        (NodeGraph::new(&first_out, &target), xyz)
+    }
+
+    /// The cell-major order fills the graph exactly as the plain one does,
+    /// with the same elimination tree, and every cell is one rank range.
+    #[test]
+    fn a_cell_major_order_keeps_the_fill_and_the_elimination_tree() {
+        for (side, seed) in [(12, 1), (30, 7), (45, 99)] {
+            let (graph, xyz) = ragged(side, seed);
+            let (plain, plain_stats) = elimination_order(&graph, &xyz);
+            let (order, tree, stats) = cell_major_order_until(&graph, &xyz, &|| false).unwrap();
+            assert_eq!(stats, plain_stats);
+            assert!(is_permutation(&ranks(&order)));
+            assert_eq!(fill(&graph, &order), fill(&graph, &plain), "side {side}");
+            let n = order.len();
+            assert!(is_cell_tree(&tree, n));
+            assert!(!tree.is_empty());
+            // The isolated paths and the ring have no core: they come first,
+            // in the plain order's relative order.
+            let front = tree.iter().map(|entry| entry.first_rank).min().unwrap() as usize;
+            assert!(front >= 16, "{front}");
+            let plain_rank = ranks(&plain);
+            assert!(
+                order[..front]
+                    .windows(2)
+                    .all(|pair| plain_rank[pair[0] as usize] < plain_rank[pair[1] as usize])
+            );
+            // A cell's chain nodes join only nodes of the cell or of its
+            // ancestors' separators.
+            let rank = ranks(&order);
+            for entry in &tree {
+                for r in entry.first_rank..entry.chains_end {
+                    let node = order[r as usize];
+                    for w in graph.neighbours(node) {
+                        let rw = rank[*w as usize];
+                        assert!(rw >= entry.first_rank, "rank {r} joins {rw}");
+                    }
+                }
+            }
+            // Bytes round-trip.
+            for entry in &tree {
+                assert_eq!(CellTreeEntry::from_bytes(&entry.to_bytes()), *entry);
+            }
+        }
+        // No core at all: no tree.
+        let graph = NodeGraph::new(&[0, 1, 2], &[1, 0]);
+        let xyz = [0i32; 6];
+        let (order, tree, _) = cell_major_order_until(&graph, &xyz, &|| false).unwrap();
+        assert_eq!((order.len(), tree.len()), (2, 0));
+        assert!(cell_major_order_until(&graph, &xyz, &|| true).is_none());
+    }
+
+    #[test]
+    fn cell_trees_are_checked() {
+        let leaf = |parent, first_rank, chains_end, separator_start, end_rank| CellTreeEntry {
+            parent,
+            first_rank,
+            chains_end,
+            separator_start,
+            end_rank,
+        };
+        // Two leaves under a root: 0..2 front, root chains 2..3, leaves
+        // 3..5 and 5..8, root separator 8..10.
+        let good = vec![
+            leaf(2, 3, 3, 3, 5),
+            leaf(2, 5, 6, 6, 8),
+            leaf(NO_PARENT, 2, 3, 8, 10),
+        ];
+        assert!(is_cell_tree(&good, 10));
+        assert!(is_cell_tree(&[], 4));
+        assert!(!is_cell_tree(&good, 11));
+        let cases: [fn(&mut Vec<CellTreeEntry>); 6] = [
+            |tree| tree[1].first_rank = 6,
+            |tree| tree[0].parent = 0,
+            |tree| tree[0].parent = 5,
+            |tree| tree[2].parent = 1,
+            |tree| tree[1].chains_end = 9,
+            |tree| tree.swap(0, 1),
+        ];
+        for (at, edit) in cases.iter().enumerate() {
+            let mut tree = good.clone();
+            edit(&mut tree);
+            assert!(!is_cell_tree(&tree, 10), "case {at}");
+        }
     }
 
     #[test]

@@ -655,6 +655,46 @@ pub fn profile_off_road_speed_mps(profile: MobilityProfile) -> f64 {
     speed_kph.max(1.0) * 1000.0 / 3600.0
 }
 
+/// Cost per second of a costed off-network access leg for a walking profile
+/// (OnFoot, Legged), on top of its time: twice the time, so a walker meets
+/// the road network rather than cutting across blocks beside a street.
+pub const ACCESS_COST_FACTOR_WALKING: f64 = 2.0;
+/// [`ACCESS_COST_FACTOR_WALKING`] for the vehicle profiles (Wheeled,
+/// Tracked, Emergency).
+pub const ACCESS_COST_FACTOR_VEHICLE: f64 = 1.5;
+
+/// How a profile's costed off-network access leg is priced: the pace it moves
+/// at (m/s) and the cost per second of that time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccessPricing {
+    /// Travel speed across open ground, m/s.
+    pub pace_mps: f64,
+    /// Cost per second of access time (at least 1).
+    pub cost_factor: f64,
+}
+
+/// The default pricing of a costed access leg for `profile`.
+///
+/// The pace is [`profile_off_road_speed_mps`], so access legs, direct legs and
+/// the SAR `off_network` report agree on time. That pace is close to (for
+/// Legged, above) the profile's pace on paths, so a cost factor on top keeps
+/// roads preferred: [`ACCESS_COST_FACTOR_WALKING`] for walkers (a cost pace
+/// of 0.6 to 0.8 m/s) and [`ACCESS_COST_FACTOR_VEHICLE`] for vehicles. Query
+/// time only: nothing here is baked into packages, so
+/// [`COSTING_MODEL_VERSION`] does not depend on it.
+pub fn profile_access(profile: MobilityProfile) -> AccessPricing {
+    let cost_factor = match ProfilePolicy::from_profile(profile) {
+        ProfilePolicy::OnFoot(_) | ProfilePolicy::Legged(_) => ACCESS_COST_FACTOR_WALKING,
+        ProfilePolicy::Wheeled(_) | ProfilePolicy::Tracked(_) | ProfilePolicy::Emergency(_) => {
+            ACCESS_COST_FACTOR_VEHICLE
+        }
+    };
+    AccessPricing {
+        pace_mps: profile_off_road_speed_mps(profile),
+        cost_factor,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostedEdge {
     pub cost: f64,

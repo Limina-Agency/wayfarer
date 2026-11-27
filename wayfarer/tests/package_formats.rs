@@ -98,7 +98,14 @@ fn resigned(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-/// The byte range of `section` in package `bytes`.
+/// The frozen format-2 fixture. The checks below edit format 2's positional
+/// section table; `package_format_3.rs` edits format 3's tagged one, and
+/// both formats share the section checks.
+fn format_2_fixture() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/format-2/short_road.mrt")
+}
+
+/// The byte range of `section` in format-2 package `bytes`.
 fn section_range(bytes: &[u8], section: Section) -> std::ops::Range<usize> {
     let entry = HEADER_FIXED_BYTES + section as usize * TABLE_ENTRY_BYTES;
     let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
@@ -110,7 +117,7 @@ fn section_range(bytes: &[u8], section: Section) -> std::ops::Range<usize> {
 /// the slot held the landmark count of format 1.
 #[test]
 fn a_nonzero_reserved_header_count_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let mut bytes = std::fs::read(path).unwrap();
     let at = HEADER_COUNTS + 6 * 8;
     bytes[at..at + 8].copy_from_slice(&1u64.to_le_bytes());
@@ -126,7 +133,7 @@ fn a_nonzero_reserved_header_count_is_rejected() {
 /// (found by the `package` fuzz target).
 #[test]
 fn a_negative_edge_cost_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let mut bytes = std::fs::read(path).unwrap();
     let entry = HEADER_FIXED_BYTES + Section::EdgeCost as usize * TABLE_ENTRY_BYTES;
     let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
@@ -142,7 +149,7 @@ fn a_negative_edge_cost_is_rejected() {
 /// target with `--debug-assertions`).
 #[test]
 fn overflowing_header_counts_are_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let bytes = std::fs::read(path).unwrap();
     // Node, edge, shared-info, restriction and column counts, and the
     // reserved slot.
@@ -169,7 +176,7 @@ fn overflowing_header_counts_are_rejected() {
 /// when the package opens: the potentials index by it.
 #[test]
 fn a_cch_order_that_is_not_a_permutation_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let mut bytes = std::fs::read(path).unwrap();
     let entry = HEADER_FIXED_BYTES + Section::CchRank as usize * TABLE_ENTRY_BYTES;
     let offset = u64::from_le_bytes(bytes[entry..entry + 8].try_into().unwrap()) as usize;
@@ -183,12 +190,40 @@ fn a_cch_order_that_is_not_a_permutation_is_rejected() {
     assert!(RoutingPackage::from_bytes(&resigned(bytes)).is_err());
 }
 
+/// A package whose edge twins don't pair up is rejected when it opens: a
+/// twin of itself, one out of range, and one that doesn't point back.
+#[test]
+fn edge_twins_that_do_not_pair_up_are_rejected() {
+    let path = format_2_fixture();
+    let bytes = std::fs::read(path).unwrap();
+    let range = section_range(&bytes, Section::EdgeTwin);
+    let edges = range.len() / 4;
+    assert!(edges >= 2, "the fixture has {edges} edges");
+    let mut tried = 0;
+    for (edge, twin) in [(0, 0), (1, u32::MAX - 1), (edges - 1, 0)] {
+        let mut bytes = bytes.clone();
+        let at = range.start + edge * 4;
+        let old = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        if old == twin {
+            continue;
+        }
+        bytes[at..at + 4].copy_from_slice(&twin.to_le_bytes());
+        let error = RoutingPackage::from_bytes(&resigned(bytes)).unwrap_err();
+        assert!(
+            error.to_string().contains("twins"),
+            "edge {edge} twin {twin}: {error}"
+        );
+        tried += 1;
+    }
+    assert!(tried >= 2);
+}
+
 /// A package with an edge heading of 360 degrees or more is rejected when it
 /// opens; costing folded heading differences with `360 - delta`, which
 /// overflowed (found by the `package` fuzz target with debug assertions).
 #[test]
 fn an_out_of_range_heading_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let bytes = std::fs::read(path).unwrap();
     let headings = section_range(&bytes, Section::EdgeHeadingStart);
     assert!(headings.len() >= 2, "the fixture stores edge headings");
@@ -233,11 +268,15 @@ fn a_chain_mark_at_a_junction_is_rejected() {
     let manifest = build_road_graph_manifest(&graph, &container);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("junction.mrt");
+    // Format 2, whose positional table `section_range` reads.
     write_package(
         &graph,
         Some(&manifest),
         &path,
-        &PackageBuildOptions::default(),
+        &PackageBuildOptions {
+            package_format: wayfarer_package::format::PackageFormat::V2,
+            ..PackageBuildOptions::default()
+        },
     )
     .unwrap();
     let bytes = std::fs::read(&path).unwrap();
@@ -277,7 +316,7 @@ fn a_chain_mark_at_a_junction_is_rejected() {
 /// (found by the `package` fuzz target with debug assertions).
 #[test]
 fn an_overflowing_edge_id_base_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let bytes = std::fs::read(path).unwrap();
     for base in [u64::MAX, u64::MAX - 1] {
         let mut bytes = bytes.clone();
@@ -295,7 +334,7 @@ fn an_overflowing_edge_id_base_is_rejected() {
 /// `package` fuzz target with debug assertions).
 #[test]
 fn an_overflowing_request_grid_is_rejected() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/routing/short_road.mrt");
+    let path = format_2_fixture();
     let bytes = std::fs::read(path).unwrap();
     let grid = section_range(&bytes, Section::RequestGrid);
     assert_eq!(grid.len(), 5 * 8, "[min lat, min lng, cell, rows, cols]");

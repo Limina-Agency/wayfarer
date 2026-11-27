@@ -380,10 +380,11 @@ impl CchTopology {
         };
         let n = g.node_count;
         let started = Instant::now();
-        if g.cch_rank.len() != n {
+        let ranks = g.cch_ranks()?;
+        if ranks.len() != n {
             return None;
         }
-        let (rank, node) = rank_and_node(g.cch_rank)?;
+        let (rank, node) = rank_and_node(&ranks)?;
         stats.order_ms = started.elapsed().as_secs_f64() * 1e3;
 
         let started = Instant::now();
@@ -440,11 +441,12 @@ impl CchTopology {
         };
         let started = Instant::now();
         let graph = wayfarer_package::cch_order::NodeGraph::new(g.first_out, g.edge_target);
-        if g.cch_rank.len() != g.node_count || !is_permutation(g.cch_rank) {
+        let rank = g.cch_ranks()?;
+        if rank.len() != g.node_count || !is_permutation(&rank) {
             return None;
         }
         let mut order = vec![0u32; g.node_count];
-        for (node, r) in g.cch_rank.iter().enumerate() {
+        for (node, r) in rank.iter().enumerate() {
             order[*r as usize] = node as u32;
         }
         stats.order_ms = started.elapsed().as_secs_f64() * 1e3;

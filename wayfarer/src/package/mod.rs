@@ -134,6 +134,25 @@ impl RoutePackageMemoryProfile {
     }
 }
 
+/// A warm-up started by [`RoutingPackage::warm_up_in_background`]. Dropping
+/// it lets the warm-up run on to its end.
+#[derive(Debug)]
+pub struct WarmUp {
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl WarmUp {
+    /// Whether the warm-up has ended.
+    pub fn is_finished(&self) -> bool {
+        self.thread.is_finished()
+    }
+
+    /// Waits for the warm-up to end.
+    pub fn wait(self) {
+        let _ = self.thread.join();
+    }
+}
+
 /// A routing package opened for queries: the validated file plus the
 /// query-time state the engine keeps per package (pooled search states,
 /// derived cost columns, complex-restriction automata, the matrix thread
@@ -308,17 +327,16 @@ impl RoutingPackage {
         self.memory
     }
 
-    /// Faults the mapped file in, pools one search state, derives the cost
-    /// column a default drive starts on and builds the potentials it uses
-    /// (the topology and the drive column's metric; other columns' metrics
-    /// are customized by their first search, or by
-    /// [`Self::prepare_potentials`]), as a service does in the background
-    /// after opening a source.
+    /// Does the work a default drive's first request would otherwise do,
+    /// the largest part first: derives the cost column a default drive
+    /// starts on and builds the potentials it uses (the topology and the
+    /// drive column's metric; other columns' metrics are customized by their
+    /// first search, or by [`Self::prepare_potentials`]), pools one search
+    /// state, then faults the rest of the mapped file in. A service does
+    /// this in the background after opening a source;
+    /// [`Self::warm_up_in_background`] does it on a thread of its own.
     /// Returns the bytes touched.
     pub fn prefetch(&self) -> usize {
-        let bytes = self.file.prefetch_pages();
-        let state = self.take_state();
-        self.return_state(state);
         // The strict column of a default drive (see `destination`), so that
         // it is not derived on the first request.
         let options = crate::types::RouteOptions::default();
@@ -326,7 +344,27 @@ impl RoutingPackage {
         let strict = self.confines_destination_only(&options, wheeled);
         self.request_column_sar(wheeled, &options.costing, !strict, None)
             .column(&self.view());
-        bytes
+        let state = self.take_state();
+        self.return_state(state);
+        self.file.prefetch_pages()
+    }
+
+    /// Starts [`Self::prefetch`] on a thread of its own and returns at once:
+    /// the opt-in warm-up for hosts that open a package and route soon
+    /// after. A request that comes before it ends waits only for the part it
+    /// needs that is still being built (the topology, a metric), and does
+    /// the rest of its own work meanwhile. The thread holds the package
+    /// until it ends, so closing the last handle early frees the package
+    /// only then. `None` when the thread could not be started.
+    pub fn warm_up_in_background(self: &std::sync::Arc<Self>) -> Option<WarmUp> {
+        let package = self.clone();
+        std::thread::Builder::new()
+            .name("wayfarer-warm-up".into())
+            .spawn(move || {
+                package.prefetch();
+            })
+            .ok()
+            .map(|thread| WarmUp { thread })
     }
 
     /// Builds the CCH lower-bound potentials route, matrix and overlay

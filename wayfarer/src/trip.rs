@@ -601,11 +601,14 @@ pub(crate) fn route(
         // A waypoint is snapped once: the leg leaving it starts where the leg
         // arriving at it ended, facing on, so it neither lands on another edge
         // nor turns back unannounced. When that cannot route, the waypoint is
-        // snapped afresh (and any gap shows in the stitched result).
+        // snapped afresh (and any gap shows in the stitched result). A
+        // waypoint reached by a costed access stretch is left the same way,
+        // by a stretch of its own (`crate::access`).
         let continued = segment_index
             .checked_sub(1)
             .and_then(|previous| segments[previous].as_ref())
             .and_then(RouteSegment::as_routed)
+            .filter(|previous| previous.destination.access.is_none())
             .map(|previous| continuing_request(&request, &previous.destination))
             .and_then(|continued| engine.route_leg(continued).ok());
         let route = match continued {
@@ -1832,6 +1835,12 @@ fn validate_options(options: &RouteOptions) -> Result<(), RouteFailure> {
     if options.candidate_limit > crate::limits::MAX_REQUEST_CANDIDATES {
         return Err(too_large("candidate limit"));
     }
+    if let Some(off_network) = &options.off_network {
+        off_network.validate().map_err(|error| match error {
+            RouteError::InvalidRequest { reason } => invalid(reason),
+            _ => invalid("off_network"),
+        })?;
+    }
     if options.max_correlation_distance_m > crate::limits::MAX_CORRELATION_DISTANCE_M {
         return Err(too_large("correlation distance"));
     }
@@ -2270,6 +2279,7 @@ mod tests {
             score: 1.0,
             score_breakdown: Default::default(),
             confidence: 1.0,
+            access: None,
         };
 
         let continued = continuing_request(&request, &arrival);

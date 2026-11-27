@@ -19,6 +19,17 @@
         "$ref": "#/$defs/CorrelatedLocation"
       }
     },
+    "polygons": {
+      "description": "With the request's `polygons`, the polygon options as applied: the\ngrid's cell size, the spread and the denoise share.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RouteIsochronePolygonOptions"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "settledNodeCount": {
       "type": "integer",
       "format": "uint",
@@ -43,9 +54,43 @@
     "truncated"
   ],
   "$defs": {
+    "CandidateAccess": {
+      "description": "The costed access stretch of one correlation candidate: from the\nrequested `point` in a straight line to the candidate's snap point, its\nlength the candidate's `distance_m`.",
+      "type": "object",
+      "properties": {
+        "costFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "paceMps": {
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "The requested point the stretch runs from (an origin) or to (a\ndestination).",
+          "$ref": "#/$defs/GeoPoint"
+        }
+      },
+      "required": [
+        "point",
+        "paceMps",
+        "costFactor"
+      ]
+    },
     "CorrelatedLocation": {
       "type": "object",
       "properties": {
+        "access": {
+          "description": "The costed access stretch from the requested point, when the request\nhas `offNetwork` (see [`crate::access`]): searches then charge it in\nfull instead of a relative approach penalty, and results include it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "componentSize": {
           "type": [
             "integer",
@@ -285,6 +330,44 @@
         "unknown"
       ]
     },
+    "GeoJsonMultiPolygon": {
+      "description": "A GeoJSON `MultiPolygon` geometry (RFC 7946): polygons of linear rings,\neach closed (its last position repeats its first), the first ring of a\npolygon its outer boundary (counterclockwise) and the others its holes\n(clockwise), in `[longitude, latitude]` positions rounded to 6 decimals,\nas [`GeoJsonLineString`]. No polygon at all is an empty `coordinates`.",
+      "type": "object",
+      "properties": {
+        "coordinates": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/GeoJsonMultiPolygonType"
+        }
+      },
+      "required": [
+        "type",
+        "coordinates"
+      ]
+    },
+    "GeoJsonMultiPolygonType": {
+      "description": "The type member of a GeoJSON polygon geometry; always `MultiPolygon` here.",
+      "type": "string",
+      "enum": [
+        "MultiPolygon"
+      ]
+    },
     "GeoPoint": {
       "type": "object",
       "properties": {
@@ -387,6 +470,17 @@
         },
         "metric": {
           "$ref": "#/$defs/RouteIsochroneMetric"
+        },
+        "polygon": {
+          "description": "With `polygons`, the bucket drawn as a GeoJSON `MultiPolygon` (see\n`RouteIsochronePolygonOptions`); empty when the bucket reaches\nnothing.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoJsonMultiPolygon"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -411,6 +505,37 @@
           "const": "distance_m"
         }
       ]
+    },
+    "RouteIsochronePolygonOptions": {
+      "description": "How an isochrone draws its buckets as polygons (see\n`RouteIsochroneRequest::polygons`). The polygon is drawn on a square grid\nover the reached roads: a grid node is inside when it lies within\n`spread_m` of a reached road, where on a boundary fragment the spread\nshrinks to what remains of the contour at the profile's off-road pace\n(metres for a distance contour), down to nothing where the fragment ends.\nRings follow the grid (marching squares), so the polygon is exact only to\nabout a cell; they never touch, before or after rounding. The bucket's `edgeIds` and boundary fragments stay the\nexact answer; the polygon is a function of them and the package's road\nshapes. Every value is optional; the result's `polygons` echoes the\nvalues used.",
+      "type": "object",
+      "properties": {
+        "denoise": {
+          "description": "Drops each polygon whose area is less than this share of the largest\npolygon's in its bucket (0 to 1; by default 0, which keeps every\none). Holes are kept.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "resolutionM": {
+          "description": "The grid's cell size in metres, from 2 to 10,000. By default the\nlarger side of the reached area over 256, rounded up to whole metres\nand kept within 10 m to 500 m.\nA grid that would exceed `limits::MAX_ISOCHRONE_POLYGON_GRID_NODES`\nnodes takes larger cells.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "spreadM": {
+          "description": "How far off a reached road the polygon reaches, in metres, at most\n10,000. By default 1.5 cells; never less than 0.75 of a cell, so\nthat every reached road meets the grid.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

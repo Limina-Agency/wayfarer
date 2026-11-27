@@ -9,7 +9,7 @@ use crate::costing::{CostedEdge, CostingPolicy, EdgeCostDecision};
 use crate::graph_view::{GraphViewEdge, PackageGraphView};
 use crate::package::RoutingPackage;
 use crate::package::search::analysis::request_edge_cost;
-use crate::package::search::approach_cost;
+use crate::package::search::{approach_cost, unreported_approach_cost};
 use crate::route_leg::build_route_result;
 use crate::types::{
     CorrelatedLocation, CorrelationPolicy, GeoPoint, LegRequest, LegResult, RouteAlternative,
@@ -220,6 +220,11 @@ impl RoutingEngine {
         }
         self.validate_sar(&request.options, request.profile)
             .map_err(|error| RouteFailure::new(error, RouteDiagnostics::default()))?;
+        if let Some(off_network) = &request.options.off_network {
+            off_network
+                .validate()
+                .map_err(|error| RouteFailure::new(error, RouteDiagnostics::default()))?;
+        }
         if !view.has_route_edges_for_profile(request.profile) {
             return Err(RouteFailure::new(
                 RouteError::ImpossibleMobilityProfile {
@@ -517,12 +522,15 @@ impl RoutingEngine {
         let primary_warning_count =
             warning_edge_count(&primary.edge_ids, &request.options.warning_edge_ids);
         // Routes compete on their cost with approach costs, which their
-        // reported costs leave out (see `approach_costs`).
+        // searches' costs leave out (see `approach_costs`).
         let total = |cost: f64, origin: &CorrelatedLocation, destination: &CorrelatedLocation| {
             cost + approach_cost(origin, &correlated.origins)
                 + approach_cost(destination, &correlated.destinations)
         };
-        let primary_total = total(primary.cost, &primary.origin, &primary.destination);
+        // The primary's legs already include its costed access stretches.
+        let primary_total = primary.cost
+            + unreported_approach_cost(&primary.origin, &correlated.origins)
+            + unreported_approach_cost(&primary.destination, &correlated.destinations);
 
         for attempt in 0..policy.requested_alternative_count.saturating_mul(3).max(1) {
             primary.diagnostics.alternative_attempt_count += 1;
@@ -704,7 +712,10 @@ impl RoutingEngine {
             cost + approach_cost(origin, &correlated.origins)
                 + approach_cost(destination, &correlated.destinations)
         };
-        let primary_total = total(primary.cost, &primary.origin, &primary.destination);
+        // The primary's legs already include its costed access stretches.
+        let primary_total = primary.cost
+            + unreported_approach_cost(&primary.origin, &correlated.origins)
+            + unreported_approach_cost(&primary.destination, &correlated.destinations);
         let mut half_request = request.clone();
         half_request
             .options
@@ -1119,6 +1130,7 @@ fn via_location(record: &GraphViewEdge, fraction: f64) -> CorrelatedLocation {
         score: 1.0,
         score_breakdown: Default::default(),
         confidence: 1.0,
+        access: None,
     }
 }
 

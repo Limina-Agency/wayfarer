@@ -1,13 +1,17 @@
 # Package format 3
 
-Status: being built behind an off-by-default compiler switch (decision F1
-of the tranche after 0.4; `PackageFormat::V3`, `wayfarer compile
---package-format 3`, hidden). Done: steps 1 to 4 of section 12 (the tagged
-table, both hashes, `PackageParams`, retired reserved sections, implied ids;
-`ProfileSlots` and the u16 masks; versioned attribute-class records;
-`RegionInfo`, `NodeSourceId` and `contentHash` on the wire), draft
-revision 4. Off-road terrain stays out of format 3 (`format-4.md`). Written against `main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one package-format bump left
-before 1.0 (roadmap 7.12, release window 0.12 to 0.39) and is frozen at 0.90.
+Status: released in 0.5 (Anton, 2026-11-24): a compile writes format 3 by
+default, and the engine reads formats 2 and 3. All seven steps of section 12
+are done (the tagged table, both hashes, `PackageParams`, retired reserved
+sections, implied ids; `ProfileSlots` and the u16 masks; versioned
+attribute-class records; `RegionInfo`, `NodeSourceId` and `contentHash` on
+the wire; node id = CCH rank with chains per cell and `CchCellTree`; u64
+byte offsets, the lattice request grid and u32 cost tuple rows; the release).
+The draft revisions 1 to 6 that development builds wrote are refused.
+Off-road terrain stays out of format 3 (`format-4.md`). Written against
+`main` at `5cb573c` (format 2, tile-ready ids). Format 3 is the one
+package-format bump before 1.0 (roadmap 7.12; it shipped earlier than the
+0.12 to 0.39 window first planned) and is frozen at 0.90.
 Every 1.x engine must read every package a 1.x compiler writes, so whatever
 format 3 leaves out has to arrive in 1.x as an optional section or not at all.
 
@@ -450,7 +454,8 @@ Scalars a query depends on, as sorted 16-byte entries `key u32, flags u32
 | 7 | reach cap that `NodeReachSaturated` answers for (from `RequestMeta`) | yes |
 | 8 | package time zone, as a string id (W0, COMP 2's `--time-zone`) | yes, once W0 reads it |
 | 9 | ISO country code, as a string id | no |
-| 10 | draft revision (only while format 3 is being built on `main`, section 12) | yes |
+| 10 | retired: the draft revision development builds wrote before the release (section 12); a package with it is refused as `Outdated` | yes |
+| 11 | request grid spacing in lattice ticks: latitude in the low 32 bits, longitude in the high 32; each must divide a degree (432,000 ticks, section 9) | yes |
 
 An unknown key with bit 0 set refuses the package (`TooNew`); others are
 skipped. `RequestMeta` (id 47) is retired: its node and shared-info id bases
@@ -530,8 +535,8 @@ by any 1.x engine.
   (−7.9 %, *measured*). The edge id lookup the engine builds on first use
   (`edge_id_lookup`, 4 B per id slot) is no longer needed.
 - `Reserved1` to `Reserved12` (28–31, 70, 71, 80–85) are retired: −1.2 MB.
-- `CchRank` (93) is retired if nodes are numbered by rank (section 8): −4.3 MB
-  (−2.3 %).
+- `CchRank` (93) is retired, since nodes are numbered by rank (section 8):
+  −4.3 MB (−2.3 %).
 
 ### 5.8 Widths (section 10)
 
@@ -540,6 +545,15 @@ by any 1.x engine.
 (`RequestGrid` 48, `GridCellStart` 49) is replaced by a sparse grid on the
 global lattice (ids 138 and 139, section 9.3); `GridEntries` (50) keeps its layout. `SharedInfoCostTuple` becomes u32 under a new id (+2.6 MB on
 Małopolskie; section 13).
+
+*As built (draft revision 6).* The wide sections are `ShapeStart64` (135),
+`AttrClassStart64` (136), `StringStart64` (137) and `SharedInfoCostTuple32`
+(142); 34, 56, 58 and 73 are retired in format 3. The reader takes either
+width behind one accessor, so the engine above the format crate sees no
+difference. Format 2 keeps u32 offsets and u16 rows, and its writer now
+refuses offsets past 4 GiB for every pool, not only the shapes (string and
+class offsets used to be cut to u32 silently). A format-3 package opens
+whatever its offsets' width needs, so the checks run on u64 values.
 
 ### 5.9 Net size
 
@@ -554,19 +568,24 @@ On Małopolskie (*measured* section sizes, 184,954,112 bytes today):
 | u64 offsets | +596,340 |
 | `NodeSourceId` | +6,415,962 |
 | `CchCellTree` (20 B × 15,748 tree nodes) | +314,960 |
+| u32 cost tuple rows | +2,575,706 |
+| Lattice request grid (67 blocks; starts −387,344, entries −208,044) | −595,388 |
 | `ProfileSlots`, `PackageParams`, `RegionInfo`, table growth | under 10,000 |
-| **Total** | **−9.0 MB (−4.9 %)**; −4.8 MB (−2.6 %) if `CchRank` stays |
+| **Total** | **−7.1 MB (−3.8 %)**; −2.8 MB (−1.5 %) if `CchRank` stays |
 
-The sparse request grid isn't counted (Małopolskie's bounding box is mostly
-road-covered land, so it changes little there; it matters for continents).
+As built (draft revision 6) the format-3 package is 177,901,824 bytes,
+7,052,864 below format 2. The lattice grid changes little on Małopolskie,
+whose bounding box is mostly road-covered land; it matters for continents.
+Its 12″ cells are a little larger than format 2's 0.003° ones, so an entry
+meets fewer of them (1,724,113 entries against 1,776,124).
 
 ## 6. Section id registry
 
 | Ids | What | Presence |
 |---|---|---|
 | 0–93 | Format 2's slot numbers, for the sections that survive unchanged: `Metadata` 0, the graph, costs, restrictions, shapes, costing tuples, request sections, attribute classes, strings, junctions, barriers, `NodeXyzFixed`, piece bits, twins, lone in-edges | as today's checks |
-| retired | 6, 22, 24, 27, 28–31, 34, 47–49, 51, 52, 56, 58, 66, 70, 71, 79–85, and 93 if numbering by rank | never reused |
-| 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridCellStart` (block-relative u32), 140/141 `NodeSourceId` | mandatory |
+| retired | 6, 22, 24, 27, 28–31, 34, 47–49, 51, 52, 56, 58, 66, 70, 71, 73, 79–85, 93 | never reused |
+| 128–191 | Layout changes of the bump: 128 `ProfileSlots`, 129 `PackageParams`, 130 `EdgeAccess` (u16), 131 `SimpleMask` (u16), 132 `ComplexMask` (u16), 133 `BarrierAccess` (u32), 134 `NodeReachSaturated` (u16), 135 `ShapeStart` (u64), 136 `AttrClassStart` (u64), 137 `StringStart` (u64), 138 `GridBlocks`, 139 `GridBlockCellStart` (block-relative u32), 140/141 `NodeSourceId`, 142 `SharedInfoCostTuple` (u32) | mandatory |
 | 256–319 | Regions: 256 `RegionInfo` (mandatory); reserved: 257 `RegionNeighbours`, 258 `NodeOwner`, 259 `PortalEdge`, 260 `PortalRef`, 261 `PortalClique` (param = column), 262 `PortalBound` (param = column), 263 `ComponentPortal` | optional |
 | 320–383 | Cells and stored potentials: 320 `CchCellTree` (written from format 3 on); reserved: 321 `CellDirectory`, 322 `CchFirstUp`, 323 `CchUpHead`, 324 `CchMetric` (param = column), 325 `InEdgeIndex` (SC-4) | optional |
 | 512–639 | Feature content: reserved 517 `DirectionalDestinations` (G4b), 518 `ConditionalTurnRestrictions` (W4), 519 `SharedInfoLimits` (P2); 512–516 and 520 are terrain, kept out of format 3 (`format-4.md`) | optional |
@@ -658,7 +677,7 @@ arise, and the potentials are unchanged value for value. 6,216 chain
 nodes (small isolated components) have no core neighbour; they belong to no
 cell and should be ranked by position (Hilbert) at the front, where they
 don't affect anything else. The prototype should still be repeated on Poland
-in G5, as a check.
+in G5, as a check (done: section 8.4, as built).
 
 ### 8.3 Node id = rank
 
@@ -678,7 +697,8 @@ ids apart): Hilbert today 93.9 % and 99.68 %; either cell-major numbering
 90.3 % and 99.83 %. The near-neighbour share drops a little and the
 long-range share improves (fewer edges need an exception table if 16-bit
 target deltas, OM-10, ever come). Warm query speed should be checked on the
-Małopolskie gate in G5 before the choice is final.
+Małopolskie gate in G5 before the choice is final (done: unchanged on
+Małopolskie, a little faster on Poland; section 8.4, as built).
 
 In both, every level of the tree is contiguous at once, so the format
 doesn't fix a cell size: a 1.x `CellDirectory` chooses its levels (the
@@ -704,6 +724,76 @@ still holds (the order is a function of the Hilbert-numbered graph). What is
 lost is that a node's id no longer depends on its position alone, but on
 the whole package's dissection. Nothing depends on that: stable references
 use OSM ids, overlay sets bind to the identity hash.
+
+*As built (draft revision 5).* A format-3 compile numbers nodes by rank
+(option 1 of section 8.3) whenever it computes a CCH order, and says so with
+header layout flag bit 1 (`LAYOUT_NODES_BY_RANK`). Right after
+`renumber_in_package_order`, `cch_order::cell_major_order_until` dissects
+the Hilbert-numbered graph as `elimination_order_until` does and places the
+chain nodes by the rule of section 8.2; `renumber_by_rank` then renumbers
+the road graph by that order. Unlike the first renumbering it keeps each
+node's out-edges in their order (by way, direction, Hilbert target, segment
+and length) instead of sorting them again by the targets' new ids, so a
+node's edges are format 2's in format 2's order. Nodes no edge uses come
+after the ranked ones, as before. The package build skips its own CCH order
+and writes `CchCellTree` (id 320, conditional on the flag) instead of
+`CchRank`, which format 3 retires: the engine's ranks are the identity
+(`Sections::cch_ranks`). Format-2 compiles are unchanged.
+
+`CchCellTree`'s root starts after the chain nodes no cell owns (ranked
+first) and ends at the last rank, which is the last node edges
+use. Open refuses the flag without the section, the section without the
+flag, and a tree that is not a dissection tree of the ranks: entries out of
+post-order (every subtree one run of entries, its children right before
+it), a range out of order, a child outside its parent's gap between chain
+nodes and separator, siblings out of rank order or leaving a gap, a root
+with a parent or not ending at the node count. An empty tree (no core) is
+valid.
+
+*Measured* on Małopolskie (the extract of section 5.6), format 2 against
+format 3 of the same build:
+
+| | Format 2 | Format 3 |
+|---|---|---|
+| CCH arcs (as node pairs, nodes matched by position) | 3,694,694 | 3,694,694, **identical set** |
+| Elimination tree | height 524 | **identical parent of every node** |
+| `CchRank` / `CchCellTree` | 4,277,308 B | 314,960 B: 15,748 cells, 8,277 leaves, depth 21 |
+| Chain nodes before the root (no core) | | 6,216 |
+| Package | 184,954,688 B | 175,324,992 B |
+| Edges whose ends are < 2^7 / < 2^15 ids apart | 93.9 % / 99.68 % | 90.3 % / 99.83 % |
+| Warm request, median (3 alternating runs, 324 cases) | 4.80–5.28 ms | 4.88–5.05 ms |
+| First request incl. potentials (`krakow-tarnow-long-regional`) | 297–319 ms | 257–269 ms |
+| CCH order in the compile | 1.4 s | 1.8 s (cell-major order and second renumbering) |
+
+Warm speed is unchanged within noise; the first request, which builds the
+potentials, is about 15 % faster (not profiled; the rank lookups are gone).
+Routes are the same: the regional gate passes on both, and with
+ids stripped the Kraków dump is identical and the Małopolskie one differs
+only in the alternatives of 3 of 324 cases, where via candidates that tie on
+plateau and cost are taken in edge id order. Visited-edge counts move by a
+few edges at heap ties. Lists in a result that follow ids
+(`junctionJoiningAnglesDeg`, ordered by the joining edges' source nodes, and
+rejected correlation candidates, by edge id) come in another order, and a
+route from a point to itself can take an edge's twin instead.
+
+*Measured* on Poland (`poland-latest` of 24 November 2026 from
+download.openstreetmap.fr; 10,558,753 nodes, 27,284,271 edges), the check
+section 8.2 asked for:
+
+| | Format 2 | Format 3 |
+|---|---|---|
+| CCH arcs (as node pairs, nodes matched by position) | 47,822,666 | 47,822,666, **identical set** |
+| Elimination tree | height 1,125 | **identical parent of every node** |
+| `CchRank` / `CchCellTree` | 42,235,012 B | 4,424,100 B: 221,205 cells, 116,083 leaves, depth 26 |
+| Chain nodes before the root (no core) | | 52,835 |
+| Package | 1,971,179,648 B | 1,872,113,152 B |
+| Edges whose ends are < 2^7 / < 2^15 ids apart | 93.5 % / 99.68 % | 91.4 % / 99.79 % |
+| Warm request, median (Małopolskie corpus and 100 random pairs, 2 alternating runs) | 7.41–8.02 ms | 6.84–7.09 ms |
+| First request incl. potentials | 3.21–3.36 s | 2.95–3.25 s |
+| CCH order in the compile | 33.7 s | 40.1 s |
+
+With ids stripped the 224 routes are the same but for one case's
+alternatives.
 
 ### 8.5 Tiled compiles (1.x)
 
@@ -768,6 +858,23 @@ cell directory can page blocks with cells. Candidate order must not depend on
 the cell size. If it turns out to, the change shows in the baselines the bump
 re-records anyway (section 12).
 
+*As built (draft revision 6).* `PackageParams` key 11 states the spacing
+(1,440 ticks both ways), so a later build can change it without a new
+section. A block's key is its (row, column) block index, each half's sign
+bit flipped and the row in the high 32 bits, so keys sort south to north
+and then west to east; `GridBlocks` holds `key u64, base u64` per covered
+block, sorted by key without repeats, and `GridBlockCellStart` (139) holds
+4,097 block-relative u32 starts per block, cells in row-major order. A
+cell's entries are `GridEntries[base + start[c] .. base + start[c + 1]]`;
+the bases run from 0 without gaps, and the last block ends at the entry
+count. A lookup binary-searches the blocks a box meets. Both the compiler and
+the engine place a coordinate with `lattice_cell`, the floor of its degrees
+times the cells per degree. An entry covers the cells its shape segments'
+boxes meet, as in format 2. The open checks refuse unsorted or repeated
+keys, bases with gaps, starts that fall, don't start at 0 or don't come
+4,097 to a block, a last block that misses the entry count, and a spacing
+that is missing or doesn't divide a degree.
+
 ## 10. Width limits found at scale
 
 From the compile analysis (section 3) and the regions analysis (section 1.1), with
@@ -828,6 +935,20 @@ need rebinding (stable references survive), and route dumps may change at
 ties, as they did with tile-ready ids. Monaco info, the Kraków and the
 Małopolskie baselines are re-recorded once, in the release that ships the
 bump.
+
+*As built (0.5).* A compile, the C ABI's compile and the JSON compile
+request write format 3. The library can still write format 2
+(`PackageFormat::V2`, and the hidden `wayfarer compile --package-format 2`)
+for apps whose engines are older than 0.5; nothing else does, and the tests
+that name the road graph's own ids build format 2. The package build
+renumbers a graph that a compile hasn't put in package order
+(`has_package_order_ids`), so a format-3 package of any road graph builds
+in memory, with new ids. The CCH order runs at the start of a format-3
+build, so its progress reports as the build's start and the `cch_order`
+stage completes at once. `fixtures/routing/format-3/` holds the frozen
+format-3 fixture. Monaco info, the Kraków centre baseline and the
+Małopolskie baseline are re-recorded: the same routes and costs, other ids
+and a few visited edges.
 
 **Building it on `main`.** Format 3 is several PRs, and packages written by
 `main` between them must not be mistaken for the final format. Until

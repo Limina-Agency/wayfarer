@@ -51,6 +51,7 @@ fn test_correlated_record(record: &GraphViewEdge, fraction_along_edge: f64) -> C
         score: 1.0,
         score_breakdown: Default::default(),
         confidence: 1.0,
+        access: None,
     }
 }
 

@@ -83,8 +83,8 @@ pub(crate) struct CompileArgs {
         conflicts_with = "request"
     )]
     profiles: Option<Vec<MobilityProfile>>,
-    /// The package format to write (2, or 3: format 3's current draft,
-    /// which only a build of the same draft revision opens).
+    /// The package format to write: 3 (the default), or 2 for engines
+    /// older than 0.5.
     #[arg(
         long,
         value_name = "N",

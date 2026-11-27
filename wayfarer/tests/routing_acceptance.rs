@@ -24,11 +24,21 @@ use wayfarer_road_graph::{
     persist_road_graph_file, serialize_road_graph,
 };
 
-/// The package of `graph`, built in memory with the default options.
+/// The options of the tests' packages: the default, in format 2, which keeps
+/// the road graph's node, edge and shared-info ids that the tests name
+/// (format 3 renumbers them by CCH rank; `package_format_3.rs` checks that
+/// it routes as format 2 does).
+fn options() -> PackageBuildOptions {
+    PackageBuildOptions {
+        package_format: wayfarer_package::format::PackageFormat::V2,
+        ..PackageBuildOptions::default()
+    }
+}
+
+/// The package of `graph`, built in memory with [`options`].
 fn package(graph: &RoadGraph) -> Arc<RoutingPackage> {
-    let (bytes, _) =
-        wayfarer_compiler::package_build::package_bytes(graph, &PackageBuildOptions::default())
-            .expect("the road graph builds a routing package");
+    let (bytes, _) = wayfarer_compiler::package_build::package_bytes(graph, &options())
+        .expect("the road graph builds a routing package");
     Arc::new(RoutingPackage::from_bytes(&bytes).unwrap())
 }
 
@@ -543,13 +553,8 @@ fn persisted_package(graph: &RoadGraph) -> (tempfile::TempDir, Arc<RoutingPackag
     let manifest = road_graph_manifest(graph);
     let dir = tempdir().unwrap();
     let path = dir.path().join("routing.mrt");
-    wayfarer_compiler::package_build::write_package(
-        graph,
-        Some(&manifest),
-        &path,
-        &PackageBuildOptions::default(),
-    )
-    .unwrap();
+    wayfarer_compiler::package_build::write_package(graph, Some(&manifest), &path, &options())
+        .unwrap();
     let package = RoutingPackage::open(&path).unwrap();
     (dir, Arc::new(package))
 }

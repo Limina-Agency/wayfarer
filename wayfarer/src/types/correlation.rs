@@ -26,6 +26,12 @@ pub struct CorrelationPolicy {
     /// the profile may legally use.
     #[serde(skip)]
     pub sar_open: Option<crate::sar::SarOpenEdges>,
+    /// Costed off-network access legs (`RouteOptions::off_network`, or a SAR
+    /// `off_network` with `costed`): one search within the access radius
+    /// instead of the widening radii, and every candidate priced
+    /// (`crate::access`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::access::RouteOffNetworkOptions>,
 }
 
 impl Default for CorrelationPolicy {
@@ -35,23 +41,27 @@ impl Default for CorrelationPolicy {
             candidate_limit: DEFAULT_CANDIDATE_LIMIT,
             off_network_max_distance_m: None,
             sar_open: None,
+            access: None,
         }
     }
 }
 
 impl From<&RouteOptions> for CorrelationPolicy {
     fn from(options: &RouteOptions) -> Self {
+        let access = crate::access::request_access(options);
         Self {
             max_distance_m: options.max_correlation_distance_m,
             candidate_limit: options.candidate_limit.min(MAX_CANDIDATE_LIMIT),
+            // A costed SAR `off_network` searches its reach directly.
             off_network_max_distance_m: options
                 .sar
                 .as_ref()
                 .and_then(crate::sar::RouteSarOptions::off_network_max_leg_m)
-                .filter(|distance| distance.is_finite() && *distance > 0.0)
+                .filter(|distance| distance.is_finite() && *distance > 0.0 && access.is_none())
                 .map(|distance| distance.ceil() as u32),
             // SAR is for vehicle profiles only (`sar::validate_request`).
             sar_open: crate::sar::SarOpenEdges::of(options),
+            access,
         }
     }
 }
@@ -119,6 +129,11 @@ pub struct CorrelatedLocation {
     #[serde(default)]
     pub score_breakdown: CorrelationScoreBreakdown,
     pub confidence: f64,
+    /// The costed access stretch from the requested point, when the request
+    /// has `offNetwork` (see [`crate::access`]): searches then charge it in
+    /// full instead of a relative approach penalty, and results include it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::access::CandidateAccess>,
 }
 
 // Debug leaves out the compact edge hint, a cache (see [`CompactEdgeHint`]).

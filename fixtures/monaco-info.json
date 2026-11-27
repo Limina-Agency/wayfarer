@@ -1,11 +1,11 @@
 {
-  "byteLen": 665024,
-  "contentHash": "ae242bcf369448183765e000def3199bcd0ea69606aa518950e8e151e8e5410a",
+  "byteLen": 680704,
+  "contentHash": "159ee0eca55912d484e209b007efc711efd759f8496c54798d0b7fb38963aedd",
   "costingModelVersion": 1,
   "countryCode": "MC",
-  "datasetHash": "ae242bcf369448183765e000def3199bcd0ea69606aa518950e8e151e8e5410a",
+  "datasetHash": "3cf80c8be60b0234d7fee0f986c386364b1b38f660e614b392093f5b0939077a",
   "edgeCount": 8550,
-  "formatVersion": 2,
+  "formatVersion": 3,
   "graphId": "monaco",
   "nodeCount": 3184,
   "profileColumnCount": 2,
@@ -20,8 +20,24 @@
     "status": "warning"
   },
   "readableFormats": [
-    2
+    2,
+    3
   ],
+  "region": {
+    "boundaryHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bundleId": "00000000000000000000000000000000",
+    "cutParam": 0,
+    "cutRule": 0,
+    "extentE7": {
+      "maxLat": 437519162,
+      "maxLng": 74395993,
+      "minLat": 437233201,
+      "minLng": 74065668
+    },
+    "flags": 0,
+    "haloM": 0,
+    "regionId": "00000000000000000000000000000000"
+  },
   "sharedInfoCount": 4307,
   "unknownSections": []
 }

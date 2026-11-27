@@ -197,6 +197,45 @@ pub struct RouteIsochroneRequest {
     /// first of `origins`, and so on.
     #[serde(default, skip_serializing_if = "is_false")]
     pub include_origins: bool,
+    /// Draws each bucket as a GeoJSON `MultiPolygon` (`polygon`): the
+    /// area within a short walk of the roads the bucket reaches. Left out
+    /// (the default), buckets carry no polygon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygons: Option<RouteIsochronePolygonOptions>,
+}
+
+/// How an isochrone draws its buckets as polygons (see
+/// `RouteIsochroneRequest::polygons`). The polygon is drawn on a square grid
+/// over the reached roads: a grid node is inside when it lies within
+/// `spread_m` of a reached road, where on a boundary fragment the spread
+/// shrinks to what remains of the contour at the profile's off-road pace
+/// (metres for a distance contour), down to nothing where the fragment ends.
+/// Rings follow the grid (marching squares), so the polygon is exact only to
+/// about a cell; they never touch, before or after rounding. The bucket's `edgeIds` and boundary fragments stay the
+/// exact answer; the polygon is a function of them and the package's road
+/// shapes. Every value is optional; the result's `polygons` echoes the
+/// values used.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RouteIsochronePolygonOptions {
+    /// The grid's cell size in metres, from 2 to 10,000. By default the
+    /// larger side of the reached area over 256, rounded up to whole metres
+    /// and kept within 10 m to 500 m.
+    /// A grid that would exceed `limits::MAX_ISOCHRONE_POLYGON_GRID_NODES`
+    /// nodes takes larger cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_m: Option<f64>,
+    /// How far off a reached road the polygon reaches, in metres, at most
+    /// 10,000. By default 1.5 cells; never less than 0.75 of a cell, so
+    /// that every reached road meets the grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread_m: Option<f64>,
+    /// Drops each polygon whose area is less than this share of the largest
+    /// polygon's in its bucket (0 to 1; by default 0, which keeps every
+    /// one). Holes are kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denoise: Option<f64>,
 }
 
 /// One more origin of a multi-origin isochrone (see
@@ -240,6 +279,7 @@ impl RouteIsochroneRequest {
             include_edge_ids: true,
             order: RouteIsochroneOrder::Cost,
             include_origins: false,
+            polygons: None,
         }
     }
 }
@@ -257,6 +297,11 @@ pub struct RouteIsochroneBucket {
     pub edge_origins: Vec<u16>,
     #[serde(default)]
     pub boundary_fragments: Vec<RouteIsochroneBoundaryFragment>,
+    /// With `polygons`, the bucket drawn as a GeoJSON `MultiPolygon` (see
+    /// `RouteIsochronePolygonOptions`); empty when the bucket reaches
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygon: Option<crate::GeoJsonMultiPolygon>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -292,6 +337,10 @@ pub struct RouteIsochroneResult {
     /// edge listed is reachable, but some reachable edges are missing).
     #[serde(default)]
     pub truncated: bool,
+    /// With the request's `polygons`, the polygon options as applied: the
+    /// grid's cell size, the spread and the denoise share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygons: Option<RouteIsochronePolygonOptions>,
 }
 
 /// Which way a nearest-targets request measures travel.

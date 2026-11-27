@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use crate::types::{
     GeoPoint, RouteDynamicEndpointKind, RouteDynamicVirtualEdgeKind, RouteEdgeRange,
     RouteGuidanceQualityFlag, RouteLane, RouteLaneIndication, RouteLeg, RouteManeuver,
-    RouteManeuverKind, RouteShapeDynamicOverlay, RouteShapeDynamicOverlayKind,
-    RouteShapeQualityFlag, RouteShapeSegment,
+    RouteManeuverKind, RouteShapeDynamicOverlay, RouteShapeDynamicOverlayKind, RouteShapeSegment,
 };
 
 const TURN_THRESHOLD_DEG: f64 = 30.0;
@@ -372,11 +371,7 @@ impl<'l> EdgeShapes<'l> {
         let segments = leg
             .shape_segments
             .iter()
-            .filter(|segment| {
-                !segment
-                    .quality_flags
-                    .contains(&RouteShapeQualityFlag::SsvgConnector)
-            })
+            .filter(|segment| !crate::access::is_off_graph_segment(segment))
             .collect::<Vec<_>>();
         Self {
             segments: (segments.len() == leg.edges.len()).then_some(segments),
@@ -590,6 +585,10 @@ fn dynamic_overlay_instruction(dynamic_overlay: &RouteShapeDynamicOverlay) -> St
         RouteShapeDynamicOverlayKind::PartialEdgeFragment => {
             "Continue on the usable road fragment".to_string()
         }
+        RouteShapeDynamicOverlayKind::AccessLeg => match dynamic_overlay.distance_meters {
+            Some(distance_meters) => format!("Cross open ground ~{distance_meters:.0} m"),
+            None => "Cross open ground".to_string(),
+        },
     }
 }
 
@@ -615,6 +614,7 @@ fn dynamic_overlay_kind_name(kind: RouteShapeDynamicOverlayKind) -> &'static str
         RouteShapeDynamicOverlayKind::RoadEntryConnector => "road_entry_connector",
         RouteShapeDynamicOverlayKind::RoadToRoadBypassConnector => "road_to_road_bypass_connector",
         RouteShapeDynamicOverlayKind::CrossCountryConnector => "cross_country_connector",
+        RouteShapeDynamicOverlayKind::AccessLeg => "access_leg",
     }
 }
 
@@ -2241,6 +2241,7 @@ mod tests {
                         connector_type: Some(RouteDynamicVirtualEdgeKind::Endpoint),
                         source_chunk_ids: vec!["chunk-a".to_string()],
                         distance_meters: Some(28.0),
+                        duration_seconds: None,
                         cost: Some(42.0),
                         source_endpoint: Some(RouteDynamicEndpointKind::Origin),
                         source_point: Some(GeoPoint::new(50.0, 20.0)),
@@ -2334,6 +2335,7 @@ mod tests {
                     connector_type: Some(RouteDynamicVirtualEdgeKind::RoadToRoadBypass),
                     source_chunk_ids: vec!["chunk-b".to_string()],
                     distance_meters: Some(55.0),
+                    duration_seconds: None,
                     cost: Some(75.0),
                     source_endpoint: None,
                     source_point: None,

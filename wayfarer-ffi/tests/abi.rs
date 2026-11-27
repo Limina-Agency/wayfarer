@@ -29,7 +29,7 @@ fn open() -> *mut WayfarerPackage {
     let status = unsafe { wayfarer_open(path.as_ptr(), ptr::null(), &mut package, &mut out) };
     let info = take(out);
     assert_eq!(status, WAYFARER_OK, "{info}");
-    assert_eq!(info["formatVersion"], 2);
+    assert_eq!(info["formatVersion"], 3);
     assert_eq!(info["costingModelVersion"], 1);
     package
 }
@@ -51,7 +51,7 @@ fn versions_describe_the_library() {
     let versions = take(wayfarer_versions());
     assert_eq!(versions["abi"], 1);
     // [min, max].
-    assert_eq!(versions["readableFormats"], serde_json::json!([2, 2]));
+    assert_eq!(versions["readableFormats"], serde_json::json!([2, 3]));
     assert_eq!(versions["costingModel"], 1);
 }
 
@@ -128,6 +128,63 @@ fn failures_carry_a_status_and_a_code() {
     }
 }
 
+/// `value` without its `...DurationNs` timings, which differ run to run.
+fn without_timings(mut value: Value) -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.retain(|key, _| !key.ends_with("DurationNs"));
+                map.values_mut().for_each(strip);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut value);
+    value
+}
+
+/// With `warmUp`, the open returns at once and routes come out the same,
+/// during the warm-up and after it; closing during it is safe.
+#[test]
+fn a_warmed_up_open_routes_as_a_plain_one() {
+    let route = r#"{"locations": [{"point": {"lat": 52.0, "lng": 21.0002}}, {"point": {"lat": 52.0, "lng": 21.0018}}], "profile": "wheeled"}"#;
+    let plain = open();
+    let (status, expected) = call(wayfarer_route, plain, route);
+    assert_eq!(status, WAYFARER_OK, "{expected}");
+    unsafe { wayfarer_close(plain) };
+    let path = fixture();
+    for options in [
+        r#"{"warmUp": true}"#,
+        r#"{"warmUp": true, "memoryProfile": "mobile"}"#,
+        r#"{"warmUp": false}"#,
+    ] {
+        let options = CString::new(options).unwrap();
+        let mut package = ptr::null_mut();
+        let mut out = ptr::null_mut();
+        let status =
+            unsafe { wayfarer_open(path.as_ptr(), options.as_ptr(), &mut package, &mut out) };
+        assert_eq!(status, WAYFARER_OK);
+        assert_eq!(take(out)["edgeCount"], 2);
+        let (status, got) = call(wayfarer_route, package, route);
+        assert_eq!(status, WAYFARER_OK, "{got}");
+        assert_eq!(
+            without_timings(got),
+            without_timings(expected.clone()),
+            "{options:?}"
+        );
+        unsafe { wayfarer_close(package) };
+    }
+    // Closed before the warm-up could end.
+    let options = CString::new(r#"{"warmUp": true}"#).unwrap();
+    let mut package = ptr::null_mut();
+    let mut out = ptr::null_mut();
+    let status = unsafe { wayfarer_open(path.as_ptr(), options.as_ptr(), &mut package, &mut out) };
+    assert_eq!(status, WAYFARER_OK);
+    take(out);
+    unsafe { wayfarer_close(package) };
+}
+
 #[test]
 fn verify_hashes_every_section() {
     let path = fixture();
@@ -160,8 +217,9 @@ fn packages_open_from_non_ascii_paths() {
     let status = unsafe { wayfarer_verify(utf8.as_ptr(), &mut out) };
     let verified = take(out);
     assert_eq!(status, WAYFARER_OK, "{verified}");
-    // Format 2: both hashes are the root checksum.
-    assert_eq!(info["contentHash"], info["datasetHash"]);
+    // Format 3: the dataset hash is the identity hash, apart from the
+    // content hash (the root checksum).
+    assert_ne!(info["contentHash"], info["datasetHash"]);
     assert_eq!(verified["datasetHash"], info["datasetHash"]);
     assert_eq!(verified["contentHash"], info["contentHash"]);
 

@@ -384,6 +384,14 @@
           ],
           "format": "double"
         },
+        "durationSeconds": {
+          "description": "Travel time, for access stretches (a connector's is its cost).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "kind": {
           "$ref": "#/$defs/RouteShapeDynamicOverlayKind"
         },
@@ -470,13 +478,22 @@
       ]
     },
     "RouteShapeDynamicOverlayKind": {
-      "type": "string",
-      "enum": [
-        "partial_edge_fragment",
-        "endpoint_connector",
-        "road_entry_connector",
-        "road_to_road_bypass_connector",
-        "cross_country_connector"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "partial_edge_fragment",
+            "endpoint_connector",
+            "road_entry_connector",
+            "road_to_road_bypass_connector",
+            "cross_country_connector"
+          ]
+        },
+        {
+          "description": "A costed off-network access stretch (`crate::access`).",
+          "type": "string",
+          "const": "access_leg"
+        }
       ]
     },
     "RouteShapeQualityFlag": {
@@ -498,6 +515,11 @@
           "description": "The leg starts away from where the previous leg ended (the waypoint\nsnapped to different places for its two legs).",
           "type": "string",
           "const": "waypoint_gap"
+        },
+        {
+          "description": "A costed off-network access stretch between a requested point and\nthe road network (`crate::access`); no edge of its own.",
+          "type": "string",
+          "const": "off_network_access"
         }
       ]
     },

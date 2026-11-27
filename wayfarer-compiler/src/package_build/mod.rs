@@ -51,15 +51,16 @@ use wayfarer_costing::{
     EdgeCostInputs, NoOverrides, RouteCostingOptions,
 };
 use wayfarer_package::MobilityProfile;
+use wayfarer_package::cch_order::CellTreeEntry;
 use wayfarer_package::format::{
     EDGE_FLAG_BARRIER_AT_TARGET, EDGE_FLAG_COMPLEX_RESTRICTION_FIRST,
     EDGE_FLAG_COMPLEX_RESTRICTION_TO, EDGE_FLAG_LINK, EDGE_FLAG_SHAPE_REVERSED,
-    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, FORMAT_3_DRAFT_REVISION, MAX_COST_TUPLES,
-    MAX_SOURCE_NODE_ID, NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts,
-    PackageFile, PackageFormat, PackageLayout, PackageParams, PackageWriter, RegionInfo,
-    RoutingPackageError, RoutingPackageMetadata, SHAPE_START_STRIDE, Section, WAY_ID_WIDE,
-    e7_from_fixed_xyz, edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7, profile_slot,
-    reverse_heading, split_source_node_id, to_e7, unit_xyz, xyz_from_fixed,
+    EDGE_FLAG_SIMPLE_RESTRICTION_FROM, MAX_COST_TUPLES, MAX_COST_TUPLES_3, MAX_SOURCE_NODE_ID,
+    NO_COLUMN, NO_HEADING, NO_TOKEN, NO_TWIN, PROFILE_SLOTS, PackageCounts, PackageFile,
+    PackageFormat, PackageLayout, PackageParams, PackageWriter, REQUEST_GRID_SPACING_TICKS,
+    RegionInfo, RoutingPackageError, RoutingPackageMetadata, SHAPE_START_STRIDE, Section,
+    WAY_ID_WIDE, e7_from_fixed_xyz, edge_id_span_limit, encode_shape, fixed_xyz, is_exact_e7,
+    profile_slot, reverse_heading, split_source_node_id, to_e7, unit_xyz, xyz_from_fixed,
 };
 use wayfarer_package::format::{junction, road_type_rank};
 use wayfarer_package::request::derived_opposing;
@@ -83,10 +84,8 @@ pub struct PackageBuildOptions {
     /// engine builds its potentials (the default). Without it searches
     /// bound with the straight line alone (tests and benchmarks).
     pub cch_order: bool,
-    /// The package format to write: format 2 (the default), or format 3's
-    /// current draft, which only a build of the same draft revision opens
-    /// (`docs/design/format-3.md`). Format 3 stays behind this switch until
-    /// its release.
+    /// The package format to write: format 3 (the default,
+    /// `docs/design/format-3.md`), or format 2 for engines older than 0.5.
     pub package_format: PackageFormat,
 }
 
@@ -95,7 +94,7 @@ impl Default for PackageBuildOptions {
         Self {
             profiles: vec![MobilityProfile::Wheeled, MobilityProfile::OnFoot],
             cch_order: true,
-            package_format: PackageFormat::V2,
+            package_format: PackageFormat::V3,
         }
     }
 }
@@ -345,6 +344,79 @@ pub fn package_metadata(
     }
 }
 
+/// Format 2's CCH order of the package's node graph, as each node's rank
+/// (empty without `options.cch_order`).
+fn order_ranks(
+    options: &PackageBuildOptions,
+    first_out: &[u32],
+    edge_target: &[u32],
+    node_xyz: &[i32],
+    job: &Job<'_>,
+) -> Result<Vec<u32>, RoutingPackageError> {
+    if !options.cch_order {
+        return Ok(Vec::new());
+    }
+    let graph = wayfarer_package::cch_order::NodeGraph::new(first_out, edge_target);
+    // A cancel stops the order between its big cells.
+    let (order, _) =
+        wayfarer_package::cch_order::elimination_order_until(&graph, node_xyz, &|| job.cancelled())
+            .ok_or_else(cancelled_error)?;
+    Ok(wayfarer_package::cch_order::ranks(&order))
+}
+
+/// The cell-major CCH order of `graph`, which must be in package order
+/// ([`order::renumber_in_package_order`]): rank → node over the nodes edges
+/// use, and its dissection tree. It is the order format 2 stores, with the
+/// nodes of degree ≤ 2 moved into their cells, computed on the same node
+/// graph and positions.
+fn cell_major_order(
+    graph: &RoadGraph,
+    job: &Job<'_>,
+) -> Result<(Vec<u32>, Vec<CellTreeEntry>), RoutingPackageError> {
+    let network = &graph.graph;
+    let sources = network.sources();
+    let targets = network.targets();
+    // The nodes edges use come first, and edges are grouped by source.
+    let used = sources
+        .iter()
+        .chain(targets)
+        .map(|node| *node as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut node_used = vec![false; used];
+    for node in sources.iter().chain(targets) {
+        node_used[*node as usize] = true;
+    }
+    if !sources.is_sorted() || node_used.contains(&false) {
+        return Err(RoutingPackageError::Unsupported(
+            "format 3 numbers nodes by rank from the package order; renumber the graph first (`renumber_in_package_order`), as a compile does".into(),
+        ));
+    }
+    drop(node_used);
+    let mut first_out = vec![0u32; used + 1];
+    for source in sources {
+        first_out[*source as usize + 1] += 1;
+    }
+    for node in 0..used {
+        first_out[node + 1] += first_out[node];
+    }
+    let node_xyz = (0..used)
+        .flat_map(|node| {
+            let (lat, lng) = network.node_lat_lng(node);
+            fixed_xyz(unit_xyz(lat, lng))
+        })
+        .collect::<Vec<_>>();
+    let node_graph = wayfarer_package::cch_order::NodeGraph::new(&first_out, targets);
+    drop(first_out);
+    let (order, tree, _) =
+        wayfarer_package::cch_order::cell_major_order_until(&node_graph, &node_xyz, &|| {
+            job.cancelled()
+        })
+        .ok_or_else(cancelled_error)?;
+    job.check().map_err(|_| cancelled_error())?;
+    Ok((order, tree))
+}
+
 /// Builds the package sections of `graph`.
 pub fn build_package(
     graph: &RoadGraph,
@@ -379,7 +451,7 @@ fn build_package_from(
     // The graph is reordered into the package's order and its columns are
     // freed as the sections built from them are put; a borrowed graph is
     // copied first.
-    let graph = match source {
+    let mut graph = match source {
         GraphSource::Borrowed(graph) => Box::new(graph.clone()),
         GraphSource::Owned(graph) => graph,
     };
@@ -399,6 +471,41 @@ fn build_package_from(
     );
     let mut clock = PhaseClock::new(job);
     let mut report = PackageBuildReport::default();
+
+    // Format 3 implies the ids from the package order, so a graph that a
+    // compile hasn't renumbered (`renumber_in_package_order`) is renumbered
+    // here: its node, edge and shared-info ids change.
+    if implied_ids && !order::has_package_order_ids(&graph) {
+        order::renumber_in_package_order(&mut graph)?;
+    }
+    // Format 3 numbers nodes by CCH rank (`docs/design/format-3.md`, section
+    // 8): the cell-major order of the graph in package order, then the graph
+    // renumbered by it, so that every dissection cell is one range of node
+    // ids, edges, shared infos and shapes. It runs first, so it reports as
+    // the start of the build; the CCH order stage then has nothing left.
+    let nodes_by_rank = implied_ids && options.cch_order;
+    let cell_tree = if nodes_by_rank {
+        job.report(
+            CompileStage::BuildPackage,
+            Some(0.0),
+            0,
+            "Ordering nodes for CCH potentials",
+        );
+        let order_started = Instant::now();
+        let (order, tree) = cell_major_order(&graph, job)?;
+        order::renumber_by_rank(&mut graph, &order)?;
+        report.cch_order_ms = order_started.elapsed().as_millis();
+        job.report(
+            CompileStage::BuildPackage,
+            Some(0.0),
+            0,
+            "Ordered nodes for CCH potentials",
+        );
+        clock.lap("cch order")?;
+        tree
+    } else {
+        Vec::new()
+    };
 
     // Columns: one per distinct costing policy requested.
     let mut column_profiles = Vec::<MobilityProfile>::new();
@@ -491,14 +598,19 @@ fn build_package_from(
         .filter(|raw| node_used[*raw as usize])
         .collect::<Vec<_>>();
     drop(node_used);
-    nodes.par_sort_by_cached_key(|raw| {
-        let (lat, lng) = network.node_lat_lng(*raw as usize);
-        (
-            package_node_key(lat, lng, None),
-            network.node_id(*raw as usize),
-            *raw,
-        )
-    });
+    if nodes_by_rank {
+        // Node ids are ranks.
+        nodes.par_sort_by_cached_key(|raw| (network.node_id(*raw as usize), *raw));
+    } else {
+        nodes.par_sort_by_cached_key(|raw| {
+            let (lat, lng) = network.node_lat_lng(*raw as usize);
+            (
+                package_node_key(lat, lng, None),
+                network.node_id(*raw as usize),
+                *raw,
+            )
+        });
+    }
     let node_count = nodes.len();
 
     // Edges: grouped by compact source node, ordered by edge id within a node
@@ -767,7 +879,12 @@ fn build_package_from(
             )
         })
         .collect::<Vec<_>>();
-    let mut tuple_rows = FxHashMap::<(u8, u32, [u32; 3]), u16>::default();
+    // Format 2 indexes the tuples with a u16, format 3 with a u32.
+    let max_tuples = match options.package_format {
+        PackageFormat::V2 => MAX_COST_TUPLES,
+        PackageFormat::V3 => MAX_COST_TUPLES_3,
+    };
+    let mut tuple_rows = FxHashMap::<(u8, u32, [u32; 3]), u32>::default();
     let (mut si_cost_flags, mut si_cost_classes, mut si_speeds) =
         (Vec::new(), Vec::new(), Vec::new());
     let mut si_cost_tuple = Vec::with_capacity(shared_count);
@@ -777,16 +894,16 @@ fn build_package_from(
         let row = match tuple_rows.get(&key) {
             Some(row) => *row,
             None => {
-                if next >= MAX_COST_TUPLES {
+                if next >= max_tuples {
                     return Err(RoutingPackageError::Unsupported(format!(
-                        "more than {MAX_COST_TUPLES} distinct costing tuples"
+                        "more than {max_tuples} distinct costing tuples"
                     )));
                 }
                 si_cost_flags.push(*flags);
                 si_cost_classes.push(*classes);
                 si_speeds.extend_from_slice(speeds);
-                tuple_rows.insert(key, next as u16);
-                next as u16
+                tuple_rows.insert(key, next as u32);
+                next as u32
             }
         };
         si_cost_tuple.push(row);
@@ -797,7 +914,7 @@ fn build_package_from(
     writer.put(Section::SharedInfoCostFlags, si_cost_flags);
     writer.put(Section::SharedInfoCostClasses, si_cost_classes);
     writer.put(Section::SharedInfoSpeeds, si_speeds);
-    writer.put(Section::SharedInfoCostTuple, si_cost_tuple);
+    writer.put_cost_tuples(si_cost_tuple)?;
     writer.put(
         Section::ConditionalEdges,
         (0..edge_count as u32)
@@ -1075,7 +1192,7 @@ fn build_package_from(
     let mut exact_shape_shared = Vec::new();
     let mut exact_shape_start = vec![0u32];
     let mut exact_shape_points = Vec::<f64>::new();
-    shape_start.push(0u32);
+    shape_start.push(0u64);
     for shared in 0..shared_count {
         let info = info_of(shared as u32);
         let (from, to) = si_nodes[shared];
@@ -1107,16 +1224,20 @@ fn build_package_from(
         {
             report.shape_explicit_count += 1;
         }
-        let end = u32::try_from(shape_bytes.len())
-            .map_err(|_| RoutingPackageError::Unsupported("shape section exceeds 4 GiB".into()))?;
+        let end = shape_bytes.len() as u64;
         // The offset of every SHAPE_START_STRIDEth shape, then the end.
         if (shared + 1).is_multiple_of(SHAPE_START_STRIDE) || shared + 1 == shared_count {
             shape_start.push(end);
         }
     }
-    report.shape_byte_len = shape_bytes.len() + shape_start.len() * 4;
+    report.shape_byte_len = shape_bytes.len()
+        + shape_start.len()
+            * match options.package_format {
+                PackageFormat::V2 => 4,
+                PackageFormat::V3 => 8,
+            };
     drop(si_consistent);
-    writer.put(Section::ShapeStart, shape_start);
+    writer.put_byte_offsets(Section::ShapeStart, Section::ShapeStart64, shape_start)?;
     writer.put(Section::ShapeBytes, shape_bytes);
     writer.put(Section::ExactShapeShared, exact_shape_shared);
     writer.put(Section::ExactShapeStart, exact_shape_start);
@@ -1192,6 +1313,7 @@ fn build_package_from(
     let layout = PackageLayout {
         node_e7_derived,
         edge_id_base,
+        nodes_by_rank,
     };
 
     // Out-adjacency.
@@ -1402,45 +1524,51 @@ fn build_package_from(
             mode_mask_union: metadata.mode_mask_union,
             default_component: request_sections.default_component(),
             reach_cap: wayfarer_package::request::SATURATION_CAP as u64,
-            draft_revision: Some(FORMAT_3_DRAFT_REVISION),
+            request_grid_spacing: Some([REQUEST_GRID_SPACING_TICKS; 2]),
         }
         .to_section(),
     );
-    request_sections.put(&mut writer);
+    request_sections.put(&mut writer)?;
     clock.lap("request sections")?;
 
     drop(shared_infos);
     // The CCH order, from the node graph and the fixed-point positions
-    // (integer arithmetic: the same on every platform).
-    job.report(
-        CompileStage::CchOrder,
-        Some(0.0),
-        0,
-        "Ordering nodes for CCH potentials",
-    );
-    let order_started = Instant::now();
-    let cch_rank = if options.cch_order {
-        let graph = wayfarer_package::cch_order::NodeGraph::new(&first_out, &edge_target);
-        // A cancel stops the order between its big cells.
-        let (order, _) =
-            wayfarer_package::cch_order::elimination_order_until(&graph, &node_xyz, &|| {
-                job.cancelled()
-            })
-            .ok_or_else(cancelled_error)?;
-        wayfarer_package::cch_order::ranks(&order)
+    // (integer arithmetic: the same on every platform). Format 3 ordered
+    // the nodes first, and node ids are their ranks.
+    let cch_rank = if !nodes_by_rank {
+        job.report(
+            CompileStage::CchOrder,
+            Some(0.0),
+            0,
+            "Ordering nodes for CCH potentials",
+        );
+        let order_started = Instant::now();
+        let cch_rank = order_ranks(options, &first_out, &edge_target, &node_xyz, job)?;
+        report.cch_order_ms = order_started.elapsed().as_millis();
+        job.check().map_err(|_| cancelled_error())?;
+        job.report(
+            CompileStage::CchOrder,
+            Some(1.0),
+            0,
+            "Ordered nodes for CCH potentials",
+        );
+        clock.lap("cch order")?;
+        cch_rank
     } else {
+        if nodes_by_rank {
+            // Ordered at the start of the build.
+            for fraction in [0.0, 1.0] {
+                job.report(
+                    CompileStage::CchOrder,
+                    Some(fraction),
+                    0,
+                    "Ordered nodes for CCH potentials",
+                );
+            }
+            job.check().map_err(|_| cancelled_error())?;
+        }
         Vec::new()
     };
-    report.cch_order_ms = order_started.elapsed().as_millis();
-    job.check().map_err(|_| cancelled_error())?;
-    job.report(
-        CompileStage::CchOrder,
-        Some(1.0),
-        0,
-        "Ordered nodes for CCH potentials",
-    );
-    clock.lap("cch order")?;
-
     let counts = PackageCounts {
         node_count,
         edge_count,
@@ -1453,6 +1581,13 @@ fn build_package_from(
     writer.put(Section::NodeFirstOut, first_out);
     writer.put(Section::NodeXyzFixed, node_xyz);
     writer.put(Section::CchRank, cch_rank);
+    writer.put(
+        Section::CchCellTree,
+        cell_tree
+            .into_iter()
+            .flat_map(CellTreeEntry::to_bytes)
+            .collect::<Vec<u8>>(),
+    );
     writer.put(Section::EdgeTarget, edge_target);
 
     report.node_count = node_count;
@@ -1794,7 +1929,7 @@ mod tests {
 
     /// The package of `graph`, opened by the engine.
     fn in_memory(graph: &RoadGraph) -> (wayfarer::RoutingPackage, PackageBuildReport) {
-        let (bytes, report) = package_bytes(graph, &PackageBuildOptions::default()).unwrap();
+        let (bytes, report) = package_bytes(graph, &format_2_options()).unwrap();
         (
             wayfarer::RoutingPackage::from_bytes(&bytes).unwrap(),
             report,
@@ -2018,8 +2153,7 @@ mod tests {
 
     #[test]
     fn open_rejects_duplicate_edge_ids() {
-        let (mut bytes, _) =
-            package_bytes(&compact_layout_graph(), &PackageBuildOptions::default()).unwrap();
+        let (mut bytes, _) = package_bytes(&compact_layout_graph(), &format_2_options()).unwrap();
         let (offset, len) = PackageFile::from_bytes(&bytes)
             .unwrap()
             .section_range(Section::EdgeId);
@@ -2054,6 +2188,14 @@ mod tests {
         wayfarer_road_graph::enhance_road_graph(&mut graph);
         order::renumber_in_package_order(&mut graph).unwrap();
         graph
+    }
+
+    /// Format 2, which keeps the road graph's ids that the tests compare.
+    fn format_2_options() -> PackageBuildOptions {
+        PackageBuildOptions {
+            package_format: PackageFormat::V2,
+            ..PackageBuildOptions::default()
+        }
     }
 
     fn format_3_options() -> PackageBuildOptions {
@@ -2107,7 +2249,7 @@ mod tests {
         );
         assert_eq!(extent, [500_000_000, 199_000_000, 500_030_000, 199_040_000]);
 
-        let (bytes, _) = package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+        let (bytes, _) = package_bytes(&graph, &format_2_options()).unwrap();
         let package = PackageFile::from_bytes(&bytes).unwrap();
         let view = package.view();
         assert!(!package.has_osm_node_ids());
@@ -2133,7 +2275,7 @@ mod tests {
                 package_bytes(&graph, &format_3_options()),
                 Err(RoutingPackageError::Unsupported(message)) if message.contains(&id.to_string())
             ));
-            package_bytes(&graph, &PackageBuildOptions::default()).unwrap();
+            package_bytes(&graph, &format_2_options()).unwrap();
         }
     }
 }

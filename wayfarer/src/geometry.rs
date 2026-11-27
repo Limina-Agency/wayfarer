@@ -73,6 +73,65 @@ impl GeoJsonLineString {
     }
 }
 
+/// The type member of a GeoJSON polygon geometry; always `MultiPolygon` here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum GeoJsonMultiPolygonType {
+    #[default]
+    MultiPolygon,
+}
+
+/// A GeoJSON `MultiPolygon` geometry (RFC 7946): polygons of linear rings,
+/// each closed (its last position repeats its first), the first ring of a
+/// polygon its outer boundary (counterclockwise) and the others its holes
+/// (clockwise), in `[longitude, latitude]` positions rounded to 6 decimals,
+/// as [`GeoJsonLineString`]. No polygon at all is an empty `coordinates`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GeoJsonMultiPolygon {
+    #[serde(rename = "type")]
+    pub kind: GeoJsonMultiPolygonType,
+    pub coordinates: Vec<Vec<Vec<[f64; 2]>>>,
+}
+
+impl GeoJsonMultiPolygon {
+    /// The multipolygon of `polygons`, each a list of rings of points (outer
+    /// ring first), rounded to 6 decimals. Each ring is closed here; repeated
+    /// positions after rounding are dropped, and so is a ring left with fewer
+    /// than three distinct positions (a polygon whose outer ring is dropped
+    /// goes with it).
+    pub(crate) fn from_rings(polygons: &[Vec<Vec<GeoPoint>>]) -> Self {
+        let ring = |points: &[GeoPoint]| {
+            let mut ring = Vec::<[f64; 2]>::with_capacity(points.len() + 1);
+            for point in points {
+                let position = [round6(point.lng), round6(point.lat)];
+                if ring.last() != Some(&position) {
+                    ring.push(position);
+                }
+            }
+            while ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            if ring.len() < 3 {
+                return None;
+            }
+            ring.push(ring[0]);
+            Some(ring)
+        };
+        Self {
+            kind: GeoJsonMultiPolygonType::MultiPolygon,
+            coordinates: polygons
+                .iter()
+                .filter_map(|rings| {
+                    let mut rings = rings.iter().map(|points| ring(points));
+                    let outer = rings.next()??;
+                    Some(std::iter::once(outer).chain(rings.flatten()).collect())
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Moves `geometry` into its `format` encoding (`points` leaves it).
 pub(crate) fn encode_into(
     format: GeometryFormat,

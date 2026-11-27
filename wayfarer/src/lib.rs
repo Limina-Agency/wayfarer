@@ -56,6 +56,7 @@
 // `clippy.toml` and `wayfarer_package::math`).
 #![allow(clippy::disallowed_methods)]
 
+pub mod access;
 mod cancellation;
 mod correlator;
 mod costing;
@@ -124,13 +125,14 @@ pub use package::cch::PotentialStats;
 pub use package::{
     PackageCounts, PackageQuality, PackageQualityStatus, ROUTING_PACKAGE_FORMAT_VERSION,
     RoutePackageMemoryProfile, RoutingPackage, RoutingPackageError, RoutingPackageMetadata,
-    RoutingPackageSection, RoutingPackageVerification,
+    RoutingPackageSection, RoutingPackageVerification, WarmUp,
 };
 
 pub use cancellation::{CancelToken, RouteCancellation};
 pub use direct_leg::DirectRouteLeg;
 pub use geometry::{
-    GeoJsonLineString, GeometryFormat, PolylineError, decode_polyline6, encode_polyline6,
+    GeoJsonLineString, GeoJsonMultiPolygon, GeoJsonMultiPolygonType, GeometryFormat, PolylineError,
+    decode_polyline6, encode_polyline6,
 };
 pub use map_matching::{
     MapMatchAlternative, MapMatchOptions, MapMatchResult, MapMatchSubPath, MatchedTraceSample,
@@ -173,9 +175,9 @@ pub use types::{
     RouteEdgeCostMultiplierRange, RouteEdgeRange, RouteEdgeSpeedOverrideRange,
     RouteEndpointOptions, RouteError, RouteFailure, RouteGuidanceQualityFlag,
     RouteIsochroneBoundaryFragment, RouteIsochroneBucket, RouteIsochroneContour,
-    RouteIsochroneMetric, RouteIsochroneOrder, RouteIsochroneOrigin, RouteIsochroneRequest,
-    RouteIsochroneResult, RouteLane, RouteLaneIndication, RouteLeg, RouteManeuver,
-    RouteManeuverKind, RouteMatrixCell, RouteMatrixCellStatus, RouteMatrixRequest,
+    RouteIsochroneMetric, RouteIsochroneOrder, RouteIsochroneOrigin, RouteIsochronePolygonOptions,
+    RouteIsochroneRequest, RouteIsochroneResult, RouteLane, RouteLaneIndication, RouteLeg,
+    RouteManeuver, RouteManeuverKind, RouteMatrixCell, RouteMatrixCellStatus, RouteMatrixRequest,
     RouteMatrixResult, RouteOptions, RoutePolicySummary, RouteRecostSummary,
     RouteShapeDynamicOverlay, RouteShapeDynamicOverlayKind, RouteShapeQualityFlag,
     RouteShapeSegment, RouteSpeedPreference, RouteSpeedSource, RouteStatus,

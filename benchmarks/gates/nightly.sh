@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The gate and timings of the "Gate and fuzz" workflow
-# (.github/workflows/nightly.yml, started by hand); runs anywhere
+# (.github/workflows/nightly.yml, nightly or by hand); runs anywhere
 # with binaries from `gates.sh build`:
 #
 #   nightly.sh <bin_dir> <out_dir> [baseline_bin_dir]

@@ -158,6 +158,15 @@ impl RouteSarOptions {
             .is_some_and(|relaxation| relaxation.ignore)
     }
 
+    /// The R7 reach of a costed `off_network` (X6), when it is enabled.
+    pub fn costed_off_network_max_leg_m(&self) -> Option<f64> {
+        self.relaxations
+            .off_network
+            .as_ref()
+            .filter(|relaxation| relaxation.costed)
+            .map(|relaxation| relaxation.max_leg_m)
+    }
+
     /// The R7 reach, when R7 is enabled.
     pub fn off_network_max_leg_m(&self) -> Option<f64> {
         self.relaxations
@@ -338,12 +347,21 @@ impl Default for SarConditional {
 pub struct SarOffNetwork {
     #[serde(alias = "max_leg_m")]
     pub max_leg_m: f64,
+    /// X6: cost the leg (`crate::access`, at the profile's off-road pace and
+    /// a cost factor of 1). The join is then chosen by total time among the
+    /// candidates within `max_leg_m`, and the route's cost, duration,
+    /// distance, geometry and maneuvers include the leg; the report's
+    /// `added_cost_s` is both the cost and the duration they add. Off by
+    /// default: the leg is reported and left out of the totals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub costed: bool,
 }
 
 impl Default for SarOffNetwork {
     fn default() -> Self {
         Self {
             max_leg_m: SAR_DEFAULT_OFF_NETWORK_MAX_LEG_M,
+            costed: false,
         }
     }
 }
@@ -761,7 +779,9 @@ pub struct RouteSarUse {
     pub length_m: f64,
     /// Cost the relaxation added (seconds): the R3 penalty, or for R7 the
     /// leg's time at the off-road pace (which the route's own cost and
-    /// duration leave out).
+    /// duration leave out), or with `costed` the leg's cost, which the
+    /// route's cost includes (and, at the costed leg's cost factor of 1,
+    /// its time, which the duration includes).
     pub added_cost_s: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub osm_way_id: Option<i64>,
@@ -1472,7 +1492,9 @@ fn physical_uses(
 /// snapped farther from the requested point than the request's own
 /// correlation distance, which only the relaxation's wider search reaches.
 /// The leg's time is at the profile's off-road pace; the route's own cost
-/// and duration leave it out, as they leave out every snap.
+/// and duration leave it out, as they leave out every snap. A `costed` leg
+/// (X6) is in the route's totals, and `added_cost_s` is the cost they
+/// include.
 pub(crate) fn add_off_network_uses(
     result: &mut crate::types::LegResult,
     origin: GeoPoint,
@@ -1502,10 +1524,32 @@ pub(crate) fn add_off_network_uses(
         if location.distance_m <= base {
             continue;
         }
-        let geometry = if is_origin {
-            vec![requested, location.snapped_point]
-        } else {
-            vec![location.snapped_point, requested]
+        // A costed leg (X6, `crate::access`) is in the route's totals: its
+        // drawn line and the cost they include.
+        let (geometry, added_cost_s) = match location.access {
+            Some(_) => {
+                let (from, to) = if is_origin {
+                    (requested, location.snapped_point)
+                } else {
+                    (location.snapped_point, requested)
+                };
+                (
+                    crate::direct_leg::densify_geodesic(
+                        from,
+                        to,
+                        crate::direct_leg::DIRECT_LEG_VERTEX_SPACING_M,
+                    ),
+                    crate::access::AccessTotals::of(location).cost,
+                )
+            }
+            None if is_origin => (
+                vec![requested, location.snapped_point],
+                location.distance_m / pace,
+            ),
+            None => (
+                vec![location.snapped_point, requested],
+                location.distance_m / pace,
+            ),
         };
         added.push((
             is_origin,
@@ -1515,7 +1559,7 @@ pub(crate) fn add_off_network_uses(
                 start_fraction: 0.0,
                 end_fraction: 1.0,
                 length_m: location.distance_m,
-                added_cost_s: location.distance_m / pace,
+                added_cost_s,
                 osm_way_id: None,
                 legal_tag: Some("off_network".to_string()),
                 confidence: vec!["straight line across unsurveyed ground".to_string()],

@@ -25,6 +25,7 @@
 use std::collections::BinaryHeap;
 
 use super::{HeapEntry, NO_LABEL, SEED_TRAVERSED_FRACTION_EPSILON, SearchState, tie_window};
+use crate::access::AccessTotals;
 use crate::costing::{CostingPolicy, EdgeCostDecision};
 use crate::package::SearchGraph;
 use crate::package::cch::{EXACT_GATE_NODES, GatedPotential, OwnMetric, PotentialScratch};
@@ -81,6 +82,9 @@ pub(crate) struct AnalysisPoint {
     /// Approach cost of the candidate (see `search::approach_costs`): in its
     /// seed or finish, never in a reported cost.
     pub approach: f64,
+    /// The candidate's costed access stretch (`crate::access`), which
+    /// reported totals include; zero without one.
+    pub access: AccessTotals,
 }
 
 impl AnalysisPoint {
@@ -97,6 +101,7 @@ impl AnalysisPoint {
                 edge,
                 fraction: candidate.fraction_along_edge,
                 approach,
+                access: AccessTotals::of(candidate),
             })
             .collect()
     }
@@ -117,6 +122,7 @@ impl AnalysisPoint {
                 edge,
                 fraction: candidate.fraction_along_edge,
                 approach,
+                access: AccessTotals::of(candidate),
             })
             .collect()
     }
@@ -518,6 +524,18 @@ pub(crate) struct AnalysisPath {
     pub cost: f64,
     pub distance_m: f64,
     pub duration_s: f64,
+}
+
+impl AnalysisPath {
+    /// The path with its endpoints' costed access stretches added to its
+    /// totals (`crate::access`).
+    pub(crate) fn with_access(mut self, origin: AccessTotals, destination: AccessTotals) -> Self {
+        let access = origin.plus(destination);
+        self.cost += access.cost;
+        self.duration_s += access.duration_s;
+        self.distance_m += access.distance_m;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -948,7 +966,7 @@ pub(super) fn direct_same_edge(
             };
             let total = path.cost + origin.approach + destination.approach;
             if best.as_ref().is_none_or(|(existing, _)| total < *existing) {
-                best = Some((total, path));
+                best = Some((total, path.with_access(origin.access, destination.access)));
             }
         }
     }
@@ -1035,12 +1053,18 @@ pub(crate) fn matrix_cell(
             }
         }
         (super::SearchOutcome::Found(path), _) => MatrixCell {
-            path: Some(AnalysisPath {
-                edges: path.edges,
-                cost: path.cost,
-                distance_m: path.distance_m,
-                duration_s: path.duration_s,
-            }),
+            path: Some(
+                AnalysisPath {
+                    edges: path.edges,
+                    cost: path.cost,
+                    distance_m: path.distance_m,
+                    duration_s: path.duration_s,
+                }
+                .with_access(
+                    origin_points[path.origin_index].access,
+                    destination_points[path.destination_index].access,
+                ),
+            ),
             counters,
             budget_exceeded,
         },
@@ -1520,20 +1544,25 @@ fn matrix_row_with(
         while labels[seed as usize].pred != NO_LABEL {
             seed = labels[seed as usize].pred;
         }
-        let origin_approach = seeds
-            .get(&seed)
-            .map_or(0.0, |origin| origins[*origin].approach);
+        let origin = seeds.get(&seed).map(|origin| origins[*origin]);
+        let origin_approach = origin.map_or(0.0, |origin| origin.approach);
         let mut edges = traversed_path(finish.label, labels);
         edges.push(destination.edge);
-        row.paths[target] = Some(AnalysisPath {
-            edges,
-            cost: finish.cost - origin_approach - destination.approach,
-            distance_m: label.distance_m
-                + f64::from(graph.edge_length[destination.edge as usize]) * fraction,
-            duration_s: label.duration_s
-                + finish.junction_s
-                + search.duration(destination.edge) * fraction,
-        });
+        row.paths[target] = Some(
+            AnalysisPath {
+                edges,
+                cost: finish.cost - origin_approach - destination.approach,
+                distance_m: label.distance_m
+                    + f64::from(graph.edge_length[destination.edge as usize]) * fraction,
+                duration_s: label.duration_s
+                    + finish.junction_s
+                    + search.duration(destination.edge) * fraction,
+            }
+            .with_access(
+                origin.map(|origin| origin.access).unwrap_or_default(),
+                destination.access,
+            ),
+        );
     }
     row
 }
@@ -1622,19 +1651,22 @@ pub(crate) fn isochrone(
         }
         // A farther candidate starts at its approach cost. The approach is a
         // penalty, not travel, so time starts at zero (as in matrix rows),
-        // or at the origin's start offset.
+        // or at the origin's start offset. A costed access stretch
+        // (`crate::access`) is travel: time and distance start after it.
         let (origin_index, offset_s) = (seeding.origin(point), seeding.offset_s(point));
+        let start_s = offset_s + origin.access.duration_s;
+        let start_m = origin.access.distance_m;
         let remaining = (1.0 - origin.fraction).clamp(0.0, 1.0);
         let cost = origin.approach + edge_cost * remaining;
-        let duration_s = offset_s + search.duration(origin.edge) * remaining;
-        let distance_m = f64::from(graph.edge_length[origin.edge as usize]) * remaining;
+        let duration_s = start_s + search.duration(origin.edge) * remaining;
+        let distance_m = start_m + f64::from(graph.edge_length[origin.edge as usize]) * remaining;
         cross(
             &mut outcome.crossings,
             origin.edge,
             origin.fraction,
             (origin.approach, cost),
-            (offset_s, duration_s),
-            (0.0, distance_m),
+            (start_s, duration_s),
+            (start_m, distance_m),
             origin_index,
         );
         // A seed is labelled even beyond every contour (its successors are
