@@ -207,6 +207,9 @@ pub(crate) struct RouteArchiveCompileRequest {
     /// to `<path>.tmp` and renamed into place at the very end, so an existing
     /// package there is replaced only by a complete one.
     pub route_archive_path: PathBuf,
+    /// As [`CompileRequest::road_graph_snapshot`].
+    #[cfg_attr(not(feature = "road-graph-snapshot"), allow(dead_code))]
+    pub road_graph_snapshot: Option<PathBuf>,
     /// As [`CompileRequest::threads`].
     pub threads: Option<usize>,
     /// The package build's options ([`CompileRequest::profiles`]).
@@ -313,6 +316,12 @@ fn compile_with_job(
     road_graph.way_facts = Vec::new();
     road_graph.route_memberships = Vec::new();
     road_graph.turn_restrictions = Vec::new();
+    #[cfg(feature = "road-graph-snapshot")]
+    if let Some(path) = &request.road_graph_snapshot {
+        wayfarer_road_graph::persist_road_graph_file(path, &road_graph).map_err(|error| {
+            CompileError::Failed(format!("Failed to write the road graph snapshot: {error}"))
+        })?;
+    }
     job.check()?;
     #[cfg(feature = "benchmark-profiling")]
     let _ = package_build::PACKAGE_BUILD_CHECKPOINT.set(profiling::checkpoint);
@@ -3704,6 +3713,7 @@ mod tests {
                 segment_order: order,
             },
             route_archive_path: dir.join("routing.mrt"),
+            road_graph_snapshot: None,
             threads: Some(2),
             package_options: PackageBuildOptions::default(),
         };

@@ -23,6 +23,9 @@ benchmark-profiling = []
 # Reads WAYFARER_DEBUG (build sub-phase timings and section stats on
 # stderr); off in app builds.
 debug-env = []
+# Test support: `CompileRequest::road_graph_snapshot` writes the road graph
+# a package is built from, for the reference oracle of parity harnesses.
+road-graph-snapshot = ["wayfarer-road-graph/snapshot"]
 
 [dependencies]
 schemars = { workspace = true, optional = true }

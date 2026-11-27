@@ -69,13 +69,17 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 # The compiler builds the test packages. Path only (no version), so publishing
 # drops it and this crate needs no compiler on crates.io.
-wayfarer-compiler = { path = "../wayfarer-compiler" }
+wayfarer-compiler = { path = "../wayfarer-compiler", features = ["road-graph-snapshot"] }
 wayfarer-road-graph = { workspace = true, features = ["snapshot"] }
 # Path only (no version), so publishing drops it: a versioned self-dependency
 # would need this crate on crates.io before its first release.
 wayfarer = { path = ".", features = ["reference", "debug-env", "terrain"] }
 petgraph = { workspace = true }
 tempfile = "3"
+
+[[example]]
+name = "portal_parity"
+required-features = ["terrain", "reference"]
 
 [[example]]
 name = "seam_parity"

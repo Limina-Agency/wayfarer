@@ -861,7 +861,7 @@
           "format": "double"
         },
         "maxCandidates": {
-          "description": "Directed candidate edges per point, 1 to [`ACCESS_MAX_CANDIDATES`]\n(default [`ACCESS_DEFAULT_CANDIDATES`]). It replaces\n`candidateLimit`.",
+          "description": "Directed candidate edges per point, 1 to [`ACCESS_MAX_CANDIDATES`]\n(default [`ACCESS_DEFAULT_CANDIDATES`], or\n[`ACCESS_PRICED_DEFAULT_CANDIDATES`] with a pricer). It replaces\n`candidateLimit`.",
           "type": [
             "integer",
             "null"
