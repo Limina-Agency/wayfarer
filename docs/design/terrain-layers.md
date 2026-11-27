@@ -1,16 +1,22 @@
-# Terrain layers: the contract for model-made terrain data (draft v0)
+# Terrain layers: the contract for model-made terrain data (v1)
 
-Status: draft v0, tested by a reference implementation in the terrain lane's
-experiment E10 (`off-road-sar/exp/E10`, branch `exp/terrain-layers`), nothing
-in the engine. The off-road plan pins v1 with the terrain tranche (0.8).
+Status: v1, implemented by the `wayfarer-layer` crate (reading, validating and
+writing layers, with the lattice; only `blake3`, `flate2` and `thiserror` as
+dependencies) and fused by `wayfarer-terrain`, both published from 0.6. v0 was
+the terrain lane's experiment E10 (`off-road-sar/exp/E10`, branch
+`exp/terrain-layers`). Pinning v1 changed no byte: the manifest still carries
+contract version 0.1 (section 6), so every layer written under v0 keeps its
+content hash, and E14's replay still matches. v1 adds the details E14 settled
+(sections 8 and 9) and the team overlay's shapes, which `incident-surface.md`
+section 5 defines.
 
 A terrain layer is newer information about the ground than the compiled
 terrain: a flood probability from Sentinel-1, a land-cover refresh from
 Sentinel-2, rubble and fallen trees from a drone orthomosaic, a closure drawn
 by a host. Models make layers outside the engine (the ML lane trains them on
 the RTX rig with Burn). This document says what a layer must look like so that
-fusion can combine it with the base terrain deterministically, on the command
-post and on every device, with the same bytes out.
+fusion can combine it with the base terrain deterministically on every device,
+with the same bytes out.
 
 How the base is made (DEM, land cover, steepness, linear features) is in
 `format-4.md` and the off-road plan (`off-road-sar/PLAN.md`, sections 7 and 9).
@@ -59,7 +65,7 @@ a hazard layer and a feature layer (section 10).
 
 - A layer states its spacing `(s_lat, s_lon)` in ticks; both must divide a
   degree (432,000 ticks), as for any lattice grid.
-- **v0 fuses only layers at the surface's spacing** (1″, the decided 25 m
+- **v1 fuses only layers at the surface's spacing** (1″, the decided 25 m
   friction cells, or 2″). A layer at another spacing is listed in the fusion
   record as ignored; the importer resamples it first, which makes a new layer
   with its own hash and the original as its parent.
@@ -177,7 +183,7 @@ Two rules make `w` comparable between models:
 | Field | Type | Meaning |
 |---|---|---|
 | magic | 8 B | `WTLAYER\0` |
-| contract major, minor | u16, u16 | this document's version (0.1) |
+| contract major, minor | u16, u16 | the wire version, 0.1 for v1 of this document (section 12) |
 | kind | u8 | section 2 |
 | licence | u8 | 0 open (may ship), 1 research only (section 13) |
 | s_lat, s_lon | u32 | spacing in ticks |
@@ -207,7 +213,7 @@ LE for level channels); then the feature count (u64) and the features sorted by
 their encoded bytes, duplicates dropped. Class layers have 16 slots in code
 order, slot 0 being KEEP.
 
-**File (`WTL0`, v0).** Magic, the manifest bytes, block count (u32), block
+**File (`WTL0`).** Magic, the manifest bytes, block count (u32), block
 keys (u64 each), `n + 1` payload offsets (u64), the payloads, the feature count
 (varint) and features, then the content hash (32 B). A block payload is a tag
 byte (bit 7: a presence bitmap follows; the low bits are 0) and then one plane
@@ -277,9 +283,11 @@ twice counts once.
 
 **Out, per post:** `P`, the 8 hazard probabilities, the 3 levels with their
 confidence, the effect bits, a certainty `round(255 · max P / S)`, and the
-source: 0 base, `k` the k-th applied grid layer, 255 a team item. Each post
-depends only on its own inputs, so blocks fuse in parallel and a new layer
-re-fuses only the blocks it touches.
+source: 0 base, `k` the k-th applied grid layer, 255 a team item. The incident
+surface stores the source as an index into a table per block (the layers that
+are some post's source in that block), so a block's bytes depend only on the
+layers that touch it. Each post depends only on its own inputs, so blocks fuse
+in parallel and a new layer re-fuses only the blocks it touches.
 
 **The fusion record** (what S3 provenance stores): T, the base hash, the prior
 table's hash, the applied layers in order (hash, kind, observed_at), the left
@@ -290,7 +298,12 @@ machine.
 ## 9. Hand-off to the cost surface
 
 The rules below are pinned, with exact arithmetic, in `incident-surface.md`
-(the stored per-incident surface, its identity, updates and query rules).
+section 6 (the stored per-incident surface, its identity, updates and query
+rules). Two details came from E14 and are part of v1: a hazard whose level is
+measured on the post (flood where a water depth is present, snow cover where a
+snow depth is present) does not block, because the measured depth is the
+better evidence and decides; and the effect bits take fixed line-mask bits
+(OBSTRUCTION 13 for debris and fallen trees, WASHOUT 14, TEAM_BLOCK 15).
 
 E5's `cell_t(profile, dist, steep, lines)` already takes a class distribution
 at `PSCALE = 4096`, so the fused `P` goes in unchanged, and with no layers the
@@ -321,7 +334,7 @@ that a leg rests on a two-day-old flood model.
 
 ## 10. Voxel graphs
 
-The interchange form of a sparse semantic voxel graph (v0):
+The interchange form of a sparse semantic voxel graph (not implemented in the crates yet):
 
 - Nodes: id u64 (unique), E7 latitude and longitude, height in decimetres
   (i32), class u8, confidence u8. Classes: 1 ground, 2 rubble, 3 debris, 4
@@ -344,7 +357,7 @@ parent is the graph's hash, so the projection is the same everywhere:
   edge's and its ends'.
 
 Connector edges into the road graph (virtual trails, EXP-2b free nodes) are
-0.9 work and not in v0.
+0.9 work and not in v1.
 
 ## 11. Reproducibility
 
@@ -367,9 +380,14 @@ Connector edges into the road graph (virtual trails, EXP-2b free nodes) are
 
 ## 12. Versioning
 
-- **Major** changes anything that could change fused results for the same
-  inputs (a rule, a rounding, a class code's meaning). A reader refuses a layer
-  of another major; the fusion record says so.
+- **Major** changes the meaning of a layer's bytes or of a class code. A reader
+  refuses a layer of another major; the fusion record says so. A change to a
+  fusion rule or rounding that keeps the bytes' meaning changes the incident
+  surface's fuse version instead (`incident-surface.md` section 13).
+- **Wire version and document version.** The manifest carries the wire
+  version. v1 of this document is wire version 0.1, unchanged from v0, so that
+  pinning the contract kept every layer hash; the next major of the bytes is
+  wire major 1.
 - **Minor** adds optional things: new hazard or level channel codes, new
   feature classes, new manifest fields at the end. A reader that does not know a
   channel ignores it and records that it did.
@@ -397,7 +415,7 @@ Connector edges into the road graph (virtual trails, EXP-2b free nodes) are
   separates 79 % from 51 % agreement with BDOT10k. A prior table built from
   E3's confusion matrices would let an ML layer outvote the base more where the
   base is weak. Proposed for E13, once a real model layer exists to test it.
-- **Layers at a different spacing** fuse after an import resample in v0. Fusing
+- **Layers at a different spacing** fuse after an import resample in v1. Fusing
   a 2″ layer into a 1″ surface directly (each post reads the layer post whose
   cell holds it) is cheap if wanted.
 - **Feature effects on the road graph.** A washout or collapsed bridge on a
