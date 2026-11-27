@@ -318,7 +318,8 @@ pub struct Applied {
 }
 
 /// What a fusion used: the layers applied in fusion order, those left out and why (sorted by
-/// hash), the prior, the overlay and the hash of every fused block.
+/// hash), the prior, the overlay, and `fused`: blake3 over each fused block's hash
+/// (blake3 of [`FusedBlock::bytes`]) in terrain order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub t: i64,
@@ -470,6 +471,22 @@ pub fn fuse(
     prm: &Params,
     only: Option<&[BlockId]>,
 ) -> (Vec<(BlockId, FusedBlock)>, Record) {
+    fuse_with(ter, prior, layers, overlay, prm, only, |_, _, fb| fb)
+}
+
+/// [`fuse`], handing each fused block to `f` (with the block's terrain index and the layers
+/// applied) as soon as it is made, so only the blocks in flight hold fusion state. Returns
+/// `f`'s results in terrain order.
+#[allow(clippy::too_many_arguments)]
+pub fn fuse_with<T: Send>(
+    ter: &Terrain,
+    prior: &Prior,
+    layers: &[&HashedLayer],
+    overlay: &[OverlayItem],
+    prm: &Params,
+    only: Option<&[BlockId]>,
+    f: impl Fn(usize, &[Applied], FusedBlock) -> T + Sync,
+) -> (Vec<(BlockId, T)>, Record) {
     let spacing = ter.spacing().ticks();
     let overlay = &canonical_overlay(overlay)[..];
     // Which layers apply, in fusion order.
@@ -517,44 +534,46 @@ pub fn fuse(
             .filter(|&k| set.binary_search(&blocks[k]).is_ok())
             .collect(),
     };
-    let out: Vec<(BlockId, FusedBlock)> = pick
+    let applied: Vec<Applied> = active
+        .iter()
+        .map(|a| Applied {
+            hash: a.1,
+            kind: a.2.m.kind,
+            observed_at: a.0,
+            valid_until: a.2.m.valid_until,
+        })
+        .collect();
+    let done: Vec<(BlockId, [u8; 32], T)> = pick
         .par_iter()
         .map(|&k| {
             let id = blocks[k];
-            (
+            let fb = fuse_block(
                 id,
-                fuse_block(
-                    id,
-                    ter.cover(k),
-                    ter.conf(k),
-                    prior,
-                    &grids,
-                    feat.get(&id),
-                    overlay,
-                    prm,
-                    spacing,
-                ),
-            )
+                ter.cover(k),
+                ter.conf(k),
+                prior,
+                &grids,
+                feat.get(&id),
+                overlay,
+                prm,
+                spacing,
+            );
+            let hb = *blake3::hash(&fb.bytes(id)).as_bytes();
+            (id, hb, f(k, &applied, fb))
         })
         .collect();
 
     let mut h = blake3::Hasher::new();
-    for (id, fb) in &out {
-        h.update(&fb.bytes(*id));
+    let mut out = Vec::with_capacity(done.len());
+    for (id, hb, t) in done {
+        h.update(&hb);
+        out.push((id, t));
     }
     let rec = Record {
         t: prm.t,
         terrain: ter.hash(),
         prior: prior.hash(),
-        applied: active
-            .iter()
-            .map(|a| Applied {
-                hash: a.1,
-                kind: a.2.m.kind,
-                observed_at: a.0,
-                valid_until: a.2.m.valid_until,
-            })
-            .collect(),
+        applied,
         left_out: ignored,
         overlay: overlay_hash(overlay),
         fused: *h.finalize().as_bytes(),
