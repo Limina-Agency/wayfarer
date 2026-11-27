@@ -16,12 +16,29 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = ["cli"]
+# The `wayfarer-terrain` binary. A host that only calls the library turns it off
+# (`default-features = false`) and builds without clap.
+cli = ["dep:clap", "dep:ctrlc"]
+
+[[bin]]
+name = "wayfarer-terrain"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+# SIGINT and SIGTERM cancel a compile, so it removes its partial file on the way out.
+ctrlc = { version = "3.4", features = ["termination"], optional = true }
 flate2 = { workspace = true }
 libm = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
+# For its CancelToken only, so one token type stops route and terrain compiles alike.
+wayfarer-package = { workspace = true }
 wayfarer-terrain = { workspace = true }
 
 [dev-dependencies]
 blake3 = { workspace = true }
+tempfile = "3"

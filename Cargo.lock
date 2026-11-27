@@ -1305,10 +1305,14 @@ name = "wayfarer-terrain-compiler"
 version = "0.4.0"
 dependencies = [
  "blake3",
+ "clap",
+ "ctrlc",
  "flate2",
  "libm",
  "rayon",
+ "tempfile",
  "thiserror",
+ "wayfarer-package",
  "wayfarer-terrain",
 ]
 

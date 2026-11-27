@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use wayfarer_terrain::lattice::{BLOCK, Spacing, TICKS_PER_DEG};
 use wayfarer_terrain::terrain::{DEM_NONE, STEEP_NONE, Terrain};
 use wayfarer_terrain_compiler::geo::Utm;
-use wayfarer_terrain_compiler::{Options, Region, SourceFile, Sources, compile};
+use wayfarer_terrain_compiler::{CancelToken, Options, Region, SourceFile, Sources, compile};
 
 /// The terrain hash of `sources()` over `REGION`. It must be the same on every target,
 /// thread count, cache size and input order; CI runs this on x86-64, i686, aarch64 macOS and
@@ -140,7 +140,15 @@ fn run(
         cache_bytes: cache,
         ..Options::default()
     };
-    let (r, out) = compile(sources(reversed), &REGION, &opts, Cursor::new(Vec::new())).unwrap();
+    let (r, out) = compile(
+        sources(reversed),
+        &REGION,
+        &opts,
+        Cursor::new(Vec::new()),
+        &CancelToken::new(),
+        |_| {},
+    )
+    .unwrap();
     (r, out.into_inner())
 }
 
@@ -277,6 +285,8 @@ fn half_second_spacing_and_given_blocks() {
         &Region::Blocks(pick),
         &opts,
         Cursor::new(Vec::new()),
+        &CancelToken::new(),
+        |_| {},
     )
     .unwrap();
     assert_eq!(r.blocks, 2);
@@ -289,12 +299,32 @@ fn half_second_spacing_and_given_blocks() {
 fn refuses_what_it_cannot_read() {
     let mut s = sources(false);
     s.heights[0][0] = SourceFile::new("junk.tif", Cursor::new(b"II*\0junk".to_vec()));
-    assert!(compile(s, &REGION, &Options::default(), Cursor::new(Vec::new())).is_err());
+    assert!(
+        compile(
+            s,
+            &REGION,
+            &Options::default(),
+            Cursor::new(Vec::new()),
+            &CancelToken::new(),
+            |_| {}
+        )
+        .is_err()
+    );
     let opts = Options {
         spacing: Spacing::new(36).unwrap(),
         ..Options::default()
     };
-    assert!(compile(sources(false), &REGION, &opts, Cursor::new(Vec::new())).is_err());
+    assert!(
+        compile(
+            sources(false),
+            &REGION,
+            &opts,
+            Cursor::new(Vec::new()),
+            &CancelToken::new(),
+            |_| {}
+        )
+        .is_err()
+    );
     let bad = Region::Bbox {
         south: 50.0,
         west: 19.0,
@@ -306,8 +336,158 @@ fn refuses_what_it_cannot_read() {
             sources(false),
             &bad,
             &Options::default(),
-            Cursor::new(Vec::new())
+            Cursor::new(Vec::new()),
+            &CancelToken::new(),
+            |_| {}
         )
         .is_err()
+    );
+}
+
+#[test]
+fn reports_progress_per_block_row_and_stops_on_cancel() {
+    let opts = Options {
+        threads: Some(2),
+        ..Options::default()
+    };
+    let blocks = REGION.blocks(opts.spacing).unwrap();
+    let rows = 1 + (blocks.last().unwrap().bi - blocks[0].bi) as usize;
+    let mut seen = Vec::new();
+    let cancel = CancelToken::new();
+    compile(
+        sources(false),
+        &REGION,
+        &opts,
+        Cursor::new(Vec::new()),
+        &cancel,
+        |p| seen.push(p),
+    )
+    .unwrap();
+    assert_eq!(seen.len(), rows);
+    assert!(seen.windows(2).all(|w| w[0].blocks_done < w[1].blocks_done));
+    assert_eq!(seen.last().unwrap().blocks_done, blocks.len() as u64);
+    assert_eq!(seen.last().unwrap().fraction(), 1.0);
+
+    let cancel = CancelToken::new();
+    let mut calls = 0;
+    let r = compile(
+        sources(false),
+        &REGION,
+        &opts,
+        Cursor::new(Vec::new()),
+        &cancel,
+        |_| {
+            calls += 1;
+            cancel.cancel();
+        },
+    );
+    assert!(matches!(
+        r,
+        Err(wayfarer_terrain_compiler::Error::Cancelled)
+    ));
+    assert_eq!(calls, 1, "stops in the row after the cancel");
+}
+
+/// A host's path: tiles on disk, `Sources::from_paths`, `compile_to_file` and `TerrainJob`.
+#[test]
+fn compiles_tiles_on_disk_into_a_file() {
+    use wayfarer_terrain_compiler::{Error, TerrainJob, compile_to_file};
+    let f = files();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for sub in ["gem15", "glo30", "worldcover"] {
+        std::fs::create_dir(d.join(sub)).unwrap();
+    }
+    std::fs::write(d.join("gem15/gem_a.tif"), &f.gem_a).unwrap();
+    std::fs::write(d.join("gem15/gem_b.TIF"), &f.gem_b).unwrap();
+    std::fs::write(d.join("gem15/readme.txt"), "not a tile").unwrap();
+    std::fs::write(d.join("glo30/glo.tif"), &f.glo).unwrap();
+    std::fs::write(d.join("worldcover/wc.tif"), &f.wc).unwrap();
+    let from_disk = || {
+        Sources::from_paths(
+            &[vec![d.join("gem15")], vec![d.join("glo30/glo.tif")]],
+            &[d.join("worldcover")],
+        )
+        .unwrap()
+    };
+    assert!(Sources::from_paths(&[vec![d.join("missing")]], &[]).is_err());
+    assert!(Sources::from_paths(&[vec![d.join("glo30")]], &[d.join("gem15/x")]).is_err());
+
+    let out = d.join("t.wtr");
+    let r = compile_to_file(
+        from_disk(),
+        &REGION,
+        &Options::default(),
+        &out,
+        &CancelToken::new(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(wayfarer_terrain::hex(&r.terrain_hash), GOLDEN);
+    let t = Terrain::read(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(t.hash(), r.terrain_hash);
+    assert!(
+        t.sources()
+            .contains("heights tier 1: gem_a.tif, gem_b.TIF\n")
+    );
+    assert!(t.sources().starts_with("Heights: GEM-15 DTM, CC BY 4.0."));
+
+    // A cancelled compile leaves neither the file nor its partial.
+    let cancelled = d.join("c.wtr");
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let e = compile_to_file(
+        from_disk(),
+        &REGION,
+        &Options::default(),
+        &cancelled,
+        &cancel,
+        |_| {},
+    );
+    assert!(matches!(e, Err(Error::Cancelled)));
+    let left: Vec<_> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        !left
+            .iter()
+            .any(|n| n.to_string_lossy().starts_with("c.wtr")),
+        "{left:?}"
+    );
+
+    let job_out = d.join("job.wtr");
+    let job = TerrainJob::start(
+        from_disk(),
+        REGION,
+        Options::default(),
+        &job_out,
+        CancelToken::new(),
+    );
+    let report = job.wait().unwrap();
+    assert_eq!(report.terrain_hash, r.terrain_hash);
+    assert_eq!(
+        std::fs::read(&job_out).unwrap(),
+        std::fs::read(&out).unwrap()
+    );
+
+    // Dropping a running job cancels it and removes its partial file.
+    let dropped = d.join("dropped.wtr");
+    drop(TerrainJob::start(
+        from_disk(),
+        REGION,
+        Options::default(),
+        &dropped,
+        CancelToken::new(),
+    ));
+    let left: Vec<_> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        !left
+            .iter()
+            .any(|n| n.to_string_lossy().ends_with(".partial")),
+        "{left:?}"
     );
 }

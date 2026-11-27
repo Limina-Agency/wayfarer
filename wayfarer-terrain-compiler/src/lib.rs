@@ -11,36 +11,43 @@
 //! projection, which uses `libm`, so the same inputs give the same file on every target and
 //! thread count.
 //!
-//! ```no_run
-//! use wayfarer_terrain_compiler::{Options, Region, SourceFile, Sources, compile};
+//! A host compiles the terrain file from the tiles it already holds:
 //!
-//! let sources = Sources {
-//!     heights: vec![
-//!         vec![SourceFile::open("gem15/dtm_w19s49.tif")?],
-//!         vec![SourceFile::open("glo30/Copernicus_DSM_COG_10_N49_00_E019_00_DEM.tif")?],
-//!     ],
-//!     land_cover: vec![SourceFile::open("worldcover/ESA_WorldCover_10m_2021_v200_N48E018_Map.tif")?],
-//!     attribution: wayfarer_terrain_compiler::attribution::ALL.join("\n"),
-//! };
+//! ```no_run
+//! use wayfarer_terrain_compiler::{CancelToken, Options, Region, Sources, compile_to_file};
+//!
+//! // Files or directories of `.tif` tiles; each inner list is one height tier, best first.
+//! let sources = Sources::from_paths(&[vec!["tiles/gem15"], vec!["tiles/glo30"]], &["tiles/worldcover"])?;
 //! let region = Region::Bbox { south: 49.2, west: 19.84, north: 49.38, east: 20.12 };
-//! let out = std::fs::File::create("tatra.wtr")?;
-//! let (report, _) = compile(sources, &region, &Options::default(), out)?;
+//! let cancel = CancelToken::new(); // `cancel.cancel()` from any thread stops it
+//! let report = compile_to_file(sources, &region, &Options::default(), "tatra.wtr", &cancel, |p| {
+//!     eprintln!("{:.0}%", p.fraction() * 100.0)
+//! })?;
 //! println!("{} blocks, {} bytes", report.blocks, report.file_bytes);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! [`compile()`] writes to any seekable sink and takes sources from any reader
+//! ([`SourceFile::new`]); a host that polls instead of taking callbacks starts a
+//! [`TerrainJob`]. The `wayfarer-terrain` binary (feature `cli`, on by default) is the command
+//! line: `wayfarer-terrain compile` and `wayfarer-terrain inspect`.
 //!
 //! Not yet here: the OSM stage (land-cover override and its confidence, linear features),
 //! which fills the `cover`, `conf` and `lines` planes from an OSM extract.
 
 pub mod compile;
 pub mod geo;
+mod job;
 pub mod source;
 pub mod tiff;
 
+pub use job::TerrainJob;
 pub use source::{ReadSeek, SourceFile};
+pub use wayfarer_package::CancelToken;
 
 use rayon::prelude::*;
 use std::io::{Seek, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use wayfarer_terrain::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing, TICKS_PER_DEG};
 use wayfarer_terrain::terrain::{DEM_NONE, MAX_SOURCES};
@@ -58,6 +65,12 @@ pub enum Error {
     /// The terrain file writer refused the output (or could not write it).
     #[error("terrain file: {0}")]
     Terrain(#[from] wayfarer_terrain::Error),
+    /// The output file could not be created, moved into place or removed.
+    #[error("output: {0}")]
+    Output(String),
+    /// The compile's [`CancelToken`] was cancelled.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -81,6 +94,55 @@ pub struct Sources {
     /// Licences and attribution, written into the file's sources text with the file names
     /// (sorted, so the order files come in changes no byte).
     pub attribution: String,
+}
+
+impl Sources {
+    /// Opens the tiles at these paths, each a `.tif`/`.tiff` file or a directory of them (not
+    /// searched recursively): `height_tiers` in tiers, best first (say GEM-15, then GLO-30),
+    /// and WorldCover in `land_cover`. The attribution is [`attribution::ALL`].
+    pub fn from_paths<P: AsRef<Path>>(
+        height_tiers: &[Vec<P>],
+        land_cover: &[P],
+    ) -> Result<Sources> {
+        let open = |paths: &[P]| -> Result<Vec<SourceFile>> {
+            let mut files = Vec::new();
+            for p in paths {
+                for f in tiles(p.as_ref())? {
+                    files.push(SourceFile::open(f)?);
+                }
+            }
+            Ok(files)
+        };
+        Ok(Sources {
+            heights: height_tiers
+                .iter()
+                .map(|t| open(t))
+                .collect::<Result<_>>()?,
+            land_cover: open(land_cover)?,
+            attribution: attribution::ALL.join("\n"),
+        })
+    }
+}
+
+/// The path itself if it is a file, or the `.tif`/`.tiff` files in a directory, sorted.
+fn tiles(path: &Path) -> Result<Vec<PathBuf>> {
+    let err = |e: std::io::Error| Error::Source(format!("{}: {e}", path.display()));
+    if !path.metadata().map_err(err)?.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut v = Vec::new();
+    for e in std::fs::read_dir(path).map_err(err)? {
+        let p = e.map_err(err)?.path();
+        let ext = p.extension().map(|x| x.to_ascii_lowercase());
+        if p.is_file() && ext.is_some_and(|x| x == "tif" || x == "tiff") {
+            v.push(p);
+        }
+    }
+    if v.is_empty() {
+        return Err(Error::Source(format!("{}: no .tif tiles", path.display())));
+    }
+    v.sort();
+    Ok(v)
 }
 
 /// Where to compile.
@@ -166,6 +228,24 @@ impl Default for Options {
     }
 }
 
+/// How far a compile has come, reported after each block row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub blocks_done: u64,
+    pub blocks_total: u64,
+}
+
+impl Progress {
+    /// The share of blocks done, 0 to 1.
+    pub fn fraction(&self) -> f64 {
+        if self.blocks_total == 0 {
+            1.0
+        } else {
+            self.blocks_done as f64 / self.blocks_total as f64
+        }
+    }
+}
+
 /// What a compile did.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -186,13 +266,57 @@ pub struct Report {
     pub seconds: f64,
 }
 
+/// Compiles a terrain file for a region into a file at `path`. It writes `<path>.partial` and
+/// moves it into place once complete, so `path` never holds part of a file; on an error or a
+/// cancel the partial file is removed. See [`compile()`] for the rest.
+pub fn compile_to_file(
+    sources: Sources,
+    region: &Region,
+    options: &Options,
+    path: impl AsRef<Path>,
+    cancel: &CancelToken,
+    on_progress: impl FnMut(Progress) + Send,
+) -> Result<Report> {
+    let path = path.as_ref();
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    let out = |e: std::io::Error| Error::Output(format!("{}: {e}", path.display()));
+    let file = std::fs::File::create(&partial).map_err(out)?;
+    let done = compile(
+        sources,
+        region,
+        options,
+        std::io::BufWriter::new(file),
+        cancel,
+        on_progress,
+    )
+    .and_then(|(report, w)| {
+        let file = w.into_inner().map_err(|e| out(e.into_error()))?;
+        file.sync_all().map_err(out)?;
+        drop(file);
+        std::fs::rename(&partial, path).map_err(out)?;
+        Ok(report)
+    });
+    if done.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    done
+}
+
 /// Compiles a terrain file for a region into `out` (a file, or any seekable sink), one block
-/// row at a time. Returns the report and the sink.
+/// row at a time, and returns the report and the sink.
+///
+/// `on_progress` is called after each block row, on the thread that called `compile`.
+/// Cancelling `cancel` stops the compile within a block and returns [`Error::Cancelled`],
+/// leaving part of a file in `out`.
 pub fn compile<W: Write + Seek + Send>(
     sources: Sources,
     region: &Region,
     options: &Options,
     out: W,
+    cancel: &CancelToken,
+    mut on_progress: impl FnMut(Progress) + Send,
 ) -> Result<(Report, W)> {
     let started = Instant::now();
     let s = options.spacing;
@@ -241,14 +365,19 @@ pub fn compile<W: Write + Seek + Send>(
         ..Report::default()
     };
     let mut writer = TerrainWriter::new(out, s, blocks.clone(), &text)?;
-    let run = |writer: &mut TerrainWriter<W>, report: &mut Report| -> Result<()> {
+    let mut run = |writer: &mut TerrainWriter<W>, report: &mut Report| -> Result<()> {
         let mut at = 0;
         while at < blocks.len() {
             let bi = blocks[at].bi;
             let end = at + blocks[at..].iter().take_while(|b| b.bi == bi).count();
             let planes: Vec<compile::Planes> = blocks[at..end]
                 .par_iter()
-                .map(|&b| compile::block(&ctx, b))
+                .map(|&b| {
+                    if cancel.is_cancelled() {
+                        return Err(Error::Cancelled);
+                    }
+                    compile::block(&ctx, b)
+                })
                 .collect::<Result<_>>()?;
             for p in planes {
                 for (t, n) in p.by_tier.iter().enumerate() {
@@ -263,6 +392,10 @@ pub fn compile<W: Write + Seek + Send>(
                 writer.push(&p.dm, &p.steep, &p.cover, &p.conf, &p.lines)?;
             }
             at = end;
+            on_progress(Progress {
+                blocks_done: at as u64,
+                blocks_total: blocks.len() as u64,
+            });
         }
         Ok(())
     };

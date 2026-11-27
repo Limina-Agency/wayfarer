@@ -12,7 +12,7 @@ use common::{Place, Sample, Spec, Virtual, hills};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wayfarer_terrain_compiler::geo::Utm;
-use wayfarer_terrain_compiler::{Options, Region, SourceFile, Sources, compile};
+use wayfarer_terrain_compiler::{CancelToken, Options, Region, SourceFile, Sources, compile};
 
 struct Counting;
 static NOW: AtomicUsize = AtomicUsize::new(0);
@@ -171,7 +171,15 @@ fn peak(region: &Region, opts: &Options) -> (usize, wayfarer_terrain_compiler::R
     let s = sources();
     let base = NOW.load(Ordering::Relaxed);
     PEAK.store(base, Ordering::Relaxed);
-    let (r, _) = compile(s, region, opts, Sink::default()).unwrap();
+    let (r, _) = compile(
+        s,
+        region,
+        opts,
+        Sink::default(),
+        &CancelToken::new(),
+        |_| {},
+    )
+    .unwrap();
     (PEAK.load(Ordering::Relaxed) - base, r)
 }
 
