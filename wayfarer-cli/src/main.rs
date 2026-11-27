@@ -9,6 +9,7 @@ mod pace;
 mod package;
 mod protocol;
 mod query;
+mod terrain;
 
 // mimalloc returns freed pages to the system between phases; the default
 // allocator keeps much of a phase's peak resident. The profiling build
@@ -55,6 +56,7 @@ enum Command {
     Match(query::MatchArgs),
     Snap(query::SnapArgs),
     Pace(pace::PaceArgs),
+    Terrain(terrain::TerrainArgs),
 }
 
 /// How a command failed: the message for stderr and the exit status.
@@ -99,6 +101,7 @@ fn main() {
         Command::Match(args) => query::map_match(args),
         Command::Snap(args) => query::snap(args),
         Command::Pace(args) => pace::run(args),
+        Command::Terrain(args) => terrain::run(args),
     };
     if let Err(failure) = result {
         if !failure.message.is_empty() {

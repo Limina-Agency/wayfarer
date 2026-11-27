@@ -1,0 +1,28 @@
+[package]
+name = "wayfarer-terrain-compiler"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+description = "Off-road terrain files for Wayfarer: compiles GEM-15, GLO-30 and WorldCover COG tiles and an OSM extract into a terrain file on the global lattice, one block row at a time"
+readme = "README.md"
+keywords = ["routing", "terrain", "dem", "openstreetmap", "search-and-rescue"]
+categories = ["science::geo"]
+
+[lints]
+workspace = true
+
+[dependencies]
+flate2 = { workspace = true }
+libm = { workspace = true }
+osm-pbf-ingest = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+# For its CancelToken only, so one token type stops route and terrain compiles alike.
+wayfarer-package = { workspace = true }
+wayfarer-terrain = { workspace = true }
+
+[dev-dependencies]
+blake3 = { workspace = true }
+tempfile = "3"
