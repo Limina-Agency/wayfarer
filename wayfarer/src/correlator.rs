@@ -367,21 +367,40 @@ impl<'a> Correlator<'a> {
     /// candidates, after up to half a candidate limit of the nearer island ones
     /// (an endpoint on the same island still needs those), and records its
     /// radius.
+    ///
+    /// `role` says which end of the search the point is; only a request's
+    /// [`AccessPricer`](crate::access::AccessPricer) reads it.
     pub fn search_expanding(
         &self,
         point: GeoPoint,
         profile: MobilityProfile,
+        role: crate::access::AccessRole,
         policy: &CorrelationPolicy,
         endpoint_options: &RouteEndpointOptions,
     ) -> CandidateSearch {
         if let Some(access) = &policy.access {
-            return self.search_access(
+            let mut search = self.search_access(
                 point,
                 profile,
                 policy,
                 endpoint_options,
                 access.resolve(profile),
             );
+            if let Some(pricer) = &access.pricer {
+                let candidates = std::mem::take(&mut search.candidates);
+                search.candidates = pricer.0.price(crate::access::AccessQuery {
+                    point,
+                    profile,
+                    role,
+                    policy: access.resolve(profile),
+                    candidates,
+                    view: self.access,
+                });
+                search
+                    .candidates
+                    .truncate(crate::access::ACCESS_MAX_CANDIDATES);
+            }
+            return search;
         }
         let nearby = self.search(point, profile, policy, endpoint_options);
         if nearby.candidates.iter().any(connected) {
@@ -450,7 +469,7 @@ impl<'a> Correlator<'a> {
         }
         let priced = access.access_from(point);
         for candidate in &mut search.candidates {
-            candidate.access = Some(priced);
+            candidate.access = Some(priced.clone());
         }
         search
     }
@@ -1199,6 +1218,7 @@ pub(crate) mod test_mode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::AccessRole;
     use crate::types::CorrelationRoadClassPreference;
     use wayfarer_package::DirectionalAccess;
     use wayfarer_road_graph::{RoadGraph, RoadGraphBuilder, RoutableWay, enhance_road_graph};
@@ -1722,8 +1742,13 @@ mod tests {
         }));
         assert_eq!(nearby.expanded_max_distance_m, None);
 
-        let expanded =
-            correlator.search_expanding(point, MobilityProfile::Wheeled, &policy, &options);
+        let expanded = correlator.search_expanding(
+            point,
+            MobilityProfile::Wheeled,
+            AccessRole::Origin,
+            &policy,
+            &options,
+        );
         assert_eq!(expanded.expanded_max_distance_m, Some(300));
         // The island's candidates stay first, then the network's.
         assert_eq!(expanded.candidates[0].edge_id, nearby.candidates[0].edge_id);
@@ -1737,6 +1762,7 @@ mod tests {
         let connected = correlator.search_expanding(
             GeoPoint::new(50.0001, 20.01),
             MobilityProfile::Wheeled,
+            AccessRole::Origin,
             &policy,
             &options,
         );
@@ -1819,8 +1845,13 @@ mod tests {
                     < DEFAULT_REACH_EDGE_LIMIT
         }));
 
-        let expanded =
-            correlator.search_expanding(point, MobilityProfile::Wheeled, &policy, &options);
+        let expanded = correlator.search_expanding(
+            point,
+            MobilityProfile::Wheeled,
+            AccessRole::Origin,
+            &policy,
+            &options,
+        );
         assert_eq!(expanded.expanded_max_distance_m, Some(300));
         assert!(
             expanded
@@ -1949,7 +1980,13 @@ mod tests {
                     }
                     let policy = &policies[1];
                     let (all, two_phase) = both(&|| {
-                        correlator.search_expanding(point, profile, policy, &option_sets[0])
+                        correlator.search_expanding(
+                            point,
+                            profile,
+                            AccessRole::Origin,
+                            policy,
+                            &option_sets[0],
+                        )
                     });
                     assert_eq!(all, two_phase, "{point:?} {profile:?} expanding");
                 }

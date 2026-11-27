@@ -1526,7 +1526,7 @@ pub(crate) fn add_off_network_uses(
         }
         // A costed leg (X6, `crate::access`) is in the route's totals: its
         // drawn line and the cost they include.
-        let (geometry, added_cost_s) = match location.access {
+        let (geometry, added_cost_s) = match &location.access {
             Some(_) => {
                 let (from, to) = if is_origin {
                     (requested, location.snapped_point)

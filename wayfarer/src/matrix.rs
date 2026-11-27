@@ -133,20 +133,24 @@ impl RoutingEngine {
         // points take about 0.28 s on one thread, as long as their 1x1,500
         // matrix's cells.
         let (source_searches, target_searches) = self.package().in_matrix_pool(|| {
-            let correlate = |points: &[crate::types::GeoPoint]| {
+            let correlate = |points: &[crate::types::GeoPoint], role| {
                 points
                     .par_iter()
                     .map(|point| {
                         correlator.search_expanding(
                             *point,
                             request.profile,
+                            role,
                             &policy,
                             &Default::default(),
                         )
                     })
                     .collect::<Vec<_>>()
             };
-            (correlate(&request.sources), correlate(&request.targets))
+            (
+                correlate(&request.sources, crate::access::AccessRole::Origin),
+                correlate(&request.targets, crate::access::AccessRole::Destination),
+            )
         });
         let source_expanded_correlation_distances_m =
             expanded_correlation_distances(&source_searches);

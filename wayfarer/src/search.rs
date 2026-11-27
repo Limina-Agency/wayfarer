@@ -240,6 +240,7 @@ impl RoutingEngine {
         let mut origin_search = correlator.search_expanding(
             request.origin,
             request.profile,
+            crate::access::AccessRole::Origin,
             &policy,
             &request.origin_options,
         );
@@ -276,6 +277,7 @@ impl RoutingEngine {
         let mut destination_search = correlator.search_expanding(
             request.destination,
             request.profile,
+            crate::access::AccessRole::Destination,
             &policy,
             &request.destination_options,
         );
