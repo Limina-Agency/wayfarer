@@ -144,10 +144,10 @@ fn manifest(
 
 /// A grid layer from a per-post function of (row, col) giving (confidence, values) or None.
 fn grid(m: Manifest, ter: &Terrain, f: impl Fn(i64, i64) -> Option<(u8, Vec<u16>)>) -> HashedLayer {
-    let (slots, _) = m.slots();
+    let (slots, width) = m.slots();
     let mut blocks = Vec::new();
     for &b in ter.blocks() {
-        let mut g = GridBlock::new(b, slots);
+        let mut g = GridBlock::new(b, slots, width);
         for q in 0..BLOCK_POSTS {
             let r = (b.bi - BI0) as i64 * BLOCK as i64 + (q / BLOCK) as i64;
             let c = (b.bj - BJ0) as i64 * BLOCK as i64 + (q % BLOCK) as i64;
@@ -155,7 +155,7 @@ fn grid(m: Manifest, ter: &Terrain, f: impl Fn(i64, i64) -> Option<(u8, Vec<u16>
                 g.set_present(q);
                 g.conf[q] = w;
                 for (s, x) in v.into_iter().enumerate() {
-                    g.vals[s][q] = x;
+                    g.vals[s].set(q, x);
                 }
             }
         }

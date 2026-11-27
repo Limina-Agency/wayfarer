@@ -73,7 +73,7 @@ fn peak(km2: f64) -> usize {
 
 #[test]
 fn peak_heap_within_budget() {
-    for (km2, limit_mb) in [(451.0, 96), (900.0, 128)] {
+    for (km2, limit_mb) in [(451.0, 64), (900.0, 112), (2_500.0, 320)] {
         let p = peak(km2);
         eprintln!("{km2} km²: peak heap {} MB (limit {limit_mb} MB)", p / MB);
         assert!(

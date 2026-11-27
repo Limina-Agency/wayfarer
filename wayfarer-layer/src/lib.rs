@@ -29,11 +29,12 @@
 //!     backend: "tract".into(), attribution: String::new(), inputs: vec![], parents: vec![],
 //! };
 //! let (id, row) = BlockId::of_post(177_440, 71_936);
-//! let mut b = GridBlock::new(id, m.slots().0);
+//! let (slots, width) = m.slots();
+//! let mut b = GridBlock::new(id, slots, width);
 //! for p in row..row + 64 {
 //!     b.set_present(p);
 //!     b.conf[p] = 255;
-//!     b.vals[0][p] = 200;
+//!     b.vals[0].set(p, 200);
 //! }
 //! let mut layer = Layer { m, blocks: vec![b], features: vec![] };
 //! layer.canonicalise().unwrap();

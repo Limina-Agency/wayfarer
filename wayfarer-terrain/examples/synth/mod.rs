@@ -137,17 +137,17 @@ pub fn area(km2: f64) -> Area {
         parents: vec![],
     };
     let grid = |m: Manifest, f: &dyn Fn(i64, i64) -> Option<(u8, Vec<u16>)>| {
-        let (slots, _) = m.slots();
+        let (slots, width) = m.slots();
         let mut bs = Vec::new();
         for &b in terrain.blocks() {
-            let mut g = GridBlock::new(b, slots);
+            let mut g = GridBlock::new(b, slots, width);
             for q in 0..BLOCK_POSTS {
                 let (r, c) = rc(b, q);
                 if let Some((w, v)) = f(r, c) {
                     g.set_present(q);
                     g.conf[q] = w;
                     for (s, x) in v.into_iter().enumerate() {
-                        g.vals[s][q] = x;
+                        g.vals[s].set(q, x);
                     }
                 }
             }

@@ -88,6 +88,7 @@ RAYON_NUM_THREADS=1 cargo run --release -p wayfarer-terrain --example bench -- -
 ```
 
 `tests/memory.rs` holds the budget in CI. It counts peak heap for the inputs, the surface
-build and one walker route: at most 96 MB for 451 km² and 128 MB for 900 km² (an IPP ± 15 km
-AOI). Blocks are costed as soon as they are fused, so fusion state never exists for the
-whole area at once.
+build and one walker route: at most 64 MB for 451 km², 112 MB for 900 km² (an IPP ± 15 km
+AOI) and 320 MB for 2,500 km². Measured: 45, 89 and 250 MB. Blocks are costed as soon as
+they are fused, so fusion state never exists for the whole area at once, and layer planes
+are held at their slot width, so a class or hazard layer takes one byte per value.

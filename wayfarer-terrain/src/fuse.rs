@@ -916,14 +916,15 @@ fn fuse_block(
                 Kind::Class => {
                     let mut qv = [0u8; NCLASS];
                     for (c, v) in qv.iter_mut().enumerate() {
-                        *v = lb.vals[c][q] as u8;
+                        *v = lb.vals[c].get(q) as u8;
                     }
                     blend_class(&mut fb.p[q], &qv, w);
                 }
                 Kind::Hazard => {
                     for (ch, &code) in l.m.channels.iter().enumerate() {
                         if let Some(sl) = hazard_slot(code) {
-                            fb.haz[q][sl] = blend_hazard(fb.haz[q][sl], lb.vals[ch][q] as u8, w);
+                            fb.haz[q][sl] =
+                                blend_hazard(fb.haz[q][sl], lb.vals[ch].get(q) as u8, w);
                         }
                     }
                 }
@@ -933,7 +934,7 @@ fn fuse_block(
                     }
                     for (ch, &code) in l.m.channels.iter().enumerate() {
                         if let Some(sl) = level_slot(code) {
-                            fb.lev[q][sl] = (lb.vals[ch][q], w);
+                            fb.lev[q][sl] = (lb.vals[ch].get(q), w);
                         }
                     }
                 }
