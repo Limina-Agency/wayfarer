@@ -37,6 +37,7 @@ const UNCERTAINTY_POINTS: usize = 8;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ReachRequest {
     /// The approximate last known position (LKP) or point last seen.
     pub last_known: GeoPoint,
@@ -296,6 +297,7 @@ fn validate_rings(rings: &[DistanceRing]) -> Result<(), SarError> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Stopping {
     /// Equally likely at any time up to the moving budget: the time moved is
     /// uniform between 0 and `elapsed * moving_fraction`.
@@ -340,24 +342,45 @@ fn default_outer_share() -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct DistanceRing {
     pub probability: f64,
     pub distance_m: f64,
+}
+
+impl DistanceRing {
+    pub fn new(probability: f64, distance_m: f64) -> Self {
+        Self {
+            probability,
+            distance_m,
+        }
+    }
 }
 
 /// A point with the planner's label.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct NamedPoint {
     pub id: String,
     pub point: GeoPoint,
+}
+
+impl NamedPoint {
+    pub fn new(id: impl Into<String>, point: GeoPoint) -> Self {
+        Self {
+            id: id.into(),
+            point,
+        }
+    }
 }
 
 /// The network a person of one percentile could have reached.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ReachArea {
     pub person: PersonPercentile,
     /// The contour in model seconds (budget over the person's factor).
@@ -383,6 +406,7 @@ pub struct ReachArea {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct EdgeProbability {
     /// The undirected key (the smaller directed id of the edge's two).
     pub edge_id: u64,
@@ -402,6 +426,7 @@ pub struct EdgeProbability {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ProbabilityMap {
     /// Sorted by edge key; only edges above 0.
     pub edges: Vec<EdgeProbability>,
@@ -450,6 +475,7 @@ impl ProbabilityMap {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[non_exhaustive]
 pub enum RouteTarget {
     /// One of the request's destinations.
     Destination { id: String, point: GeoPoint },
@@ -465,6 +491,7 @@ pub enum RouteTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct LikelyRoute {
     pub target: RouteTarget,
     pub reachable: bool,
@@ -489,6 +516,7 @@ pub struct LikelyRoute {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct RouteCorridorEdge {
     /// The undirected key.
     pub edge_id: u64,
@@ -500,6 +528,7 @@ pub struct RouteCorridorEdge {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ReachResult {
     /// The request's last known position.
     pub last_known: GeoPoint,
@@ -565,6 +594,7 @@ impl Layout {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ReachPace {
     /// The pace model's source (`default` or a team calibration); none when
     /// the request's person factors or a profile other than on foot decided.

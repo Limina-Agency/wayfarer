@@ -1279,6 +1279,7 @@ dependencies = [
  "wayfarer-costing",
  "wayfarer-package",
  "wayfarer-road-graph",
+ "wayfarer-service",
 ]
 
 [[package]]

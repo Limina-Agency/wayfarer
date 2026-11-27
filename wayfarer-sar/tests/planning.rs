@@ -7,9 +7,10 @@ use wayfarer_road_graph::{
     DirectionalAccess, RoadGraph, RoadGraphBuilder, RoadType, RoutableWay, enhance_road_graph,
 };
 use wayfarer_sar::{
-    CoverageRequest, DistanceRing, NamedPoint, PersonFactors, PersonPercentile, ReachRequest,
-    ReachResult, RouteTarget, SarError, SarTeam, SarZone, SarZoneKind, SearchSegment, Stopping,
-    TeamPlanRequest, TeamTrack, apply_coverage, plan_teams, predict_reach,
+    CoverageRequest, Detection, DistanceRing, EdgeEffort, EffortArea, NamedPoint, PersonFactors,
+    PersonPercentile, ReachRequest, ReachResult, RouteTarget, SarError, SarTeam, SarZone,
+    SarZoneKind, SearchEffort, SearchSegment, Stopping, TeamPlanRequest, TeamTrack, apply_coverage,
+    plan_teams, predict_reach,
 };
 
 /// Grid spacing in degrees (about 222 m at the equator).
@@ -233,10 +234,7 @@ fn reach_is_deterministic() {
     let engine = engine();
     let mut request = reach_request(20.0);
     request.uncertainty_m = 150.0;
-    request.destinations = vec![NamedPoint {
-        id: "hut".into(),
-        point: point(0.0, 0.0),
-    }];
+    request.destinations = vec![NamedPoint::new("hut", point(0.0, 0.0))];
     let a = serde_json::to_string(&predict_reach(&engine, &request).unwrap()).unwrap();
     let b = serde_json::to_string(&predict_reach(&engine, &request).unwrap()).unwrap();
     assert_eq!(a, b);
@@ -343,14 +341,8 @@ fn routes_reach_the_frontier_and_share_corridors() {
     let engine = engine();
     let mut request = reach_request(15.0);
     request.destinations = vec![
-        NamedPoint {
-            id: "near".into(),
-            point: point(CENTRE as f64, CENTRE as f64 + 2.0),
-        },
-        NamedPoint {
-            id: "far".into(),
-            point: point(0.0, 0.0),
-        },
+        NamedPoint::new("near", point(CENTRE as f64, CENTRE as f64 + 2.0)),
+        NamedPoint::new("far", point(0.0, 0.0)),
     ];
     let reach = predict_reach(&engine, &request).unwrap();
     let frontier = reach
@@ -404,14 +396,8 @@ fn uncertainty_and_rings() {
     let mut request = reach_request(15.0);
     request.stopping = Stopping::Never;
     request.distance_rings = vec![
-        DistanceRing {
-            probability: 0.5,
-            distance_m: 400.0,
-        },
-        DistanceRing {
-            probability: 0.95,
-            distance_m: 900.0,
-        },
+        DistanceRing::new(0.5, 400.0),
+        DistanceRing::new(0.95, 900.0),
     ];
     let ringed = predict_reach(&engine, &request).unwrap();
     assert!((total(&ringed) - 1.0).abs() < 1e-9);
@@ -466,12 +452,10 @@ fn trimmed_probability_keeps_the_most_probable_edges() {
 
     // A trimmed map is a valid input to coverage, and its unlisted mass is
     // rescaled with the rest.
-    let track = TeamTrack {
-        team_id: "alpha".into(),
-        samples: track_along_row(CENTRE as f64, (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0)),
-        profile: wayfarer::MobilityProfile::OnFoot,
-        pod: None,
-    };
+    let track = TeamTrack::new(
+        "alpha",
+        track_along_row(CENTRE as f64, (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0)),
+    );
     let coverage =
         apply_coverage(&engine, &CoverageRequest::new(vec![track], top.probability)).unwrap();
     assert!(coverage.probability.unlisted > dropped);
@@ -491,10 +475,7 @@ fn off_trail_positions_pay_the_walk_to_the_paths() {
     let off = point(CENTRE as f64, -1.5);
     let mut request = ReachRequest::new(off);
     request.elapsed_s = Some(20.0 * 60.0);
-    request.destinations = vec![NamedPoint {
-        id: "centre".into(),
-        point: centre(),
-    }];
+    request.destinations = vec![NamedPoint::new("centre", centre())];
     let priced = predict_reach(&engine, &request).unwrap();
     request.off_trail = false;
     let free = predict_reach(&engine, &request).unwrap();
@@ -624,14 +605,8 @@ fn invalid_requests_fail() {
     assert!(invalid(zone));
     let mut rings = reach_request(10.0);
     rings.distance_rings = vec![
-        DistanceRing {
-            probability: 0.5,
-            distance_m: 900.0,
-        },
-        DistanceRing {
-            probability: 0.4,
-            distance_m: 1_000.0,
-        },
+        DistanceRing::new(0.5, 900.0),
+        DistanceRing::new(0.4, 1_000.0),
     ];
     assert!(invalid(rings));
     let json =
@@ -741,12 +716,10 @@ fn track_along_row(row: f64, cols: (f64, f64)) -> Vec<NavigationPositionSample> 
 fn coverage_lowers_searched_probability() {
     let engine = engine();
     let reach = predict_reach(&engine, &reach_request(15.0)).unwrap();
-    let track = TeamTrack {
-        team_id: "alpha".into(),
-        samples: track_along_row(CENTRE as f64, (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0)),
-        profile: wayfarer::MobilityProfile::OnFoot,
-        pod: None,
-    };
+    let track = TeamTrack::new(
+        "alpha",
+        track_along_row(CENTRE as f64, (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0)),
+    );
     let mut request = CoverageRequest::new(vec![track], reach.probability.clone());
     request.segments = vec![
         SearchSegment::new(
@@ -796,6 +769,115 @@ fn coverage_lowers_searched_probability() {
     let corner = &coverage.segments[1];
     assert_eq!(corner.covered_length_m, 0.0);
     assert!(corner.probability_after >= corner.probability_before);
+}
+
+#[test]
+fn host_effort_counts_as_a_search() {
+    let engine = engine();
+    let reach = predict_reach(&engine, &reach_request(15.0)).unwrap();
+    // A drone's video grid in JSON, as a host sends it: one cell a whole grid
+    // step wide over the centre row's middle, seen for 2 tau, and the cell
+    // beside it never seen.
+    let corner = point(CENTRE as f64 - 0.5, CENTRE as f64 - 0.5);
+    let effort: SearchEffort = serde_json::from_value(serde_json::json!({
+        "sourceId": "drone-1",
+        "tauS": 30.0,
+        "area": {
+            "kind": "grid",
+            "southWest": { "lat": corner.lat, "lng": corner.lng },
+            "cellLatDeg": STEP,
+            "cellLngDeg": STEP,
+            "cells": [{ "row": 0, "col": 0, "seenS": 60.0 }, { "row": 0, "col": 1, "pod": 0.0 }],
+        },
+    }))
+    .unwrap();
+    let mut request = CoverageRequest::new(Vec::new(), reach.probability.clone());
+    request.efforts = vec![effort];
+    request.segments = vec![SearchSegment::new(
+        "middle",
+        grid_box(
+            (CENTRE as f64, CENTRE as f64),
+            (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0),
+        ),
+    )];
+    let coverage = apply_coverage(&engine, &request).unwrap();
+    let seen = 1.0 - libm::exp(-2.0);
+    let report = &coverage.efforts[0];
+    assert_eq!(report.source_id, "drone-1");
+    // Four edges meet at the centre node, each half inside the cell.
+    assert_eq!(report.edge_count, 4, "{report:?}");
+    assert!((report.mean_pod - seen / 2.0).abs() < 0.02, "{report:?}");
+    for edge in &coverage.covered_edges {
+        assert_eq!(edge.passes, 0);
+        assert!((edge.pod - edge.effort_pod).abs() < 1e-12);
+    }
+    assert!(coverage.probability_of_success > 0.0);
+    assert!(coverage.segments[0].probability_after < coverage.segments[0].probability_before);
+
+    // Effort and a track over the same edge are two searches: misses multiply.
+    let key = coverage.covered_edges[0].edge_id;
+    let effort_pod = coverage.covered_edges[0].pod;
+    let mut both = CoverageRequest::new(
+        vec![TeamTrack::new(
+            "alpha",
+            track_along_row(CENTRE as f64, (CENTRE as f64 - 3.0, CENTRE as f64 + 3.0)),
+        )],
+        reach.probability.clone(),
+    );
+    both.efforts = vec![SearchEffort::new(
+        "sweep",
+        EffortArea::Edges {
+            edges: vec![EdgeEffort::new(key, Detection::Pod(effort_pod))],
+        },
+    )];
+    let combined = apply_coverage(&engine, &both).unwrap();
+    let edge = combined
+        .covered_edges
+        .iter()
+        .find(|edge| edge.edge_id == key)
+        .unwrap();
+    let track_pod = if edge.passes > 0 {
+        1.0 - (0..edge.passes).fold(1.0, |miss, _| miss * 0.2)
+    } else {
+        0.0
+    };
+    let expected = 1.0 - (1.0 - track_pod) * (1.0 - effort_pod);
+    assert!((edge.pod - expected).abs() < 1e-12, "{edge:?}");
+
+    // A polygon effort: every edge inside takes its detection.
+    let mut area = CoverageRequest::new(Vec::new(), reach.probability.clone());
+    area.efforts = vec![SearchEffort::new(
+        "hasty",
+        EffortArea::Polygon {
+            polygon: grid_box((0.0, 2.0), (0.0, 2.0)),
+            detection: Detection::Pod(0.5),
+        },
+    )];
+    let swept = apply_coverage(&engine, &area).unwrap();
+    assert!(swept.efforts[0].edge_count >= 12, "{:?}", swept.efforts[0]);
+    assert!(
+        swept
+            .covered_edges
+            .iter()
+            .all(|edge| (edge.pod - 0.5).abs() < 1e-12)
+    );
+
+    // Nothing to apply, or seconds without a time constant, is invalid.
+    assert!(
+        apply_coverage(
+            &engine,
+            &CoverageRequest::new(Vec::new(), reach.probability.clone())
+        )
+        .is_err()
+    );
+    let mut no_tau = CoverageRequest::new(Vec::new(), reach.probability);
+    no_tau.efforts = vec![SearchEffort::new(
+        "cam",
+        EffortArea::Edges {
+            edges: vec![EdgeEffort::new(key, Detection::SeenS(10.0))],
+        },
+    )];
+    assert!(apply_coverage(&engine, &no_tau).is_err());
 }
 
 #[test]

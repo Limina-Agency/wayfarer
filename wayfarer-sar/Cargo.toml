@@ -30,6 +30,8 @@ wayfarer-package = { workspace = true }
 schema = ["dep:schemars", "wayfarer/schema"]
 
 [dev-dependencies]
+# The crate docs show the steps run through `RoutingService::execute`.
+wayfarer-service = { workspace = true }
 wayfarer-road-graph = { workspace = true, features = ["snapshot"] }
 # Builds the test packages. Path only (no version), so publishing drops it.
 wayfarer-compiler = { path = "../wayfarer-compiler" }

@@ -376,12 +376,15 @@ int32_t wayfarer_sar_plan_teams(const WayfarerPackage *package,
                                         const WayfarerCancelToken *cancel,
                                         char **out_json);
 
-/* Applies searched tracks: a CoverageRequest {"tracks": [{"teamId",
- * "samples", "profile", "pod"}], "probability", "segments", "defaultPod"}
- * gives a CoverageResult {"tracks", "coveredEdges", "segments",
- * "probability" (updated after the unsuccessful search),
- * "probabilityOfSuccess"}. A track that matches no road is reported in
- * "tracks", not as an error. */
+/* Applies searched tracks and host-measured effort: a CoverageRequest
+ * {"tracks": [{"teamId", "samples", "profile", "pod"}], "efforts":
+ * [{"sourceId", "tauS", "area": {"kind": "edges" | "grid" | "polygon", ...}}],
+ * "probability", "segments", "defaultPod"} (at least one track or effort; an
+ * effort's detections are {"pod": p} or {"seenS": s}, see
+ * schema/sar-coverage-request.json) gives a CoverageResult {"tracks",
+ * "efforts", "coveredEdges", "segments", "probability" (updated after the
+ * unsuccessful search), "probabilityOfSuccess"}. A track that matches no road
+ * is reported in "tracks", not as an error. */
 int32_t wayfarer_sar_coverage(const WayfarerPackage *package,
                                       const char *request_json,
                                       char **out_json);

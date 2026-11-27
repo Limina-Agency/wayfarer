@@ -17,6 +17,7 @@ const Z90: f64 = 1.281_551_565_544_600_4;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PersonFactors {
     pub p10: f64,
     pub p50: f64,
@@ -43,7 +44,7 @@ impl PersonFactors {
         p90: 1.32,
     };
 
-    pub(crate) fn validate(&self) -> Result<(), SarError> {
+    pub fn validate(&self) -> Result<(), SarError> {
         let valid = [self.p10, self.p50, self.p90]
             .iter()
             .all(|value| crate::finite_positive(*value))
@@ -211,6 +212,12 @@ pub(crate) fn footpath_ratio(pace: &PaceModel) -> f64 {
 }
 
 impl PersonFactors {
+    /// Fast (P10), typical (P50) and slow (P90) multipliers of the engine's
+    /// time; [`PersonFactors::validate`] checks them.
+    pub fn new(p10: f64, p50: f64, p90: f64) -> Self {
+        Self { p10, p50, p90 }
+    }
+
     /// The person factors (engine time multipliers) of a pace model whose
     /// time is `ratio` times the engine's: its P10, P50 and P90 over the
     /// expected time, times `ratio`.

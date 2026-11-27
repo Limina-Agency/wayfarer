@@ -9,7 +9,7 @@ use wayfarer::{
     RoutingEngine,
 };
 
-use crate::network::{centroid, search_options, zone_overlays};
+use crate::network::{interior_point, search_options, zone_overlays};
 use crate::pace::{footpath_ratio, pace_ratio};
 use crate::reach::{Edges, ProbabilityMap};
 use crate::{SarError, SarZone, SarZoneKind, finite_positive, invalid_point, unit_interval};
@@ -24,6 +24,7 @@ pub const MAX_SEGMENTS: usize = 1_000;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SarTeam {
     pub id: String,
     /// Where the team starts (the command post, a drop-off point).
@@ -57,15 +58,21 @@ impl SarTeam {
     }
 }
 
-/// A search segment: an area one team searches in one assignment.
+/// A search segment: an area one team searches in one assignment, as people
+/// drew it. It is taken as given: any winding, convex or not, never split,
+/// merged or clipped to the reach; overlapping segments each count the paths
+/// inside them, and a segment with no path inside still gets arrival times
+/// (to its access point, off the paths with `offTrail`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SearchSegment {
     pub id: String,
     /// At least three points.
     pub polygon: Vec<GeoPoint>,
-    /// Where a team enters the segment; by default the polygon's centroid.
+    /// Where a team enters the segment; by default a point inside the
+    /// polygon (its centroid when that is inside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_point: Option<GeoPoint>,
     /// The segment's probability of area when the planner sets it; by
@@ -107,7 +114,8 @@ impl SearchSegment {
     }
 
     pub(crate) fn access(&self) -> GeoPoint {
-        self.access_point.unwrap_or_else(|| centroid(&self.polygon))
+        self.access_point
+            .unwrap_or_else(|| interior_point(&self.polygon))
     }
 }
 
@@ -115,6 +123,7 @@ impl SearchSegment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TeamPlanRequest {
     /// 1 to 64 teams, ids unique.
     pub teams: Vec<SarTeam>,
@@ -256,6 +265,7 @@ fn default_territory_bands() -> usize {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct TeamPace {
     pub team_id: String,
     /// The pace model's source; none for teams not on foot.
@@ -272,6 +282,7 @@ pub struct TeamPace {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct TeamArrival {
     pub team_id: String,
     pub segment_id: String,
@@ -286,6 +297,7 @@ pub struct TeamArrival {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct SegmentPlan {
     pub segment_id: String,
     /// Probability of area: the planner's, or summed from the edges inside.
@@ -303,6 +315,7 @@ pub struct SegmentPlan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct TeamAssignment {
     pub team_id: String,
     pub segment_id: String,
@@ -313,6 +326,7 @@ pub struct TeamAssignment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct TeamTerritory {
     pub team_id: String,
     pub edge_count: usize,
@@ -327,6 +341,7 @@ pub struct TeamTerritory {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct TeamPlanResult {
     /// Each team's travel-time multiplier, in team order.
     pub paces: Vec<TeamPace>,

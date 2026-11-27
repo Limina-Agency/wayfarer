@@ -19,6 +19,11 @@ impl Failure {
                 error.to_string(),
             ),
             SarError::Route(route) => Self::route(route),
+            _ => Self::new(
+                super::WAYFARER_INTERNAL_ERROR,
+                "internal",
+                error.to_string(),
+            ),
         }
     }
 }
@@ -75,8 +80,9 @@ pub unsafe extern "C" fn wayfarer_sar_plan_teams(
     }
 }
 
-/// Applies team tracks to a probability map from `request_json`, a
-/// `CoverageRequest` (`{"tracks", "probability", "segments", "defaultPod"}`;
+/// Applies team tracks and host-measured search effort to a probability map
+/// from `request_json`, a `CoverageRequest` (`{"tracks", "efforts",
+/// "probability", "segments", "defaultPod"}`;
 /// see `schema/sar-coverage-request.json`). `*out_json` is the
 /// `CoverageResult`: the covered edges, per-segment coverage and detection,
 /// and the updated probability. A track that matches no road is reported in

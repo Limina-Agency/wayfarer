@@ -1649,11 +1649,11 @@
       ]
     },
     "SearchSegment": {
-      "description": "A search segment: an area one team searches in one assignment.",
+      "description": "A search segment: an area one team searches in one assignment, as people\ndrew it. It is taken as given: any winding, convex or not, never split,\nmerged or clipped to the reach; overlapping segments each count the paths\ninside them, and a segment with no path inside still gets arrival times\n(to its access point, off the paths with `offTrail`).",
       "type": "object",
       "properties": {
         "accessPoint": {
-          "description": "Where a team enters the segment; by default the polygon's centroid.",
+          "description": "Where a team enters the segment; by default a point inside the\npolygon (its centroid when that is inside).",
           "anyOf": [
             {
               "$ref": "#/$defs/GeoPoint"

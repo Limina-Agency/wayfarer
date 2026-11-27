@@ -136,9 +136,13 @@ routes respect `no_go` and `avoid` zones (the complying run).
 
 ### 2.5 Teams (S5)
 
+- **Segments as drawn:** the planner's polygons are used as given: any
+  winding, never split, merged or clipped. An edge in two overlapping segments
+  counts in each, and a segment with no path inside still gets arrival times.
 - **Time to segment:** a matrix per profile from team start points to each
-  segment's access point (given, or the polygon's centroid), times the team's
-  pace factor plus its start offset.
+  segment's access point (given, or a point inside the polygon: its centroid,
+  or for a concave shape whose centroid falls outside, the middle of its widest
+  span), times the team's pace factor plus its start offset.
 - **Segment POA:** given, or the sum of the reach edge probabilities inside the
   segment polygon (engine projection).
 - **First assignment (greedy, deterministic):** segments by POA, highest first;
@@ -153,6 +157,20 @@ routes respect `no_go` and `avoid` zones (the complying run).
   directions as one path. Passes add up: `POD_edge = 1 - (1 - pod)^passes`, with
   the track's `pod` (default 0.8, a hasty search along a trail; uncalibrated, the
   host sets it per team or task).
+- **Host-supplied effort** (`efforts`): search the host measured itself, such
+  as a drone's or camera's video coverage, counts like a track. Each effort
+  names its source and gives a detection as a probability (`pod`) or as seconds
+  seen (`seenS`, turned into `1 - exp(-seen / tauS)` with the effort's
+  `tauS`), in one of three shapes:
+  - `edges`: per edge id, for a host that scores the network itself;
+  - `grid`: cells of a regular lat/lng grid from `southWest` (only searched
+    cells listed); an edge takes the length-weighted mean of the cells along
+    its shape, the chance of detecting a person anywhere on it;
+  - `polygon`: one detection for every edge inside a polygon (a sweep the team
+    scored by hand).
+  Tracks and efforts are independent searches, so an edge's misses multiply:
+  `POD_edge = 1 - prod(1 - POD_track) * prod(1 - POD_effort)`. The result
+  reports each effort's edge count, covered length and mean POD.
 - Segment POD is probability-weighted: `sum(POA_e * POD_e) / sum(POA_e)`; segment
   coverage is covered length over the segment's network length.
 - Bayes after an unsuccessful search: `POA'_e = POA_e (1 - POD_e) / (1 - sum POA POD)`,
@@ -168,6 +186,7 @@ routes respect `no_go` and `avoid` zones (the complying run).
 | `avoid` and `weight` zones | dense forest or dwarf pine, private ground (avoid); trails, drainages, huts, viewpoints, roads (weight above 1): local knowledge and subject profile |
 | `personFactors`, `speedFactor`, `movingFraction` | E4 defaults; the subject's fitness, age and conditions (snow, night) |
 | Team `paceFactor`, track `pod` | the team's own GPX residuals (S1 import) and sweep-width tables; start values here are uncalibrated |
+| Effort `pod`, `seenS` and `tauS` | the host's own sensor model (for video: seconds a cell was in view at usable resolution, and the time constant from its detection trials) |
 
 ## 3. What ships now vs. after terrain
 
@@ -177,6 +196,7 @@ routes respect `no_go` and `avoid` zones (the complying run).
 | **1b (this branch)** | Reach polygons per person (`polygons`, section 2.2b) | A1 (#107, on main) | 0.5 / 0.6 |
 | **1c (this branch)** | Off-trail starts and ends priced: the LKP, uncertainty points, destinations, team starts and segment access points (`offTrail`, section 2.2b) | X1 costed access legs (#108, on main) | 0.5 / 0.6 |
 | **1d (this branch)** | CLI `wayfarer sar reach|teams|coverage`; C ABI `wayfarer_sar_reach`, `wayfarer_sar_plan_teams`, `wayfarer_sar_coverage` (the library's `sar` build); `schema/sar-*.json`; `maxEdges` and `minEdgeProbability` trim the probability map | this crate | 0.5 / 0.6 |
+| **1e (this branch)** | Host-supplied search effort (`efforts`: POD or seconds seen per edge, grid cell or polygon); drawn segments taken as given; every public type `#[non_exhaustive]` with constructors (section 5) | this crate | 0.5 |
 | 2 | Pace on slope: switch default factors to the E4 curve basis | T2 Tobler/E4 pace in OnFoot costing, T1 elevation | 0.8 |
 | 3 | Reach and probability per terrain cell (off-network spread, S9) | incident surface / X5a | 0.9 |
 | 3b | Hazard rasters and ML layers as zones (S10) | raster reader, layer contract | 0.9 |
@@ -231,3 +251,21 @@ the engine's public queries, so Monaco and Kraków stay byte-identical.
 - `pod` defaults and factors are starting values; QA-8 field trials and team GPX
   residuals calibrate them.
 - Team tracks are personal data: the crate keeps only covered edge ids per team.
+- Host efforts are trusted as given: the crate does not check a grid against
+  the sensor's footprint or the time of day.
+
+## 5. Rust API and stability
+
+`wayfarer-sar` is published on crates.io from 0.5 with a typed Rust API: the
+requests and results are Rust structs built with `new` constructors, so a Rust
+host never needs the JSON or the C ABI (both stay for other hosts). A host on
+`wayfarer-service` runs the steps on its cached engine with
+`RoutingService::execute`, which holds the source's lease for the call.
+
+Across 0.x, changes are additive. Every public struct and enum is
+`#[non_exhaustive]`: a release may add a field (with a serde default, so older
+JSON still reads), an enum variant or an error variant without a breaking
+change, and hosts build requests with the constructors and match with a
+wildcard arm. Removing or renaming a field, changing its meaning or units, or
+changing a default that moves results waits for the next minor release and is
+listed in the changelog. The `schema/sar-*.json` schemas follow the same rule.

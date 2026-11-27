@@ -10,6 +10,13 @@
         "$ref": "#/$defs/CoveredEdge"
       }
     },
+    "efforts": {
+      "description": "What each effort covered, in request order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EffortCoverage"
+      }
+    },
     "probability": {
       "description": "The probability after an unsuccessful search (Bayes): searched edges\nlose, everything else (rest of world included) gains.",
       "$ref": "#/$defs/ProbabilityMap"
@@ -41,7 +48,7 @@
   ],
   "$defs": {
     "CoveredEdge": {
-      "description": "An edge a team searched.",
+      "description": "An edge a team or an effort searched.",
       "type": "object",
       "properties": {
         "edgeId": {
@@ -50,6 +57,11 @@
           "format": "uint64",
           "minimum": 0
         },
+        "effortPod": {
+          "description": "The efforts' share alone: `1 - product(1 - pod)` over them.",
+          "type": "number",
+          "format": "double"
+        },
         "passes": {
           "description": "Traversals over all tracks (out and back counts twice).",
           "type": "integer",
@@ -57,7 +69,7 @@
           "minimum": 0
         },
         "pod": {
-          "description": "`1 - product((1 - pod) ^ passes)` over the tracks.",
+          "description": "The combined detection: `1 - product((1 - pod) ^ passes)` over the\ntracks times `product(1 - pod)` over the efforts.",
           "type": "number",
           "format": "double"
         }
@@ -103,6 +115,36 @@
         "edgeId",
         "probability",
         "lengthM"
+      ]
+    },
+    "EffortCoverage": {
+      "description": "What one effort covered, for the report.",
+      "type": "object",
+      "properties": {
+        "coveredLengthM": {
+          "type": "number",
+          "format": "double"
+        },
+        "edgeCount": {
+          "description": "Edges it searched (detection above 0).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "meanPod": {
+          "description": "The length-weighted mean detection over those edges.",
+          "type": "number",
+          "format": "double"
+        },
+        "sourceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceId",
+        "edgeCount",
+        "coveredLengthM",
+        "meanPod"
       ]
     },
     "ProbabilityMap": {

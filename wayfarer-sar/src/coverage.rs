@@ -7,6 +7,7 @@ use wayfarer::{
     MapMatchRequest, MobilityProfile, NavigationPositionSample, RouteError, RoutingEngine,
 };
 
+use crate::effort::{EffortCoverage, MAX_EFFORT_ITEMS, MAX_EFFORTS, SearchEffort, effort_coverage};
 use crate::reach::{EdgeProbability, Edges, ProbabilityMap};
 use crate::teams::{SearchSegment, unique};
 use crate::{SarError, unit_interval};
@@ -18,6 +19,7 @@ pub const MAX_TRACKS: usize = 256;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TeamTrack {
     pub team_id: String,
     pub samples: Vec<NavigationPositionSample>,
@@ -29,14 +31,21 @@ pub struct TeamTrack {
     pub pod: Option<f64>,
 }
 
-/// Searched tracks against a probability map. See
+/// Searched tracks and host-measured effort against a probability map. See
 /// `docs/design/sar-planning.md` 2.6.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct CoverageRequest {
-    /// 1 to 256 tracks.
+    /// Up to 256 tracks (with `efforts`, at least one of the two).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<TeamTrack>,
+    /// Up to 256 efforts the host measured itself (a video coverage grid, a
+    /// scored sweep), 1,000,000 cells or edges in all. Each is a search of its
+    /// own: an edge's misses over tracks and efforts multiply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<SearchEffort>,
     /// The probability before the search (`ReachResult::probability`).
     pub probability: ProbabilityMap,
     /// Segments to report coverage for (ids unique); may be empty.
@@ -52,6 +61,7 @@ impl CoverageRequest {
     pub fn new(tracks: Vec<TeamTrack>, probability: ProbabilityMap) -> Self {
         Self {
             tracks,
+            efforts: Vec::new(),
             probability,
             segments: Vec::new(),
             default_pod: default_pod(),
@@ -59,8 +69,26 @@ impl CoverageRequest {
     }
 
     fn validate(&self) -> Result<(), SarError> {
-        if self.tracks.is_empty() || self.tracks.len() > MAX_TRACKS {
-            return Err(SarError::invalid("coverage needs 1 to 256 tracks"));
+        if self.tracks.is_empty() && self.efforts.is_empty() {
+            return Err(SarError::invalid("coverage needs a track or an effort"));
+        }
+        if self.tracks.len() > MAX_TRACKS {
+            return Err(SarError::invalid("at most 256 tracks"));
+        }
+        if self.efforts.len() > MAX_EFFORTS
+            || self
+                .efforts
+                .iter()
+                .map(SearchEffort::item_count)
+                .sum::<usize>()
+                > MAX_EFFORT_ITEMS
+        {
+            return Err(SarError::invalid(
+                "at most 256 efforts and 1,000,000 cells or edges",
+            ));
+        }
+        for effort in &self.efforts {
+            effort.validate()?;
         }
         if !unit_interval(self.default_pod)
             || self
@@ -81,6 +109,18 @@ impl CoverageRequest {
     }
 }
 
+impl TeamTrack {
+    /// An on-foot track at the request's default detection.
+    pub fn new(team_id: impl Into<String>, samples: Vec<NavigationPositionSample>) -> Self {
+        Self {
+            team_id: team_id.into(),
+            samples,
+            profile: MobilityProfile::OnFoot,
+            pod: None,
+        }
+    }
+}
+
 fn on_foot() -> MobilityProfile {
     MobilityProfile::OnFoot
 }
@@ -88,22 +128,32 @@ fn default_pod() -> f64 {
     0.8
 }
 
-/// An edge a team searched.
+/// An edge a team or an effort searched.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct CoveredEdge {
     /// The undirected key.
     pub edge_id: u64,
     /// Traversals over all tracks (out and back counts twice).
     pub passes: u32,
-    /// `1 - product((1 - pod) ^ passes)` over the tracks.
+    /// The combined detection: `1 - product((1 - pod) ^ passes)` over the
+    /// tracks times `product(1 - pod)` over the efforts.
     pub pod: f64,
+    /// The efforts' share alone: `1 - product(1 - pod)` over them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub effort_pod: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct TrackCoverage {
     pub team_id: String,
     pub matched_sample_count: usize,
@@ -117,6 +167,7 @@ pub struct TrackCoverage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct SegmentCoverage {
     pub segment_id: String,
     pub network_length_m: f64,
@@ -133,8 +184,12 @@ pub struct SegmentCoverage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct CoverageResult {
     pub tracks: Vec<TrackCoverage>,
+    /// What each effort covered, in request order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<EffortCoverage>,
     /// Sorted by edge key.
     pub covered_edges: Vec<CoveredEdge>,
     pub segments: Vec<SegmentCoverage>,
@@ -146,9 +201,9 @@ pub struct CoverageResult {
     pub probability_of_success: f64,
 }
 
-/// Turns team tracks into coverage and updates the probability (see
-/// [`CoverageRequest`]). A track that matches no path is reported, not an
-/// error.
+/// Turns team tracks and host-measured effort into coverage and updates the
+/// probability (see [`CoverageRequest`]). A track that matches no path is
+/// reported, not an error.
 pub fn apply_coverage(
     engine: &RoutingEngine,
     request: &CoverageRequest,
@@ -202,9 +257,24 @@ pub fn apply_coverage(
         tracks.push(report);
     }
 
+    // Per key: the product of the efforts' misses.
+    let mut effort_miss = BTreeMap::<u64, f64>::new();
+    let mut efforts = Vec::with_capacity(request.efforts.len());
+    for effort in &request.efforts {
+        let pods = effort.edge_pods(&mut edges);
+        for (key, pod) in &pods {
+            *effort_miss.entry(*key).or_insert(1.0) *= 1.0 - pod;
+            covered.entry(*key).or_insert((0, 1.0));
+        }
+        efforts.push(effort_coverage(effort, &pods, &mut edges));
+    }
+
     let pod_of = covered
         .iter()
-        .map(|(key, (_, miss))| (*key, 1.0 - miss))
+        .map(|(key, (_, miss))| {
+            let effort = effort_miss.get(key).copied().unwrap_or(1.0);
+            (*key, 1.0 - miss * effort)
+        })
         .collect::<BTreeMap<_, _>>();
     let before = request.probability.by_edge();
     let success: f64 = before
@@ -277,12 +347,17 @@ pub fn apply_coverage(
 
     Ok(CoverageResult {
         tracks,
+        efforts,
         covered_edges: covered
             .into_iter()
-            .map(|(edge_id, (passes, miss))| CoveredEdge {
-                edge_id,
-                passes,
-                pod: 1.0 - miss,
+            .map(|(edge_id, (passes, miss))| {
+                let effort = effort_miss.get(&edge_id).copied().unwrap_or(1.0);
+                CoveredEdge {
+                    edge_id,
+                    passes,
+                    pod: 1.0 - miss * effort,
+                    effort_pod: 1.0 - effort,
+                }
             })
             .collect(),
         segments,

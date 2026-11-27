@@ -220,6 +220,57 @@ pub(crate) fn centroid(polygon: &[GeoPoint]) -> GeoPoint {
     GeoPoint::new(lat / (3.0 * area), lng / (3.0 * area))
 }
 
+/// Whether `point` lies inside a polygon (even-odd rule, plane in degrees).
+pub(crate) fn contains(polygon: &[GeoPoint], point: GeoPoint) -> bool {
+    let points = closed(polygon);
+    let mut inside = false;
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if (a.lat > point.lat) != (b.lat > point.lat) {
+            let lng = a.lng + (point.lat - a.lat) / (b.lat - a.lat) * (b.lng - a.lng);
+            if point.lng < lng {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// A point inside a drawn polygon: its centroid when that is inside (any
+/// convex shape), else the middle of the widest inside span on the line of
+/// latitude through the centroid, or through the middle of the polygon's
+/// latitudes; the centroid when no line crosses it (a degenerate shape).
+pub(crate) fn interior_point(polygon: &[GeoPoint]) -> GeoPoint {
+    let centre = centroid(polygon);
+    if contains(polygon, centre) {
+        return centre;
+    }
+    let points = closed(polygon);
+    let (south, north) = points.iter().fold((f64::MAX, f64::MIN), |(s, n), point| {
+        (s.min(point.lat), n.max(point.lat))
+    });
+    for lat in [centre.lat, (south + north) / 2.0] {
+        let mut crossings = points
+            .windows(2)
+            .filter(|pair| (pair[0].lat > lat) != (pair[1].lat > lat))
+            .map(|pair| {
+                let (a, b) = (pair[0], pair[1]);
+                a.lng + (lat - a.lat) / (b.lat - a.lat) * (b.lng - a.lng)
+            })
+            .collect::<Vec<_>>();
+        crossings.sort_by(f64::total_cmp);
+        let widest = crossings
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .max_by(|a, b| (a[1] - a[0]).total_cmp(&(b[1] - b[0])));
+        if let Some(span) = widest {
+            return GeoPoint::new(lat, (span[0] + span[1]) / 2.0);
+        }
+    }
+    centre
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +294,20 @@ mod tests {
         let centre = centroid(&square);
         assert!((centre.lat - 1.0).abs() < 1e-9 && (centre.lng - 1.0).abs() < 1e-9);
         assert_eq!(closed(&square).len(), 5);
+        assert_eq!(interior_point(&square), centre);
+        // A C shape drawn clockwise: its centroid is in the notch.
+        let c_shape = [
+            GeoPoint::new(0.0, 0.0),
+            GeoPoint::new(3.0, 0.0),
+            GeoPoint::new(3.0, 3.0),
+            GeoPoint::new(2.0, 3.0),
+            GeoPoint::new(2.0, 1.0),
+            GeoPoint::new(1.0, 1.0),
+            GeoPoint::new(1.0, 3.0),
+            GeoPoint::new(0.0, 3.0),
+        ];
+        assert!(!contains(&c_shape, centroid(&c_shape)));
+        let inside = interior_point(&c_shape);
+        assert!(contains(&c_shape, inside), "{inside:?}");
     }
 }

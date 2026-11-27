@@ -151,8 +151,10 @@ file adds zones the person may avoid, destinations, distance statistics and a
 team's pace model (`wayfarer pace calibrate -o`). A position off the paths pays the walk to them at the off-road pace
 (`--no-off-trail` snaps it for free). `--polygons` draws each person's reach as
 a polygon, `--max-edges` lists only the most probable paths (the rest is
-`probability.unlisted`), and `--geojson` prints a map instead. `teams` plans teams onto search segments and `coverage` updates
-the probability from the teams' GPS tracks; both take a reach result's
+`probability.unlisted`), and `--geojson` prints a map instead. `teams` plans teams onto search segments (taken as drawn) and `coverage` updates
+the probability from the teams' GPS tracks and any search effort the host
+measured (`efforts`: a probability of detection or seconds seen per path, grid
+cell or polygon); both take a reach result's
 `probability`. The requests and results are in `schema/sar-*.json`.
 
 ## The host protocol
