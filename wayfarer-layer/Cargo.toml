@@ -9,9 +9,7 @@ description = "Terrain layer files for Wayfarer: the global arc-second lattice a
 readme = "README.md"
 keywords = ["routing", "terrain", "search-and-rescue", "gis"]
 categories = ["science::geo", "encoding"]
-# Experimental: the layer contract is a draft (v0). Not published until Anton decides (see the
-# engine plan's publishing decision).
-publish = false
+# Experimental: published from 0.6; the layer contract is a draft (v0) until it is pinned.
 
 [lints]
 workspace = true

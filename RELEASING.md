@@ -31,8 +31,8 @@ the costing model releases both.
    aarch64), Windows and macOS (Apple silicon). There are no Intel macOS
    archives: build from source or `cargo install`.
 5. **Publish** the crates to crates.io in dependency order:
-   `wayfarer-package`, `wayfarer-costing`,
-   `wayfarer-road-graph`, `wayfarer`, `wayfarer-service`
+   `wayfarer-package`, `wayfarer-costing`, `wayfarer-layer`,
+   `wayfarer-terrain` (from 0.6), `wayfarer-road-graph`, `wayfarer`, `wayfarer-service`
    (none needs the compiler), then
    `wayfarer-line-network`, `wayfarer-compiler`, `wayfarer-cli` and
    `wayfarer-ffi` (its optional `compiler` feature needs the compiler
