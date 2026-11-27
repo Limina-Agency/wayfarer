@@ -88,6 +88,12 @@ pub struct CompileRequest {
     #[doc(hidden)]
     #[serde(skip)]
     pub package_format: PackageFormat,
+    /// Test support (feature `road-graph-snapshot`): also writes the road
+    /// graph the package is built from to this snapshot file, for the
+    /// reference oracle of parity harnesses (`REFERENCE_ROAD_GRAPH`).
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub road_graph_snapshot: Option<PathBuf>,
 }
 
 impl CompileRequest {
@@ -103,6 +109,7 @@ impl CompileRequest {
             threads: None,
             profiles: None,
             package_format: PackageFormat::V3,
+            road_graph_snapshot: None,
         }
     }
 
@@ -180,6 +187,9 @@ impl CompileRequest {
         }
         if self.input == self.output {
             return invalid("the output path is the input path");
+        }
+        if cfg!(not(feature = "road-graph-snapshot")) && self.road_graph_snapshot.is_some() {
+            return invalid("a road graph snapshot needs the road-graph-snapshot feature");
         }
         if self.threads == Some(0) {
             return invalid("the compile needs at least one thread");
@@ -421,6 +431,7 @@ pub(crate) fn compile_reporting(
             segment_order: crate::SegmentOrder::Topology,
         },
         route_archive_path: request.output.clone(),
+        road_graph_snapshot: request.road_graph_snapshot.clone(),
         threads: request.threads,
         package_options: request.package_build_options(),
     };
