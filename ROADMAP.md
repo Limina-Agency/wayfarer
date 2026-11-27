@@ -162,9 +162,9 @@ off-network access legs with the SAR `costed` flag (FEAT-X1, X6, #108), and
 **package format 3 written by default** (FMT 1 to FMT 7, #82 to #110),
 format 2 still read and written on request. New crates: search and rescue
 planning (`wayfarer-sar`, #111) and the experimental off-road terrain
-crates (`wayfarer-layer`, `wayfarer-terrain`, FEAT-X7 to X10, #112 to #119)
-with the terrain compile path for apps (`wayfarer-terrain-compiler`,
-FEAT-X14, #116, not yet on crates.io).
+crates (`wayfarer-layer`, `wayfarer-terrain`, FEAT-X7 to X10, #112 to #120)
+with the terrain compile path for apps (`wayfarer-terrain-compiler` and
+`wayfarer terrain compile`, FEAT-X14, #116).
 
 ## 3. Gap analysis
 
@@ -1081,8 +1081,8 @@ A sketch to show how releases pull from lanes, not a commitment:
 | 0.3 | Released 2026-11-22: QA-9, FEAT-P0b, FEAT-P0c, the conditional parser fixes, FEAT-G3 and multi-leg maneuver distances, isochrone fixes; PERF-13, PERF-14, faster matrices; REG-2 and REG-12 (country-scale compiles, paged search state); tile-ready ids; QA-1, FFI-1, FFI-5; EXP-5b step 1 |
 | 0.4 | Released 2026-11-23: FEAT-A4, A7, A9, A11, P4; FFI-6 with `include`; PERF-16 (open to first route); fat LTO and mimalloc (SC-1, SC-2); compiler input fixes; FFI-12 deprecation; the format-3 design |
 | 0.5 | Not released: its Tranche 1 work shipped in 0.6 |
-| 0.6 | Released 2026-11-27: Tranche 1 (first route: parallel CCH topology #98, parallel checks #102, background warm-up #105; FEAT-X1 and X6 #108; FEAT-A1, A2 core, A10; FEAT-P0a and P0d; FEAT-G0 and G4a; the walking pace model #99); package format 3 written by default (#110, from Tranche 3), format 2 still read; `wayfarer-sar` (#111); terrain: `wayfarer-layer` and `wayfarer-terrain` on crates.io (FEAT-X7 to X10, experimental, contracts v1) and the terrain compile path for apps (FEAT-X14, #116), no prebuilt terrain file |
-| 0.7 | Tranche 2, moved from 0.6: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D2 (clip) and D3 (several extracts); lean leg records; API-0b (builders, `apiVersion` and `warnings`, one release tag); the terrain compiler's OSM stage. Tranche 3's rest: stored CCH topology and metrics as optional format-3 sections (the first route costs about one search); format 2 still read through 0.8 |
+| 0.6 | Released 2026-11-27: Tranche 1 (first route: parallel CCH topology #98, parallel checks #102, background warm-up #105; FEAT-X1 and X6 #108; FEAT-A1, A2 core, A10; FEAT-P0a and P0d; FEAT-G0 and G4a; the walking pace model #99); package format 3 written by default (#110, from Tranche 3), format 2 still read; `wayfarer-sar` (#111); terrain: `wayfarer-layer` and `wayfarer-terrain` on crates.io (FEAT-X7 to X10, experimental, contracts v1) and the terrain compile path for apps (`wayfarer-terrain-compiler` and `wayfarer terrain compile`, FEAT-X14, #116), no prebuilt terrain file |
+| 0.7 | Tranche 2, moved from 0.6: FEAT-X1b, X2a, A3, A8, A5; FEAT-G1 with Polish and G5a; FEAT-W0 and W0b (decision D3); FEAT-P2 compiler side; FEAT-D2 (clip) and D3 (several extracts); lean leg records; API-0b (builders, `apiVersion` and `warnings`, one release tag). Tranche 3's rest: stored CCH topology and metrics as optional format-3 sections (the first route costs about one search); format 2 still read through 0.8 |
 | 0.8 – 0.9 | Format-3 optional sections as each is ready (FEAT-P1, P2 extras, G4b, W4); QA-2 and QA-3 scheduled; QA-4 |
 | 0.10 – 0.11 | API-1 (modules and names), API-2 (internal crates), FFI-3 (release artifacts), EXP-5b step 2 (real seam) |
 | 0.12 – 0.2x | API-3, API-4, API-5; FEAT-X6 default flip (≈0.13); API-7a time object (≈0.17), with the default isochrone order (cost or fastest time), then FEAT-W1/W2 and API-7b presets; REG-4 with FFI-4 |

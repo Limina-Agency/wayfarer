@@ -57,9 +57,9 @@ terrain crates.
   the service uses it. On the Mobile profile the CCH customization arrays
   are dropped after each customization and built again when needed (#86).
 - **New crates:** `wayfarer-sar` (search and rescue planning, #111) and the
-  experimental `wayfarer-layer` and `wayfarer-terrain` (#112 to #119) are
-  published. `wayfarer-terrain-compiler` (#116) is not published yet: build
-  it from the tag. No terrain file ships; an app compiles its own.
+  experimental `wayfarer-layer`, `wayfarer-terrain` and
+  `wayfarer-terrain-compiler` (#112 to #120). No terrain file ships; an app
+  compiles its own, from Rust or with `wayfarer terrain compile`.
 - **Rust API (breaking),** from `cargo semver-checks` against 0.4.0. Struct
   literals need the new fields; `::new` and `Default` are unchanged.
   - `wayfarer`: `RouteIsochroneRequest` gains `origins`, `order`,
@@ -146,7 +146,7 @@ terrain crates.
   `wayfarer_sar_coverage` in the library's `sar` build, with schemas in
   `schema/sar-*.json`. Every public type is `#[non_exhaustive]`. On
   Małopolskie a 3-hour reach takes 0.8 s.
-- **Added: off-road terrain, experimental** (#112 to #119; new crates
+- **Added: off-road terrain, experimental** (#112 to #120; new crates
   `wayfarer-layer`, `wayfarer-terrain`, `wayfarer-terrain-compiler`).
   - `wayfarer-layer`: the terrain layer file a model, hazard raster or drone
     survey writes (contract v1, wire version 0.1,
@@ -161,12 +161,16 @@ terrain crates.
     only what changed. Blocks are costed as they are fused: a 900 km²
     surface and a walker route take 89 MB of peak heap. Everything is
     integer arithmetic or `libm`, pinned by hashes in CI.
-  - `wayfarer-terrain-compiler` (not published): compiles GEM-15, GLO-30
-    and WorldCover COG tiles into a terrain file one block row at a time,
-    from Rust (`compile_to_file`, `TerrainJob`, cancellable, with progress)
-    or the `wayfarer-terrain` binary. Małopolskie compiles in 33 s at
-    110 MiB of heap on 4 cores, the same bytes on every target and thread
-    count.
+  - `wayfarer-terrain-compiler`: compiles GEM-15, GLO-30 and WorldCover
+    COG tiles and an OSM extract into a terrain file, one block row at a
+    time. OSM areas (closed ways and multipolygons) override WorldCover's
+    land cover, with codes of their own for dwarf pine, bare rock, scree
+    and bog, and OSM ways fill the linear-feature mask (paths by
+    `sac_scale`, roads, rivers, fences, cliffs). From Rust
+    (`compile_to_file`, `TerrainJob`, cancellable, with progress) or with
+    `wayfarer terrain compile` and `wayfarer terrain inspect`. Małopolskie's
+    DEM and land cover compile in 33 s at 110 MiB of heap on 4 cores, the
+    same bytes on every target and thread count.
 - **Faster first route** (#98, #102, #105, #86; POT 1 to POT 3, OM-5,
   OM-6). The CCH topology builds in parallel (on three or more threads),
   open checks run in parallel (on one thread they took 88 ms on
