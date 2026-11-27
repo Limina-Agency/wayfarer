@@ -710,7 +710,11 @@ fn supercover_units(
         } else {
             Some(ny as i128 * dx.abs() as i128)
         };
+        // An axis already at the last cell never steps again: a segment that ends exactly on
+        // a cell edge, going down or left, would otherwise cross that edge and run on.
         match (tx, ty) {
+            _ if cy == ey => cx += sx,
+            _ if cx == ex => cy += sy,
             (Some(x), Some(y)) if x == y => {
                 visit(cy, cx + sx);
                 visit(cy + sy, cx);
@@ -1054,6 +1058,29 @@ mod tests {
             d.windows(2)
                 .all(|w| (w[1].0 - w[0].0).abs() <= 1 && (w[1].1 - w[0].1).abs() <= 1)
         );
+    }
+
+    /// Every segment's supercover ends at its last cell, steps to a neighbour each time,
+    /// and visits no more cells than the two axes' cell counts (one more for a corner).
+    #[test]
+    fn supercover_always_ends() {
+        let s = 120;
+        let mut g = Lcg(7);
+        for k in 0..200_000 {
+            // ends on or near cell boundaries (multiples of 60), in every direction
+            let p = |g: &mut Lcg| (g.next(9) - 4) * 60 + g.next(3) - 1;
+            let (a, b) = ((p(&mut g), p(&mut g)), (p(&mut g), p(&mut g)));
+            let cell = |t: i64| (t + s / 2).div_euclid(s);
+            let (ea, eb) = ((cell(a.0), cell(a.1)), (cell(b.0), cell(b.1)));
+            let most = ((eb.0 - ea.0).abs() + (eb.1 - ea.1).abs() + 1) as usize * 2;
+            let mut v = Vec::new();
+            supercover_ticks(a, b, s, &mut |i, j| {
+                v.push((i, j));
+                assert!(v.len() <= most, "case {k}: {a:?} -> {b:?} runs on: {v:?}");
+            });
+            assert_eq!(v.first(), Some(&ea), "{a:?} -> {b:?}");
+            assert_eq!(v.last(), Some(&eb), "{a:?} -> {b:?}");
+        }
     }
 
     /// A small deterministic generator for the shape tests.
