@@ -13,7 +13,7 @@
 //! --release`. Without them the test passes without checking anything.
 
 use std::collections::BTreeMap;
-use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Prior};
+use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Prior, Shape};
 use wayfarer_terrain::lattice::{BlockId, Spacing};
 use wayfarer_terrain::profile::Rules;
 use wayfarer_terrain::search::{Graph, Grid, Search, path};
@@ -133,19 +133,23 @@ fn e14_replay() {
     let tb = json_ints(&text, "team_block");
     let tc = json_ints(&text, "team_clear");
     let block_item = OverlayItem {
-        lat0: (tb[0] - 1) * SP,
-        lat1: (tb[0] + 2) * SP,
-        lon0: (tb[1] - 1) * SP,
-        lon1: (tb[1] + 2) * SP,
+        shape: Shape::Box {
+            lat0: (tb[0] - 1) * SP,
+            lat1: (tb[0] + 2) * SP,
+            lon0: (tb[1] - 1) * SP,
+            lon1: (tb[1] + 2) * SP,
+        },
         // E14 applied the block before the clear box: observed first.
         observed_at: T0 + 5 * E - 120,
         effect: Effect::Block,
     };
     let clear_item = OverlayItem {
-        lat0: (tc[0] - 6) * SP,
-        lat1: (tc[0] + 6) * SP,
-        lon0: (tc[1] - 6) * SP,
-        lon1: (tc[1] + 6) * SP,
+        shape: Shape::Box {
+            lat0: (tc[0] - 6) * SP,
+            lat1: (tc[0] + 6) * SP,
+            lon0: (tc[1] - 6) * SP,
+            lon1: (tc[1] + 6) * SP,
+        },
         observed_at: T0 + 5 * E - 60,
         effect: Effect::Clear,
     };

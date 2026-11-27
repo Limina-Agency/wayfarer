@@ -25,7 +25,7 @@ use crate::layer::{
 use crate::terrain::Terrain;
 use crate::{Error, Result};
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The fused class distribution sums to this.
 pub const S: u32 = 1 << 12;
@@ -135,71 +135,354 @@ pub enum Effect {
     SetHazard(u16, u8),
 }
 
-/// A team overlay item: an effect over a box of post positions in ticks, `[lat0, lat1) x
-/// [lon0, lon1)`, observed at a time (UTC seconds).
+/// Vertices an overlay item may hold, over all its rings.
+pub const MAX_OVERLAY_VERTICES: usize = 65_536;
+
+/// The ground an overlay item covers, in ticks, `(lat, lon)` per vertex. Each shape has one
+/// rasterising rule, exact in integers, so every device marks the same posts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Shape {
+    /// The posts p with `lat0 <= p.lat < lat1` and `lon0 <= p.lon < lon1`.
+    Box {
+        lat0: i64,
+        lat1: i64,
+        lon0: i64,
+        lon1: i64,
+    },
+    /// One or more closed rings (the last vertex joins the first), filled even-odd: a post is
+    /// inside when a ray from it towards +lon crosses the rings an odd number of times,
+    /// counting an edge where `min(lat) <= p.lat < max(lat)` and its crossing is at or west of
+    /// the post. A ring inside another is a hole. A box as a ring marks the posts of
+    /// [`Shape::Box`].
+    Polygon(Vec<Vec<(i64, i64)>>),
+    /// A polyline: the posts whose cell `[p - s/2, p + s/2)` a segment touches, the exact
+    /// supercover feature lines use.
+    Line(Vec<(i64, i64)>),
+}
+
+/// A team overlay item: an effect over a shape of post positions, observed at a time (UTC
+/// seconds).
 ///
 /// An overlay is a set, not a list: fusion applies its items in (observed time, item bytes)
 /// order, so items that arrive in any order from any number of devices give the same surface.
 /// Where two items cover a post, the one observed later wins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OverlayItem {
-    pub lat0: i64,
-    pub lat1: i64,
-    pub lon0: i64,
-    pub lon1: i64,
+    pub shape: Shape,
     pub observed_at: i64,
     pub effect: Effect,
 }
 
+fn tick_of(d: f64, max_deg: i64, what: &str) -> Result<i64> {
+    let t = ticks_of_deg(d).ok_or_else(|| Error::invalid(format!("{what} outside ±180°")))?;
+    if t.abs() > max_deg * TICKS_PER_DEG {
+        return Err(Error::invalid(format!("{what} outside ±{max_deg}°")));
+    }
+    Ok(t)
+}
+
+fn vertex_of(p: (f64, f64)) -> Result<(i64, i64)> {
+    Ok((
+        tick_of(p.0, 90, "overlay latitude")?,
+        tick_of(p.1, 180, "overlay longitude")?,
+    ))
+}
+
 impl OverlayItem {
-    /// An item from a box in f64 degrees, its corners in any order. Each edge goes onto the
-    /// lattice by [`lattice::ticks_of_deg`](crate::lattice::ticks_of_deg), the one rounding
-    /// rule, so every device that holds the same shape gets the same item.
+    /// A box item from f64 degrees, its corners in any order. Each edge goes onto the lattice
+    /// by [`lattice::ticks_of_deg`](crate::lattice::ticks_of_deg), the one rounding rule, so
+    /// every device that holds the same shape gets the same item.
     pub fn from_degrees(
         lat: (f64, f64),
         lon: (f64, f64),
         observed_at: i64,
         effect: Effect,
     ) -> Result<OverlayItem> {
-        let t =
-            |d: f64| ticks_of_deg(d).ok_or_else(|| Error::invalid("overlay corner outside ±180°"));
-        let (a, b, c, d) = (t(lat.0)?, t(lat.1)?, t(lon.0)?, t(lon.1)?);
-        if a.abs() > 90 * TICKS_PER_DEG || b.abs() > 90 * TICKS_PER_DEG {
-            return Err(Error::invalid("overlay latitude outside ±90°"));
-        }
+        let (a, c) = vertex_of((lat.0, lon.0))?;
+        let (b, d) = vertex_of((lat.1, lon.1))?;
         let it = OverlayItem {
-            lat0: a.min(b),
-            lat1: a.max(b),
-            lon0: c.min(d),
-            lon1: c.max(d),
+            shape: Shape::Box {
+                lat0: a.min(b),
+                lat1: a.max(b),
+                lon0: c.min(d),
+                lon1: c.max(d),
+            },
             observed_at,
             effect,
         };
-        if it.lat0 == it.lat1 || it.lon0 == it.lon1 {
-            return Err(Error::invalid("an overlay box has no area on the lattice"));
-        }
+        it.check()?;
         Ok(it)
     }
 
-    /// The item's canonical bytes: observed time, box, effect.
-    pub fn bytes(&self) -> [u8; 44] {
-        let mut o = [0u8; 44];
-        o[..8].copy_from_slice(&self.observed_at.to_le_bytes());
-        for (k, v) in [self.lat0, self.lat1, self.lon0, self.lon1]
+    /// A polygon item from rings of `(lat, lon)` f64 degrees, each vertex rounded by
+    /// [`lattice::ticks_of_deg`](crate::lattice::ticks_of_deg). Rings are closed implicitly.
+    pub fn polygon_from_degrees(
+        rings: &[Vec<(f64, f64)>],
+        observed_at: i64,
+        effect: Effect,
+    ) -> Result<OverlayItem> {
+        let rings = rings
             .iter()
-            .enumerate()
-        {
-            o[8 + 8 * k..16 + 8 * k].copy_from_slice(&v.to_le_bytes());
+            .map(|r| r.iter().map(|&p| vertex_of(p)).collect::<Result<Vec<_>>>())
+            .collect::<Result<Vec<_>>>()?;
+        let it = OverlayItem {
+            shape: Shape::Polygon(rings),
+            observed_at,
+            effect,
+        };
+        it.check()?;
+        Ok(it)
+    }
+
+    /// A line item from a polyline of `(lat, lon)` f64 degrees, each vertex rounded by
+    /// [`lattice::ticks_of_deg`](crate::lattice::ticks_of_deg).
+    pub fn line_from_degrees(
+        pts: &[(f64, f64)],
+        observed_at: i64,
+        effect: Effect,
+    ) -> Result<OverlayItem> {
+        let pts = pts
+            .iter()
+            .map(|&p| vertex_of(p))
+            .collect::<Result<Vec<_>>>()?;
+        let it = OverlayItem {
+            shape: Shape::Line(pts),
+            observed_at,
+            effect,
+        };
+        it.check()?;
+        Ok(it)
+    }
+
+    /// Checks the shape: positions within ±90° latitude and ±180° longitude, a box with area,
+    /// rings of at least 3 vertices, a line of at least 1, and at most
+    /// [`MAX_OVERLAY_VERTICES`] in all.
+    pub fn check(&self) -> Result<()> {
+        let ok = |&(la, lo): &(i64, i64)| {
+            la.abs() <= 90 * TICKS_PER_DEG && lo.abs() <= 180 * TICKS_PER_DEG
+        };
+        match &self.shape {
+            Shape::Box {
+                lat0,
+                lat1,
+                lon0,
+                lon1,
+            } => {
+                if !ok(&(*lat0, *lon0)) || !ok(&(*lat1, *lon1)) {
+                    return Err(Error::invalid("an overlay box lies outside the globe"));
+                }
+                if lat0 >= lat1 || lon0 >= lon1 {
+                    return Err(Error::invalid("an overlay box has no area on the lattice"));
+                }
+            }
+            Shape::Polygon(rings) => {
+                if rings.is_empty() || rings.iter().any(|r| r.len() < 3) {
+                    return Err(Error::invalid(
+                        "an overlay polygon has rings of 3 or more vertices",
+                    ));
+                }
+                let n: usize = rings.iter().map(Vec::len).sum();
+                if n > MAX_OVERLAY_VERTICES {
+                    return Err(Error::invalid("an overlay item has too many vertices"));
+                }
+                if !rings.iter().flatten().all(ok) {
+                    return Err(Error::invalid("an overlay polygon lies outside the globe"));
+                }
+            }
+            Shape::Line(pts) => {
+                if pts.is_empty() || pts.len() > MAX_OVERLAY_VERTICES {
+                    return Err(Error::invalid("an overlay line has 1 to 65,536 vertices"));
+                }
+                if !pts.iter().all(ok) {
+                    return Err(Error::invalid("an overlay line lies outside the globe"));
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// The item's canonical bytes: observed time (i64), effect (tag u8, hazard code u16,
+    /// probability u8), shape tag u8 (1 box, 2 polygon, 3 line), then the shape: a box's
+    /// lat0, lat1, lon0, lon1 (i64); a polygon's ring count (u32) and each ring as a vertex
+    /// count (u32) and its vertices; a line's vertex count (u32) and vertices. A vertex is lat,
+    /// lon (i64). All little-endian. The encoding delimits itself, so items concatenate.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut o = Vec::with_capacity(46);
+        o.extend_from_slice(&self.observed_at.to_le_bytes());
         let (e, c, v) = match self.effect {
             Effect::Block => (1u8, 0u16, 0u8),
             Effect::Clear => (2, 0, 0),
             Effect::SetHazard(c, v) => (3, c, v),
         };
-        o[40] = e;
-        o[41..43].copy_from_slice(&c.to_le_bytes());
-        o[43] = v;
+        o.push(e);
+        o.extend_from_slice(&c.to_le_bytes());
+        o.push(v);
+        let pts = |o: &mut Vec<u8>, p: &[(i64, i64)]| {
+            o.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            for (la, lo) in p {
+                o.extend_from_slice(&la.to_le_bytes());
+                o.extend_from_slice(&lo.to_le_bytes());
+            }
+        };
+        match &self.shape {
+            Shape::Box {
+                lat0,
+                lat1,
+                lon0,
+                lon1,
+            } => {
+                o.push(1);
+                for x in [lat0, lat1, lon0, lon1] {
+                    o.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+            Shape::Polygon(rings) => {
+                o.push(2);
+                o.extend_from_slice(&(rings.len() as u32).to_le_bytes());
+                for r in rings {
+                    pts(&mut o, r);
+                }
+            }
+            Shape::Line(p) => {
+                o.push(3);
+                pts(&mut o, p);
+            }
+        }
         o
+    }
+
+    /// The box of positions `[lat0, lat1] x [lon0, lon1]` the shape lies in.
+    fn bounds(&self) -> (i64, i64, i64, i64) {
+        let of = |mut it: Box<dyn Iterator<Item = &(i64, i64)> + '_>| {
+            let first = *it.next().expect("checked: a shape has a vertex");
+            it.fold((first.0, first.0, first.1, first.1), |b, &(la, lo)| {
+                (b.0.min(la), b.1.max(la), b.2.min(lo), b.3.max(lo))
+            })
+        };
+        match &self.shape {
+            Shape::Box {
+                lat0,
+                lat1,
+                lon0,
+                lon1,
+            } => (*lat0, *lat1, *lon0, *lon1),
+            Shape::Polygon(rings) => of(Box::new(rings.iter().flatten())),
+            Shape::Line(p) => of(Box::new(p.iter())),
+        }
+    }
+
+    /// The blocks that hold a post the item covers.
+    pub fn blocks(&self, s: i64) -> BTreeSet<BlockId> {
+        let (la0, la1, lo0, lo1) = self.bounds();
+        // A line also marks the posts whose cell it touches: one post past its box.
+        let (i0, i1) = (la0.div_euclid(s) - 1, la1.div_euclid(s) + 1);
+        let (j0, j1) = (lo0.div_euclid(s) - 1, lo1.div_euclid(s) + 1);
+        let b = BLOCK as i64;
+        let mut out = BTreeSet::new();
+        for bi in i0.div_euclid(b)..=i1.div_euclid(b) {
+            for bj in j0.div_euclid(b)..=j1.div_euclid(b) {
+                let id = BlockId {
+                    bi: bi as i32,
+                    bj: bj as i32,
+                };
+                let mut any = false;
+                self.cover_block(id, s, &mut |_, _| any = true);
+                if any {
+                    out.insert(id);
+                }
+            }
+        }
+        out
+    }
+
+    /// Calls `visit(i, j)` for each post `(i, j)` of `block` the item covers (a post may come
+    /// more than once). Every effect is idempotent per post, so repeats do not matter.
+    pub fn cover_block(&self, block: BlockId, s: i64, visit: &mut impl FnMut(i64, i64)) {
+        let (i0, j0) = (block.i0(), block.j0());
+        let (i1, j1) = (i0 + BLOCK as i64, j0 + BLOCK as i64);
+        // Posts p of this block with lo <= p * s < hi.
+        let span = |lo: i64, hi: i64, first: i64, end: i64| {
+            let a = ceil_div(lo, s).max(first);
+            a..ceil_div(hi, s).min(end).max(a)
+        };
+        let (la0, la1, lo0, lo1) = self.bounds();
+        match &self.shape {
+            Shape::Box { .. } => {
+                for i in span(la0, la1, i0, i1) {
+                    for j in span(lo0, lo1, j0, j1) {
+                        visit(i, j);
+                    }
+                }
+            }
+            Shape::Polygon(rings) => {
+                let rows = span(la0, la1, i0, i1);
+                // Posts west or east of every vertex are outside.
+                if rows.is_empty() || lo0 >= j1 * s || lo1 < j0 * s {
+                    return;
+                }
+                // Edges that cross the block's rows, as (lat low, lon at low, lat high, lon at
+                // high), not horizontal.
+                let (ylo, yhi) = (rows.start * s, (rows.end - 1) * s);
+                let mut edges = Vec::new();
+                for r in rings {
+                    for k in 0..r.len() {
+                        let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                        let (lo, hi) = if a.0 < b.0 { (a, b) } else { (b, a) };
+                        if lo.0 == hi.0 || hi.0 <= ylo || lo.0 > yhi {
+                            continue;
+                        }
+                        edges.push((lo.0, lo.1, hi.0, hi.1));
+                    }
+                }
+                let mut xs: Vec<i64> = Vec::new();
+                for i in rows {
+                    let y = i * s;
+                    xs.clear();
+                    for &(ya, xa, yb, xb) in &edges {
+                        if ya <= y && y < yb {
+                            // The first post at or east of the crossing
+                            // x = xa + (y - ya)(xb - xa) / (yb - ya).
+                            let dy = (yb - ya) as i128;
+                            let num = xa as i128 * dy + (y - ya) as i128 * (xb - xa) as i128;
+                            let den = dy * s as i128;
+                            let q = num.div_euclid(den) + (num.rem_euclid(den) != 0) as i128;
+                            xs.push(q.clamp(j0 as i128, j1 as i128) as i64);
+                        }
+                    }
+                    xs.sort_unstable();
+                    for pair in xs.as_chunks::<2>().0 {
+                        for j in pair[0]..pair[1] {
+                            visit(i, j);
+                        }
+                    }
+                }
+            }
+            Shape::Line(p) => {
+                // A segment touches the cells of posts within s/2 + s of its box.
+                let (c0, c1) = ((i0 - 1) * s, (i1 + 1) * s);
+                let (d0, d1) = ((j0 - 1) * s, (j1 + 1) * s);
+                let seg = |a: (i64, i64), b: (i64, i64), visit: &mut dyn FnMut(i64, i64)| {
+                    if a.0.max(b.0) < c0
+                        || a.0.min(b.0) > c1
+                        || a.1.max(b.1) < d0
+                        || a.1.min(b.1) > d1
+                    {
+                        return;
+                    }
+                    supercover_ticks(a, b, s, &mut |i, j| {
+                        if (i0..i1).contains(&i) && (j0..j1).contains(&j) {
+                            visit(i, j)
+                        }
+                    });
+                };
+                if p.len() == 1 {
+                    seg(p[0], p[0], visit);
+                }
+                for w in p.windows(2) {
+                    seg(w[0], w[1], visit);
+                }
+            }
+        }
     }
 }
 
@@ -208,13 +491,13 @@ impl OverlayItem {
 pub fn canonical_overlay(items: &[OverlayItem]) -> Vec<OverlayItem> {
     // By observed time as a number first: the bytes are little-endian, so they alone would not
     // sort by time.
-    let mut v: Vec<(i64, [u8; 44], OverlayItem)> = items
+    let mut v: Vec<(i64, Vec<u8>, &OverlayItem)> = items
         .iter()
-        .map(|it| (it.observed_at, it.bytes(), *it))
+        .map(|it| (it.observed_at, it.bytes(), it))
         .collect();
-    v.sort_by_key(|a| (a.0, a.1));
+    v.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     v.dedup_by(|a, b| a.1 == b.1);
-    v.into_iter().map(|x| x.2).collect()
+    v.into_iter().map(|x| x.2.clone()).collect()
 }
 
 /// Hash of an overlay set: of its canonical form, so the items' order does not matter.
@@ -381,10 +664,25 @@ pub fn level_slot(code: u16) -> Option<usize> {
 /// cell `[p - s/2, p + s/2)` the segment touches (both neighbours at an exact corner crossing).
 /// Points are E7 degrees; E7 × 27 and ticks × 625 share a unit.
 pub fn supercover(a: (i32, i32), b: (i32, i32), s: i64, visit: &mut impl FnMut(i64, i64)) {
-    let c = s * 625;
-    let half = (s / 2) * 625;
-    let (ay, ax) = (a.0 as i64 * 27 + half, a.1 as i64 * 27 + half);
-    let (by, bx) = (b.0 as i64 * 27 + half, b.1 as i64 * 27 + half);
+    let u = |p: (i32, i32)| (p.0 as i64 * 27, p.1 as i64 * 27);
+    supercover_units(u(a), u(b), s * 625, (s / 2) * 625, visit);
+}
+
+/// [`supercover`] for points in ticks: the same cells for the same positions.
+pub fn supercover_ticks(a: (i64, i64), b: (i64, i64), s: i64, visit: &mut impl FnMut(i64, i64)) {
+    supercover_units(a, b, s, s / 2, visit);
+}
+
+/// The supercover in a unit where a cell is `c` wide and a post sits `half` past its edge.
+fn supercover_units(
+    a: (i64, i64),
+    b: (i64, i64),
+    c: i64,
+    half: i64,
+    visit: &mut impl FnMut(i64, i64),
+) {
+    let (ay, ax) = (a.0 + half, a.1 + half);
+    let (by, bx) = (b.0 + half, b.1 + half);
     let (mut cy, mut cx) = (ay.div_euclid(c), ax.div_euclid(c));
     let (ey, ex) = (by.div_euclid(c), bx.div_euclid(c));
     let (dy, dx) = (by - ay, bx - ax);
@@ -645,32 +943,25 @@ fn fuse_block(
         }
     }
     // Team overlay items, last, in canonical order: a later observation wins.
-    let rows = |lo: i64, hi: i64, first: i64| {
-        // Posts p of this block with lo <= p * s < hi, as offsets 0..64 into the block.
-        let a = (ceil_div(lo, s) - first).max(0);
-        let b = (ceil_div(hi, s) - first).min(BLOCK as i64);
-        a as usize..b.max(a) as usize
-    };
+    let (i0, j0) = (id.i0(), id.j0());
     for it in overlay {
-        for r in rows(it.lat0, it.lat1, id.i0()) {
-            for c in rows(it.lon0, it.lon1, id.j0()) {
-                let q = r * BLOCK + c;
-                match it.effect {
-                    Effect::Block => fb.mask[q] |= M_TEAM_BLOCK,
-                    Effect::Clear => {
-                        fb.haz[q] = [0; NHAZ];
-                        fb.lev[q] = [(0, 0); NLEV];
-                        fb.mask[q] &= !(M_DEBRIS | M_FALLEN | M_WASHOUT | M_TEAM_BLOCK);
-                    }
-                    Effect::SetHazard(code, v) => {
-                        if let Some(sl) = hazard_slot(code) {
-                            fb.haz[q][sl] = v;
-                        }
+        it.cover_block(id, s, &mut |i, j| {
+            let q = (i - i0) as usize * BLOCK + (j - j0) as usize;
+            match it.effect {
+                Effect::Block => fb.mask[q] |= M_TEAM_BLOCK,
+                Effect::Clear => {
+                    fb.haz[q] = [0; NHAZ];
+                    fb.lev[q] = [(0, 0); NLEV];
+                    fb.mask[q] &= !(M_DEBRIS | M_FALLEN | M_WASHOUT | M_TEAM_BLOCK);
+                }
+                Effect::SetHazard(code, v) => {
+                    if let Some(sl) = hazard_slot(code) {
+                        fb.haz[q][sl] = v;
                     }
                 }
-                fb.src[q] = 255;
             }
-        }
+            fb.src[q] = 255;
+        });
     }
     for q in 0..BLOCK_POSTS {
         let mx = *fb.p[q].iter().max().expect("16 classes") as u32;
@@ -762,6 +1053,258 @@ mod tests {
             d.windows(2)
                 .all(|w| (w[1].0 - w[0].0).abs() <= 1 && (w[1].1 - w[0].1).abs() <= 1)
         );
+    }
+
+    /// A small deterministic generator for the shape tests.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: i64) -> i64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % n as u64) as i64
+        }
+    }
+
+    fn covered(it: &OverlayItem, blocks: &[BlockId], s: i64) -> BTreeSet<(i64, i64)> {
+        let mut v = BTreeSet::new();
+        for &b in blocks {
+            it.cover_block(b, s, &mut |i, j| {
+                v.insert((i, j));
+            });
+        }
+        v
+    }
+
+    fn around(bi: i32, bj: i32) -> Vec<BlockId> {
+        let mut v = Vec::new();
+        for di in -1..=1 {
+            for dj in -1..=1 {
+                v.push(BlockId {
+                    bi: bi + di,
+                    bj: bj + dj,
+                });
+            }
+        }
+        v
+    }
+
+    /// Even-odd by the documented rule, post by post.
+    fn inside(rings: &[Vec<(i64, i64)>], y: i64, x: i64) -> bool {
+        let mut odd = false;
+        for r in rings {
+            for k in 0..r.len() {
+                let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                let (lo, hi) = if a.0 < b.0 { (a, b) } else { (b, a) };
+                if lo.0 == hi.0 || !(lo.0 <= y && y < hi.0) {
+                    continue;
+                }
+                // The crossing is at or west of x: xa + (y - ya)(xb - xa)/(yb - ya) <= x.
+                let dy = (hi.0 - lo.0) as i128;
+                let lhs = lo.1 as i128 * dy + (y - lo.0) as i128 * (hi.1 - lo.1) as i128;
+                if lhs <= x as i128 * dy {
+                    odd = !odd;
+                }
+            }
+        }
+        odd
+    }
+
+    #[test]
+    fn overlay_polygons_fill_even_odd() {
+        let mut g = Lcg(7);
+        for s in [120, 90, 7] {
+            let (bi, bj) = (-3, 5);
+            let blocks = around(bi, bj);
+            let (y0, x0) = (bi as i64 * 64 * s, bj as i64 * 64 * s);
+            let span = 64 * s;
+            for case in 0..60 {
+                // Concave rings, often with vertices on post rows, sometimes with a hole.
+                let mut rings = Vec::new();
+                for _ in 0..1 + (case % 3 == 0) as usize {
+                    let n = 3 + g.next(9) as usize;
+                    let r: Vec<(i64, i64)> = (0..n)
+                        .map(|_| {
+                            let snap = g.next(2) == 0;
+                            let (y, x) = (g.next(span), g.next(span));
+                            let (y, x) = if snap { (y / s * s, x / s * s) } else { (y, x) };
+                            (y0 + y, x0 + x)
+                        })
+                        .collect();
+                    rings.push(r);
+                }
+                let it = OverlayItem {
+                    shape: Shape::Polygon(rings.clone()),
+                    observed_at: 0,
+                    effect: Effect::Block,
+                };
+                it.check().unwrap();
+                let got = covered(&it, &blocks, s);
+                let mut want = BTreeSet::new();
+                for b in &blocks {
+                    for i in b.i0()..b.i0() + 64 {
+                        for j in b.j0()..b.j0() + 64 {
+                            if inside(&rings, i * s, j * s) {
+                                want.insert((i, j));
+                            }
+                        }
+                    }
+                }
+                assert_eq!(got, want, "spacing {s}, case {case}");
+                let marked: BTreeSet<BlockId> =
+                    got.iter().map(|&(i, j)| BlockId::of_post(i, j).0).collect();
+                assert_eq!(it.blocks(s), marked, "spacing {s}, case {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_as_a_ring_marks_the_box() {
+        let mut g = Lcg(11);
+        let s = 120;
+        let blocks = around(4, -2);
+        let (y0, x0) = (4 * 64 * s, -2 * 64 * s);
+        for _ in 0..200 {
+            let (a, b) = (g.next(3 * 64 * s) - 64 * s, g.next(3 * 64 * s) - 64 * s);
+            let (c, d) = (g.next(3 * 64 * s) - 64 * s, g.next(3 * 64 * s) - 64 * s);
+            let (lat0, lat1, lon0, lon1) = (
+                y0 + a.min(b),
+                y0 + a.max(b) + 1,
+                x0 + c.min(d),
+                x0 + c.max(d) + 1,
+            );
+            let bx = OverlayItem {
+                shape: Shape::Box {
+                    lat0,
+                    lat1,
+                    lon0,
+                    lon1,
+                },
+                observed_at: 0,
+                effect: Effect::Clear,
+            };
+            let ring = OverlayItem {
+                shape: Shape::Polygon(vec![vec![
+                    (lat0, lon0),
+                    (lat1, lon0),
+                    (lat1, lon1),
+                    (lat0, lon1),
+                ]]),
+                ..bx.clone()
+            };
+            let want = covered(&bx, &blocks, s);
+            assert_eq!(covered(&ring, &blocks, s), want);
+            for &(i, j) in &want {
+                assert!(lat0 <= i * s && i * s < lat1 && lon0 <= j * s && j * s < lon1);
+            }
+            assert_eq!(bx.blocks(s), ring.blocks(s));
+        }
+    }
+
+    #[test]
+    fn overlay_lines_are_the_feature_supercover() {
+        let s = 120;
+        // Ticks that are whole E7 degrees: ticks x 625 = E7 x 27.
+        let pts = [
+            (0i64, 0i64),
+            (27 * 300, 27 * 41),
+            (-27 * 200, 27 * 520),
+            (-27 * 200, 27 * 520),
+        ];
+        let e7 = |p: (i64, i64)| ((p.0 * 625 / 27) as i32, (p.1 * 625 / 27) as i32);
+        let mut want = BTreeSet::new();
+        for w in pts.windows(2) {
+            supercover(e7(w[0]), e7(w[1]), s, &mut |i, j| {
+                want.insert((i, j));
+            });
+            let mut t = BTreeSet::new();
+            supercover_ticks(w[0], w[1], s, &mut |i, j| {
+                t.insert((i, j));
+            });
+            let mut e = BTreeSet::new();
+            supercover(e7(w[0]), e7(w[1]), s, &mut |i, j| {
+                e.insert((i, j));
+            });
+            assert_eq!(t, e, "the same cells in ticks and in E7");
+        }
+        let it = OverlayItem {
+            shape: Shape::Line(pts.to_vec()),
+            observed_at: 0,
+            effect: Effect::SetHazard(1, 200),
+        };
+        assert_eq!(covered(&it, &around(0, 0), s), want);
+        let marked: BTreeSet<BlockId> = want
+            .iter()
+            .map(|&(i, j)| BlockId::of_post(i, j).0)
+            .collect();
+        assert_eq!(it.blocks(s), marked);
+        // One vertex marks one post.
+        let dot = OverlayItem {
+            shape: Shape::Line(vec![(130, -10)]),
+            ..it.clone()
+        };
+        assert_eq!(covered(&dot, &around(0, 0), s), BTreeSet::from([(1, 0)]));
+    }
+
+    #[test]
+    fn overlay_items_check_and_encode() {
+        let it = |shape| OverlayItem {
+            shape,
+            observed_at: 5,
+            effect: Effect::Block,
+        };
+        let bx = it(Shape::Box {
+            lat0: 0,
+            lat1: 10,
+            lon0: 0,
+            lon1: 10,
+        });
+        let tri = it(Shape::Polygon(vec![vec![(0, 0), (10, 0), (0, 10)]]));
+        let line = it(Shape::Line(vec![(0, 0), (10, 0), (0, 10)]));
+        for x in [&bx, &tri, &line] {
+            x.check().unwrap();
+        }
+        let enc: BTreeSet<Vec<u8>> = [&bx, &tri, &line].iter().map(|x| x.bytes()).collect();
+        assert_eq!(enc.len(), 3, "shapes encode apart");
+        assert_eq!(bx.bytes().len(), 8 + 4 + 1 + 32);
+        assert_eq!(tri.bytes().len(), 8 + 4 + 1 + 4 + 4 + 3 * 16);
+        // Splitting a ring's vertices across two rings is a different item.
+        let split = it(Shape::Polygon(vec![
+            vec![(0, 0), (10, 0), (0, 10)],
+            vec![(0, 0), (10, 0), (0, 10)],
+        ]));
+        assert_ne!(split.bytes(), tri.bytes());
+        for bad in [
+            Shape::Box {
+                lat0: 0,
+                lat1: 0,
+                lon0: 0,
+                lon1: 10,
+            },
+            Shape::Polygon(vec![]),
+            Shape::Polygon(vec![vec![(0, 0), (1, 1)]]),
+            Shape::Line(vec![]),
+            Shape::Line(vec![(91 * TICKS_PER_DEG, 0)]),
+            Shape::Polygon(vec![vec![(0, 0); MAX_OVERLAY_VERTICES + 1]]),
+        ] {
+            assert!(it(bad).check().is_err());
+        }
+        let p = OverlayItem::polygon_from_degrees(
+            &[vec![(49.0, 20.0), (49.01, 20.0), (49.0, 20.01)]],
+            5,
+            Effect::Block,
+        )
+        .unwrap();
+        assert_eq!(
+            p.shape,
+            Shape::Polygon(vec![vec![
+                (49 * 432_000, 20 * 432_000),
+                (49 * 432_000 + 4320, 20 * 432_000),
+                (49 * 432_000, 20 * 432_000 + 4320)
+            ]])
+        );
+        assert!(OverlayItem::line_from_degrees(&[(0.0, 181.0)], 5, Effect::Block).is_err());
     }
 
     #[test]

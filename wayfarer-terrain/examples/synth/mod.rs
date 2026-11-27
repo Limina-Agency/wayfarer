@@ -2,7 +2,7 @@
 //! with relief, steep bands, land cover, roads, paths and rivers, six layers of the kinds an
 //! incident collects, and a team overlay. Deterministic, so every machine builds the same one.
 
-use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem};
+use wayfarer_terrain::fuse::{Effect, HashedLayer, OverlayItem, Shape};
 use wayfarer_terrain::lattice::{BLOCK, BLOCK_POSTS, BlockId, Spacing};
 use wayfarer_terrain::layer::{
     FEAT_FALLEN, FEAT_WASHOUT, Feature, GridBlock, Kind, Layer, Manifest, NCLASS,
@@ -254,10 +254,12 @@ pub fn area(km2: f64) -> Area {
     for k in 0..8 {
         let (la, lo) = tick(rows * k / 8 + 10, cols * (7 - k) / 8 + 10);
         overlay.push(OverlayItem {
-            lat0: la,
-            lat1: la + 6 * SP,
-            lon0: lo,
-            lon1: lo + 6 * SP,
+            shape: Shape::Box {
+                lat0: la,
+                lat1: la + 6 * SP,
+                lon0: lo,
+                lon1: lo + 6 * SP,
+            },
             observed_at: T0 + k,
             effect: if k % 2 == 0 {
                 Effect::Block
