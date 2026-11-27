@@ -10053,10 +10053,12 @@ fn grid_terrain_pricer(fenced: bool) -> crate::portals::TerrainPricer {
 #[cfg(feature = "terrain")]
 fn with_terrain(
     pricer: &std::sync::Arc<crate::portals::TerrainPricer>,
+    max_candidates: Option<usize>,
 ) -> impl Fn(&mut LegRequest) + '_ {
     move |request: &mut LegRequest| {
         request.options.off_network = Some(crate::access::RouteOffNetworkOptions {
             pricer: Some(crate::access::AccessPricerHandle(pricer.clone())),
+            max_candidates,
             ..Default::default()
         });
     }
@@ -10097,17 +10099,12 @@ fn terrain_portals_match_the_reference() {
                     }
                     let context =
                         format!("fenced {fenced} {profile:?} {origin:?} -> {destination:?}");
-                    let actual = route(
-                        &compact,
-                        origin,
-                        destination,
-                        profile,
-                        with_terrain(&pricer),
-                    )
-                    .unwrap_or_else(|| panic!("{context}: no route"));
-                    let expected =
-                        route(&oracle, origin, destination, profile, with_terrain(&pricer))
-                            .unwrap_or_else(|| panic!("{context}: no oracle route"));
+                    // The straight-line default, so that endpoints cut.
+                    let cut = with_terrain(&pricer, Some(crate::access::ACCESS_DEFAULT_CANDIDATES));
+                    let actual = route(&compact, origin, destination, profile, &cut)
+                        .unwrap_or_else(|| panic!("{context}: no route"));
+                    let expected = route(&oracle, origin, destination, profile, &cut)
+                        .unwrap_or_else(|| panic!("{context}: no oracle route"));
                     for (left, right) in [
                         (expected.cost, actual.cost),
                         (expected.duration_s, actual.duration_s),
@@ -10180,13 +10177,15 @@ fn terrain_portals_match_the_reference() {
                             truncations += 1;
                         }
                     }
-                    // More candidates can only make the route cheaper.
-                    let all = route(&compact, origin, destination, profile, |request| {
-                        with_terrain(&pricer)(request);
-                        if let Some(options) = request.options.off_network.as_mut() {
-                            options.max_candidates = Some(crate::access::ACCESS_MAX_CANDIDATES);
-                        }
-                    })
+                    // More candidates can only make the route cheaper, and with a
+                    // pricer the default keeps them all.
+                    let all = route(
+                        &compact,
+                        origin,
+                        destination,
+                        profile,
+                        with_terrain(&pricer, None),
+                    )
                     .unwrap();
                     assert!(all.cost <= actual.cost + 1e-6, "{context}");
                     assert!(
@@ -10219,7 +10218,7 @@ fn terrain_portals_match_the_reference() {
             on_road,
             block_points()[3],
             MobilityProfile::OnFoot,
-            with_terrain(&pricer),
+            with_terrain(&pricer, None),
         )
         .unwrap();
         assert!(

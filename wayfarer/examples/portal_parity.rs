@@ -16,9 +16,11 @@
 //! an endpoint farther than the snap radius from every road is priced by the
 //! terrain. For walkers and cars it checks that engine and oracle agree on
 //! cost, duration and distance, that the totals are the road's plus the
-//! stretches, and, where an endpoint cut candidates, that a run with every
-//! candidate is never dearer: it reports how often the cut cost a cheaper
-//! route, against the gap between the best cut and the worst kept key.
+//! stretches, and, where an endpoint cut candidates (the compared runs keep
+//! 16, or `PORTAL_PARITY_CUT`), that a run at the priced default, which
+//! keeps every candidate, is never dearer and cuts none: it reports how often
+//! the cut cost a cheaper route, against the gap between the best cut and the
+//! worst kept key.
 //! Then an 8 × 8 matrix per profile against the oracle. It prints one JSON
 //! summary.
 
@@ -150,6 +152,15 @@ fn main() {
     let terrain_path = PathBuf::from(args.get(2).expect("terrain.wtr"));
     let dir = PathBuf::from(args.get(3).expect("work dir"));
     let pairs: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(60);
+    // The candidates each endpoint keeps in the compared runs: the
+    // straight-line default unless PORTAL_PARITY_CUT says otherwise, so that
+    // the run measures what a cut costs against the priced default (all).
+    let cut = Some(
+        std::env::var("PORTAL_PARITY_CUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(wayfarer::access::ACCESS_DEFAULT_CANDIDATES),
+    );
 
     let snapshot = compile(&pbf, &dir);
     let start = Instant::now();
@@ -209,7 +220,7 @@ fn main() {
                 skipped()
             } else {
                 engine
-                    .route_leg(request(origin, destination, profile, &handle, None))
+                    .route_leg(request(origin, destination, profile, &handle, cut))
                     .map_err(|failure| failure.error)
             };
             if std::env::var_os("PORTAL_PARITY_TRACE").is_some() {
@@ -218,7 +229,7 @@ fn main() {
             let expected = if side == "engine" {
                 skipped()
             } else {
-                oracle.route_leg(request(origin, destination, profile, &handle, None))
+                oracle.route_leg(request(origin, destination, profile, &handle, cut))
             };
             let (actual, expected) = match (actual, expected) {
                 (Ok(a), Ok(e)) => (a, e),
@@ -255,15 +266,17 @@ fn main() {
             });
             if truncated {
                 let all = engine
-                    .route_leg(request(
-                        origin,
-                        destination,
-                        profile,
-                        &handle,
-                        Some(wayfarer::access::ACCESS_MAX_CANDIDATES),
-                    ))
+                    .route_leg(request(origin, destination, profile, &handle, None))
                     .map_err(|failure| failure.error)
                     .expect("more candidates still route");
+                let kept_all = [&all.origin, &all.destination].iter().all(|end| {
+                    end.access
+                        .as_ref()
+                        .and_then(|access| access.priced.as_ref())
+                        .and_then(|priced| priced.pricing.as_ref())
+                        .is_none_or(|pricing| pricing.truncated.is_none())
+                });
+                assert!(kept_all, "{k}: the priced default still cut");
                 assert!(
                     all.cost <= actual.cost + 1e-6,
                     "{k}: more candidates cost more"

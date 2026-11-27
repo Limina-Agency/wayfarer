@@ -14,7 +14,8 @@
 //!    profile may leave the road there (see [`TerrainPricer::exit_allowed`]).
 //! 3. Each edge keeps the portal with the least key, the access time plus the
 //!    switch cost plus the rest of the edge, and the edges are ranked by that
-//!    key. The endpoint keeps the first `maxCandidates`.
+//!    key. The endpoint keeps the first `maxCandidates`, by default all of
+//!    them ([`crate::access::ACCESS_PRICED_DEFAULT_CANDIDATES`]).
 //!
 //! Each kept stretch reports its surface, its confidence and what the
 //! endpoint cut (`RouteAccessPricing`, on the leg's `offNetwork` summary).

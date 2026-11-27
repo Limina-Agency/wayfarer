@@ -53,6 +53,11 @@ pub const ACCESS_DEFAULT_RADIUS_VEHICLE_M: f64 = 250.0;
 pub const ACCESS_MAX_RADIUS_M: f64 = 10_000.0;
 /// Directed candidates per point by default (about 8 roads).
 pub const ACCESS_DEFAULT_CANDIDATES: usize = 16;
+/// Directed candidates per point when a pricer ranks them and the request sets
+/// no count: every one the correlator hands over. A cut by the pricer's key
+/// made 18 of 52 Tatra walker routes dearer (`examples/portal_parity`), and
+/// the extra candidates only add seeds to the road search.
+pub const ACCESS_PRICED_DEFAULT_CANDIDATES: usize = ACCESS_MAX_CANDIDATES;
 /// The most directed candidates per point a request may ask for.
 pub const ACCESS_MAX_CANDIDATES: usize = crate::limits::MAX_REQUEST_CANDIDATES;
 /// The fastest access pace a request may set (m/s; 180 km/h).
@@ -78,7 +83,8 @@ pub struct RouteOffNetworkOptions {
     #[serde(alias = "max_radius_m", skip_serializing_if = "Option::is_none")]
     pub max_radius_m: Option<f64>,
     /// Directed candidate edges per point, 1 to [`ACCESS_MAX_CANDIDATES`]
-    /// (default [`ACCESS_DEFAULT_CANDIDATES`]). It replaces
+    /// (default [`ACCESS_DEFAULT_CANDIDATES`], or
+    /// [`ACCESS_PRICED_DEFAULT_CANDIDATES`] with a pricer). It replaces
     /// `candidateLimit`.
     #[serde(alias = "max_candidates", skip_serializing_if = "Option::is_none")]
     pub max_candidates: Option<usize>,
@@ -199,7 +205,11 @@ impl RouteOffNetworkOptions {
             radius_m: radius_m.clamp(f64::MIN_POSITIVE, ACCESS_MAX_RADIUS_M),
             candidate_limit: self
                 .max_candidates
-                .unwrap_or(ACCESS_DEFAULT_CANDIDATES)
+                .unwrap_or(if self.pricer.is_some() {
+                    ACCESS_PRICED_DEFAULT_CANDIDATES
+                } else {
+                    ACCESS_DEFAULT_CANDIDATES
+                })
                 .clamp(1, ACCESS_MAX_CANDIDATES),
             pace_mps: self.pace_mps.unwrap_or(defaults.pace_mps),
             cost_factor: self.cost_factor.unwrap_or(defaults.cost_factor),

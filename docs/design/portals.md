@@ -34,8 +34,9 @@ generalises.
    direction of travel). Every directed road edge within the bound is walked
    post by post along its shape. Its portal is the reached post with a legal
    exit that minimises access plus the edge's remainder. Candidates are ranked
-   by that key, and the best `maxCandidates` are kept. The result reports how
-   many were cut (truncation, section 4).
+   by that key, and the best `maxCandidates` are kept: with a pricer and no
+   `maxCandidates` on the request, all of them (up to 64). The result reports
+   how many were cut (truncation, section 4).
 4. **Exit legality and switch cost live in portal generation**, shared with
    the oracle (section 3.3). No exit is allowed onto motorways, motorroads,
    bridges, tunnels or layers other than 0. None is allowed across a barrier
@@ -145,7 +146,11 @@ pricer shares the grid the incident built once per surface.
 
 With a pricer on the request, the correlator finds up to 64 candidates within
 the radius (more than `maxCandidates`) and hands them to the pricer, which
-returns them best first. The endpoint keeps the first `maxCandidates`. An
+returns them best first. The endpoint keeps the first `maxCandidates`, which
+defaults to all of them with a pricer (`ACCESS_PRICED_DEFAULT_CANDIDATES`).
+On the Tatra run a cut to 16 made 18 of 52 walker routes dearer, by up to
+444 s, while the median gap between the best cut key and the worst kept key
+was 5 s: the key ranks portals, it doesn't predict the route. An
 endpoint keeps X1's straight-line candidates, unpriced, when:
 
 - its profile has no surface profile;
