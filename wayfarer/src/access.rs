@@ -300,6 +300,66 @@ pub struct PricedAccess {
     /// from the snap point to the requested point for a destination. Empty
     /// draws a straight line.
     pub path: Vec<GeoPoint>,
+    /// What the pricer reports about the stretch, carried to the result's
+    /// [`RouteAccessStretch::pricing`].
+    pub pricing: Option<RouteAccessPricing>,
+}
+
+/// What the pricer of a stretch reports about it (portals:
+/// `docs/design/portals.md`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RouteAccessPricing {
+    /// Who priced it: `terrain` for a least-cost search over an incident
+    /// surface.
+    pub source: String,
+    /// The surface's content hash (hex), for a terrain stretch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_hash: Option<String>,
+    /// How far to trust a terrain stretch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<RouteAccessConfidence>,
+    /// The candidates the pricer ranked behind the ones the endpoint kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<RouteAccessTruncation>,
+}
+
+/// How far to trust a terrain stretch, over the posts its path crosses
+/// (`docs/design/incident-surface.md` section 7).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RouteAccessConfidence {
+    /// Length-weighted mean and least certainty of the fused land cover
+    /// (1/255).
+    pub mean_certainty: u8,
+    pub min_certainty: u8,
+    /// Share of the length on posts a layer decided, and the team, per mille.
+    pub layer_permille: u32,
+    pub team_permille: u32,
+    /// Highest closure risk on the path (1/255) and the share of its length
+    /// with any risk, per mille.
+    pub max_risk: u8,
+    pub risky_permille: u32,
+    /// The path touches the edge of the surface: a larger area might give a
+    /// faster stretch.
+    pub at_edge: bool,
+}
+
+/// Candidates a pricer ranked but the endpoint did not keep. The search over
+/// the kept candidates is exact; a cut candidate could still have given a
+/// cheaper route if its key, less the worst kept key, is less than the road
+/// cost it would save.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RouteAccessTruncation {
+    pub cut: usize,
+    /// The best cut candidate's key and the worst kept one's, in seconds:
+    /// access, switch and the rest of the edge.
+    pub best_cut_key_s: f64,
+    pub worst_kept_key_s: f64,
 }
 
 impl PricedAccess {
@@ -370,6 +430,9 @@ pub struct RouteAccessStretch {
     /// The pricing it was costed with.
     pub pace_mps: f64,
     pub cost_factor: f64,
+    /// What a pricer reported, for a priced stretch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<RouteAccessPricing>,
 }
 
 /// The costed access stretches of a route leg (`LegResult::off_network`),
@@ -396,6 +459,10 @@ fn stretch(candidate: &CorrelatedLocation, access: &CandidateAccess) -> RouteAcc
         cost: totals.cost,
         pace_mps: access.pace_mps,
         cost_factor: access.cost_factor,
+        pricing: access
+            .priced
+            .as_ref()
+            .and_then(|priced| priced.pricing.clone()),
     }
 }
 

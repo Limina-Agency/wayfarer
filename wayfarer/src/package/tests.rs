@@ -9872,6 +9872,7 @@ impl crate::access::AccessPricer for TestPricer {
                     duration_s: d / 0.9 + 5.0,
                     distance_m: 1.3 * d,
                     path,
+                    pricing: None,
                 }));
                 candidate
             })
@@ -10075,9 +10076,11 @@ fn terrain_portals_match_the_reference() {
     let (oracle, compact) = engines(&reader);
     let on_fenced_road = |point: GeoPoint| (point.lng - 0.0054).abs() < 1e-9;
     let mut fenced_road_used = 0;
+    let mut truncations = 0;
     let mut compared = 0;
     for fenced in [false, true] {
         let pricer = std::sync::Arc::new(grid_terrain_pricer(fenced));
+        let surface_hash = wayfarer_terrain::hex(&pricer.surface().content_hash());
         for profile in [MobilityProfile::OnFoot, MobilityProfile::Wheeled] {
             let switch_s = if profile == MobilityProfile::OnFoot {
                 pricer.walker.switch_cost_s
@@ -10159,6 +10162,44 @@ fn terrain_portals_match_the_reference() {
                             <= 1e-6 * actual.distance_m,
                         "{context}"
                     );
+                    // Each stretch says it is the terrain's, on which surface,
+                    // how far to trust it and what the endpoint cut.
+                    for stretch in [&start, &end] {
+                        let pricing = stretch.pricing.as_ref().expect("terrain pricing");
+                        assert_eq!(pricing.source, "terrain", "{context}");
+                        assert_eq!(pricing.surface_hash.as_ref(), Some(&surface_hash));
+                        let confidence = pricing.confidence.as_ref().unwrap();
+                        assert!(!confidence.at_edge, "{context}");
+                        assert_eq!(confidence.max_risk, 0, "{context}");
+                        if let Some(truncated) = &pricing.truncated {
+                            assert!(truncated.cut > 0, "{context}");
+                            assert!(
+                                truncated.best_cut_key_s >= truncated.worst_kept_key_s,
+                                "{context}"
+                            );
+                            truncations += 1;
+                        }
+                    }
+                    // More candidates can only make the route cheaper.
+                    let all = route(&compact, origin, destination, profile, |request| {
+                        with_terrain(&pricer)(request);
+                        if let Some(options) = request.options.off_network.as_mut() {
+                            options.max_candidates = Some(crate::access::ACCESS_MAX_CANDIDATES);
+                        }
+                    })
+                    .unwrap();
+                    assert!(all.cost <= actual.cost + 1e-6, "{context}");
+                    assert!(
+                        all.off_network
+                            .unwrap()
+                            .origin
+                            .unwrap()
+                            .pricing
+                            .unwrap()
+                            .truncated
+                            .is_none(),
+                        "{context}"
+                    );
                     assert_eq!(actual.geometry.first(), Some(&origin), "{context}");
                     assert_eq!(actual.geometry.last(), Some(&destination), "{context}");
                 }
@@ -10199,6 +10240,8 @@ fn terrain_portals_match_the_reference() {
     assert!(compared >= 120, "{compared}");
     // Without the fence some routes leave or join the road at 0.0054° E.
     assert!(fenced_road_used > 0);
+    // The walker's 500 m radius holds more than 16 directed edges.
+    assert!(truncations > 0);
 }
 
 /// Every candidate within the radius pays its whole stretch, so the join may

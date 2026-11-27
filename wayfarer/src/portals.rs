@@ -16,6 +16,9 @@
 //!    switch cost plus the rest of the edge, and the edges are ranked by that
 //!    key. The endpoint keeps the first `maxCandidates`.
 //!
+//! Each kept stretch reports its surface, its confidence and what the
+//! endpoint cut (`RouteAccessPricing`, on the leg's `offNetwork` summary).
+//!
 //! The searches seed each kept candidate with its priced access, so routes,
 //! matrices, isochrones and trips are exact over the candidate set, as X1's
 //! are. An endpoint within the snap radius of a road it may use, or outside
@@ -25,13 +28,16 @@ use std::sync::{Arc, Mutex};
 
 use wayfarer_package::{GeoPoint, MobilityProfile, RoadType, directed_geometry, haversine_m};
 use wayfarer_terrain::lattice::{BlockId, TICKS_PER_DEG, div_round_i64, ticks_of_deg};
-use wayfarer_terrain::search::{Graph, Grid, Search, Toward, path, path_to};
+use wayfarer_terrain::search::{Graph, Grid, Search, Toward, path, path_to, route_conf};
 use wayfarer_terrain::surface::Surface;
 use wayfarer_terrain::terrain::{STEEP_NONE, Terrain};
 use wayfarer_terrain::{fuse, lines};
 
 use crate::CorrelatedLocation;
-use crate::access::{AccessPricer, AccessQuery, AccessRole, CandidateAccess, PricedAccess};
+use crate::access::{
+    AccessPricer, AccessQuery, AccessRole, CandidateAccess, PricedAccess, RouteAccessConfidence,
+    RouteAccessPricing, RouteAccessTruncation,
+};
 use crate::graph_view::GraphViewEdge;
 
 /// Line bits no exit may cross on its portal post: rivers, streams, rails,
@@ -114,6 +120,14 @@ impl std::fmt::Debug for TerrainPricer {
             .field("force", &self.force)
             .finish()
     }
+}
+
+/// A stretch's drawn line, its length on the lattice (metres) and its steps
+/// (from cell, move).
+struct Stretch {
+    line: Vec<GeoPoint>,
+    metres: f64,
+    steps: Vec<(usize, usize)>,
 }
 
 /// What a portal on one edge costs and where it is.
@@ -317,7 +331,7 @@ impl TerrainPricer {
         role: AccessRole,
         at: usize,
         portal: &Portal,
-    ) -> Option<(Vec<GeoPoint>, f64)> {
+    ) -> Option<Stretch> {
         let steps = match role {
             AccessRole::Origin => path(graph, search, at, portal.cell)?,
             AccessRole::Destination => path_to(graph, search, portal.cell, at)?,
@@ -337,7 +351,11 @@ impl TerrainPricer {
             AccessRole::Origin => line.push(portal.snapped),
             AccessRole::Destination => line.insert(0, portal.snapped),
         }
-        Some((line, metres))
+        Some(Stretch {
+            line,
+            metres,
+            steps,
+        })
     }
 
     fn take_search(&self) -> Search {
@@ -399,6 +417,7 @@ impl AccessPricer for TerrainPricer {
         };
         let limit_us = (class.max_access_s * 1e6).round() as u64;
         search.run_field(&graph, at, toward, limit_us);
+        let surface_hash = wayfarer_terrain::hex(&self.surface.content_hash());
         let mut priced = Vec::new();
         for candidate in candidates {
             let Some(edge) = view.edge_by_id(candidate.edge_id) else {
@@ -411,9 +430,15 @@ impl AccessPricer for TerrainPricer {
             else {
                 continue;
             };
-            let Some((line, metres)) = self.stretch_path(&graph, &search, role, at, &portal) else {
+            let Some(Stretch {
+                line,
+                metres,
+                steps,
+            }) = self.stretch_path(&graph, &search, role, at, &portal)
+            else {
                 continue;
             };
+            let conf = route_conf(&graph, prof, &steps, portal.access_us);
             let ends = haversine_m(point, self.point_of(at))
                 + haversine_m(self.point_of(portal.cell), portal.snapped);
             let duration_s = portal.access_us as f64 / 1e6 + class.switch_cost_s;
@@ -430,13 +455,48 @@ impl AccessPricer for TerrainPricer {
                     duration_s,
                     distance_m: metres + ends,
                     path: line,
+                    pricing: Some(RouteAccessPricing {
+                        source: "terrain".into(),
+                        surface_hash: Some(surface_hash.clone()),
+                        confidence: Some(RouteAccessConfidence {
+                            mean_certainty: conf.mean_cert,
+                            min_certainty: conf.min_cert,
+                            layer_permille: conf.layer_permille,
+                            team_permille: conf.team_permille,
+                            max_risk: conf.max_risk,
+                            risky_permille: conf.risky_permille,
+                            at_edge: conf.at_edge,
+                        }),
+                        truncated: None,
+                    }),
                 })),
             });
             priced.push((portal.key, location));
         }
         self.give_search(search);
         priced.sort_by_key(|(key, location)| (*key, location.edge_id));
-        priced.into_iter().map(|(_, location)| location).collect()
+        let kept = policy.candidate_limit.min(priced.len());
+        let truncated = (kept < priced.len() && kept > 0).then(|| RouteAccessTruncation {
+            cut: priced.len() - kept,
+            best_cut_key_s: priced[kept].0 as f64 / 1e6,
+            worst_kept_key_s: priced[kept - 1].0 as f64 / 1e6,
+        });
+        priced.truncate(kept);
+        priced
+            .into_iter()
+            .map(|(_, mut location)| {
+                if let Some(truncated) = &truncated
+                    && let Some(access) = location.access.as_mut()
+                    && let Some(priced) = access.priced.as_mut()
+                {
+                    let priced = Arc::make_mut(priced);
+                    if let Some(pricing) = priced.pricing.as_mut() {
+                        pricing.truncated = Some(truncated.clone());
+                    }
+                }
+                location
+            })
+            .collect()
     }
 }
 
